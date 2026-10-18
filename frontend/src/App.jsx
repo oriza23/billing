@@ -5,6 +5,7 @@ import HotspotProfil from './HotspotProfil.jsx'
 import HotspotStok from './HotspotStok.jsx'
 import HotspotTerjual from './HotspotTerjual.jsx'
 import Login from './Login.jsx'
+import PrintVoucher from './PrintVoucher.jsx'
 import ManajemenAdmin from './ManajemenAdmin.jsx'
 import PppoeOnline from './PppoeOnline.jsx'
 import PppoePelanggan from './PppoePelanggan.jsx'
@@ -15,6 +16,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Login />} />
+        <Route path="/print" element={<PrintVoucher />} />
         <Route path="/dashboard" element={<Dashboard />}>
           <Route index element={<DashboardHome />} />
           <Route path="pppoe/profil" element={<PppoeProfil />} />

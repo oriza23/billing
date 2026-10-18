@@ -194,7 +194,27 @@ function HotspotStok() {
 
   function handlePrintSelected() {
     setIsMenuOpen(false)
-    showUnderDevelopment()
+    const dataPrint = vouchers
+      .filter((item) => selectedVouchers.includes(item.username))
+      .map((item) => {
+        const profil = daftarProfil.find((profile) => profile.nama_profile === item.profile)
+        return {
+          ...item,
+          masa_aktif: profil?.masa_aktif || '',
+          masa_aktif_satuan: profil?.masa_aktif_satuan || '',
+        }
+      })
+
+    if (dataPrint.length === 0) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Pilih minimal satu voucher',
+      })
+      return
+    }
+
+    localStorage.setItem('print_vouchers', JSON.stringify(dataPrint))
+    window.open('/print', '_blank')
   }
 
   async function handleDeleteSelected() {

@@ -5,6 +5,15 @@ const pool = require('../../database');
 const router = express.Router();
 
 const MASA_AKTIF_SATUAN = ['JAM', 'HARI', 'BULAN'];
+const MASA_AKTIF_DETIK = {
+  JAM: 3600,
+  HARI: 86400,
+  BULAN: 2592000,
+};
+
+function masaAktifKeDetik(jumlah, satuan) {
+  return jumlah * MASA_AKTIF_DETIK[satuan];
+}
 
 function readText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -49,6 +58,7 @@ router.post('/profil', async (req, res) => {
   }
 
   const connection = await pool.getConnection();
+  let committed = false;
 
   try {
     await connection.beginTransaction();
@@ -67,34 +77,48 @@ router.post('/profil', async (req, res) => {
       ],
     );
     await connection.execute('DELETE FROM radgroupreply WHERE groupname = ?', [mikrotikGroup]);
+    await connection.commit();
+    committed = true;
+
+    const totalDetik = String(masaAktifKeDetik(masaAktif, masaAktifSatuan));
+    const radiusInserts = [
+      pool.execute(
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Port-Limit', ':=', ?)",
+        [mikrotikGroup, String(shared)],
+      ),
+      pool.execute(
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Max-All-Session', ':=', ?)",
+        [mikrotikGroup, totalDetik],
+      ),
+    ];
 
     if (rateLimit) {
-      await connection.execute(
+      radiusInserts.push(pool.execute(
         "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Mikrotik-Rate-Limit', ':=', ?)",
         [mikrotikGroup, rateLimit],
-      );
+      ));
     }
-
-    await connection.execute(
-      "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Port-Limit', ':=', ?)",
-      [mikrotikGroup, String(shared)],
-    );
 
     if (addressList) {
-      await connection.execute(
+      radiusInserts.push(pool.execute(
         "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Mikrotik-Address-List', ':=', ?)",
         [mikrotikGroup, addressList],
-      );
+      ));
     }
 
-    await connection.commit();
+    await Promise.all(radiusInserts);
 
     return res.json({
       success: true,
       message: 'Profil berhasil disimpan',
     });
   } catch (error) {
-    await connection.rollback();
+    if (!committed) {
+      await connection.rollback();
+    } else {
+      await pool.execute('DELETE FROM radgroupreply WHERE groupname = ?', [mikrotikGroup]);
+      await pool.execute('DELETE FROM hotspot_profiles WHERE mikrotik_group = ?', [mikrotikGroup]);
+    }
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({
         success: false,
@@ -162,26 +186,52 @@ router.post('/profil/delete-massal', async (req, res) => {
 router.put('/profil/:groupname', async (req, res) => {
   const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
   const rateLimit = typeof req.body?.rate_limit === 'string' ? req.body.rate_limit.trim() : '';
+  const masaAktif = readInteger(req.body?.masa_aktif);
+  const masaAktifSatuan = readText(req.body?.masa_aktif_satuan).toUpperCase();
 
-  if (!groupname || !rateLimit) {
+  if (!groupname || !rateLimit
+    || !Number.isInteger(masaAktif) || masaAktif < 1
+    || !MASA_AKTIF_SATUAN.includes(masaAktifSatuan)) {
     return res.status(400).json({
       success: false,
-      message: 'Nama profil dan limit kecepatan wajib diisi',
+      message: 'Data profil belum lengkap atau tidak valid',
     });
   }
 
+  const totalDetik = String(masaAktifKeDetik(masaAktif, masaAktifSatuan));
+
   try {
-    const [result] = await pool.execute(
-      "UPDATE radgroupreply SET value = ? WHERE groupname = ? AND attribute = 'Mikrotik-Rate-Limit'",
-      [rateLimit, groupname],
+    const [profiles] = await pool.execute(
+      'SELECT id FROM hotspot_profiles WHERE mikrotik_group = ? LIMIT 1',
+      [groupname],
     );
 
-    if (result.affectedRows === 0) {
+    if (profiles.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Profil tidak ditemukan',
       });
     }
+
+    await pool.execute(
+      "DELETE FROM radgroupreply WHERE groupname = ? AND attribute = 'Max-All-Session'",
+      [groupname],
+    );
+
+    await Promise.all([
+      pool.execute(
+        'UPDATE hotspot_profiles SET masa_aktif = ?, masa_aktif_satuan = ?, rate_limit = ? WHERE mikrotik_group = ?',
+        [masaAktif, masaAktifSatuan, rateLimit, groupname],
+      ),
+      pool.execute(
+        "UPDATE radgroupreply SET value = ? WHERE groupname = ? AND attribute = 'Mikrotik-Rate-Limit'",
+        [rateLimit, groupname],
+      ),
+      pool.execute(
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Max-All-Session', ':=', ?)",
+        [groupname, totalDetik],
+      ),
+    ]);
 
     return res.json({
       success: true,
@@ -367,10 +417,6 @@ async function insertVoucher(voucher, record) {
     await connection.execute(
       "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
       [voucher.username, voucher.password],
-    );
-    await connection.execute(
-      "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Creation-Date', ':=', NOW())",
-      [voucher.username],
     );
     if (record.nasIp) {
       await connection.execute(

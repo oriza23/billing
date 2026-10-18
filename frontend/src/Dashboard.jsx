@@ -133,6 +133,9 @@ function Dashboard() {
             open={openMenus.hotspot}
             onToggle={() => toggleMenu('hotspot')}
           />
+          <NavLink to="/router" className="sidebar-link">
+            Router
+          </NavLink>
           <MenuGroup
             label="Sistem"
             items={sistemMenu}

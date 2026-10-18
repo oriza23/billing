@@ -10,6 +10,7 @@ import ManajemenAdmin from './ManajemenAdmin.jsx'
 import PppoeOnline from './PppoeOnline.jsx'
 import PppoePelanggan from './PppoePelanggan.jsx'
 import PppoeProfil from './PppoeProfil.jsx'
+import RouterMaster from './RouterMaster.jsx'
 
 function App() {
   return (
@@ -26,6 +27,9 @@ function App() {
           <Route path="hotspot/stok" element={<HotspotStok />} />
           <Route path="hotspot/terjual" element={<HotspotTerjual />} />
           <Route path="hotspot/online" element={<HotspotOnline />} />
+        </Route>
+        <Route path="/router" element={<Dashboard />}>
+          <Route index element={<RouterMaster />} />
         </Route>
         <Route path="/manajemen-admin" element={<Dashboard />}>
           <Route index element={<ManajemenAdmin />} />

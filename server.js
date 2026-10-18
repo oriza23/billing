@@ -10,6 +10,9 @@ app.use(express.json());
 app.use('/api/pppoe', require('./backend/routes/pppoe'));
 app.use('/api/hotspot', require('./backend/routes/hotspot'));
 app.use('/api/admins', require('./backend/routes/admins'));
+app.use('/api/routers', require('./backend/routes/routers'));
+const outletsRouter = require('./backend/routes/outlets');
+app.use('/api/outlets', outletsRouter);
 
 app.post('/api/login', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
@@ -78,10 +81,25 @@ async function ensureHotspotVouchersTable() {
   );
 }
 
+async function ensureRoutersTable() {
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS routers (id INT AUTO_INCREMENT PRIMARY KEY, nama_router VARCHAR(100), ip_address VARCHAR(50), secret VARCHAR(100), deskripsi TEXT, status VARCHAR(20) DEFAULT 'Aktif', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+  );
+}
+
+async function ensureOutletsTable() {
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS outlets (id INT AUTO_INCREMENT PRIMARY KEY, nama_outlet VARCHAR(100) UNIQUE, pemilik VARCHAR(100), phone VARCHAR(50), mitra VARCHAR(50) DEFAULT 'RANIAH', alamat TEXT, status VARCHAR(20) DEFAULT 'Aktif', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+  );
+}
+
 async function start() {
   await ensureAdminTable();
   await ensureHotspotProfilesTable();
   await ensureHotspotVouchersTable();
+  await ensureRoutersTable();
+  await ensureOutletsTable();
+  await outletsRouter.ensureTglGabungColumn();
   app.listen(PORT, () => {
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });

@@ -1,6 +1,9 @@
 const express = require('express');
 const { exec } = require('child_process');
+const { promisify } = require('util');
 const pool = require('../../database');
+
+const execAsync = promisify(exec);
 
 const router = express.Router();
 
@@ -284,41 +287,74 @@ router.get('/online', async (req, res) => {
   }
 });
 
-router.post('/disconnect', (req, res) => {
+function isIpv4(value) {
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(value)) {
+    return false;
+  }
+  return value.split('.').every((octet) => Number(octet) <= 255);
+}
+
+router.post('/disconnect', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-  const ipAddress = typeof req.body?.ip_address === 'string' ? req.body.ip_address.trim() : '';
+  const framedIp = typeof req.body?.ip_address === 'string' ? req.body.ip_address.trim() : '';
 
-  if (!/^[A-Za-z0-9._@-]{1,64}$/.test(username) || !/^(\d{1,3}\.){3}\d{1,3}$/.test(ipAddress)) {
+  if (!/^[A-Za-z0-9._@-]{1,64}$/.test(username) || !isIpv4(framedIp)) {
     return res.status(400).json({
       success: false,
       message: 'Username atau IP address tidak valid',
     });
   }
 
-  const octets = ipAddress.split('.').map(Number);
-  if (octets.some((octet) => octet > 255)) {
-    return res.status(400).json({
-      success: false,
-      message: 'Username atau IP address tidak valid',
-    });
-  }
+  let secret = '';
 
-  const command = `echo "Framed-IP-Address='${ipAddress}'" | radclient -x 192.168.223.250:3799 disconnect RaniahRadius123!`;
+  try {
+    const [routers] = await pool.execute(
+      "SELECT ip_address, secret FROM routers WHERE status = 'Aktif' LIMIT 1",
+    );
 
-  exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
-    if (error) {
-      return res.status(500).json({
+    if (routers.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'Gagal memutus koneksi pelanggan',
-        detail: (stderr || stdout || '').replace(/RaniahRadius123!/g, '').trim(),
+        message: 'Router aktif tidak ditemukan di database',
       });
     }
+
+    const ip_address = routers[0].ip_address;
+    secret = typeof routers[0].secret === 'string' ? routers[0].secret : '';
+    if (!isIpv4(String(ip_address || '')) || !secret || /[\s"'\\$`;&|<>()]/.test(secret)) {
+      return res.status(500).json({
+        success: false,
+        message: 'Data router aktif tidak valid',
+      });
+    }
+
+    const command = `echo "Framed-IP-Address='${framedIp}'" | radclient -x ${ip_address}:3799 disconnect ${secret}`;
+    await execAsync(command, { timeout: 10000 });
 
     return res.json({
       success: true,
       message: 'Koneksi pelanggan berhasil diputus',
     });
-  });
+  } catch (error) {
+    const detail = `${error.stderr || ''}\n${error.stdout || ''}`
+      .split(secret)
+      .join('')
+      .trim();
+
+    if (error.code === 'ECONNREFUSED' || error.fatal) {
+      return res.status(500).json({
+        success: false,
+        message: 'Gagal memutus koneksi pelanggan',
+        error: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memutus koneksi pelanggan',
+      detail,
+    });
+  }
 });
 
 module.exports = router;

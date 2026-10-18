@@ -1,0 +1,36 @@
+.router-page .profil-table {
+  min-width: 860px;
+}
+
+.router-page .profil-table-wrap {
+  overflow-x: auto;
+}
+
+.password-cell {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pwd-revealed {
+  display: none;
+}
+
+.password-cell:hover .pwd-revealed {
+  display: inline;
+}
+
+.password-cell:hover .pwd-masked {
+  display: none;
+}
+
+.router-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 12px;
+  font-weight: 750;
+}

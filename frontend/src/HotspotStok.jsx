@@ -4,10 +4,12 @@ import Swal from 'sweetalert2'
 import {
   Banknote,
   Calendar,
+  Check,
   FileClock,
   HandCoins,
   Menu,
   Package,
+  Plus,
   Printer,
   Search,
   Settings,
@@ -16,6 +18,7 @@ import {
   Trash,
   UserPlus,
   Wallet,
+  X,
 } from 'lucide-react'
 import './HotspotStok.css'
 
@@ -34,6 +37,32 @@ function formatTanggal(value) {
   }
   const pad = (part) => String(part).padStart(2, '0')
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatTanggalGabung(value) {
+  if (!value) {
+    return '-'
+  }
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-')
+    return `${day}/${month}/${year}`
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return String(value)
+  }
+  const pad = (part) => String(part).padStart(2, '0')
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`
+}
+
+function emptyFormOutlet() {
+  return {
+    nama_outlet: '',
+    pemilik: '',
+    phone: '',
+    alamat: '',
+    tgl_gabung: new Date().toISOString().split('T')[0],
+  }
 }
 
 function sumColumn(rows, key) {
@@ -58,6 +87,10 @@ const toolbar = [
 
 function HotspotStok() {
   const [daftarProfil, setDaftarProfil] = useState([])
+  const [daftarRouter, setDaftarRouter] = useState([])
+  const [daftarOutletAktif, setDaftarOutletAktif] = useState([])
+  const [selectedOutlet, setSelectedOutlet] = useState('')
+  const [selectedRouter, setSelectedRouter] = useState('ALL ROUTER')
   const [vouchers, setVouchers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -71,6 +104,16 @@ function HotspotStok() {
   const [selectedVouchers, setSelectedVouchers] = useState([])
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isModalBuatVcOpen, setIsModalBuatVcOpen] = useState(false)
+  const [isModalOutletOpen, setIsModalOutletOpen] = useState(false)
+  const [daftarOutlet, setDaftarOutlet] = useState([])
+  const [isOutletMenuOpen, setIsOutletMenuOpen] = useState(false)
+  const [searchOutlet, setSearchOutlet] = useState('')
+  const [isModalTambahOutletOpen, setIsModalTambahOutletOpen] = useState(false)
+  const [formOutlet, setFormOutlet] = useState(emptyFormOutlet)
+  const [outletPage, setOutletPage] = useState(1)
+  const [outletPerPage, setOutletPerPage] = useState(10)
+  const [selectedOutlets, setSelectedOutlets] = useState([])
+  const [outletLoading, setOutletLoading] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(10)
@@ -86,18 +129,21 @@ function HotspotStok() {
 
     async function loadData() {
       try {
-        const [profilResponse, voucherResponse] = await Promise.all([
+        const [profilResponse, voucherResponse, outletResponse] = await Promise.all([
           axios.get('http://192.168.69.70:5000/api/hotspot/profil'),
           axios.get('http://192.168.69.70:5000/api/hotspot/voucher'),
+          axios.get('http://192.168.69.70:5000/api/outlets').catch(() => ({ data: [] })),
         ])
         if (ignore) {
           return
         }
 
         const profiles = Array.isArray(profilResponse.data) ? profilResponse.data : []
+        const outlets = Array.isArray(outletResponse.data) ? outletResponse.data : []
         setDaftarProfil(profiles)
         setMikrotikGroup((current) => current || profiles[0]?.mikrotik_group || '')
         setVouchers(Array.isArray(voucherResponse.data) ? voucherResponse.data : [])
+        setDaftarOutletAktif(outlets.filter((item) => item.status === 'Aktif'))
         setError('')
       } catch {
         if (!ignore) {
@@ -111,6 +157,29 @@ function HotspotStok() {
     }
 
     loadData()
+
+    return () => {
+      ignore = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let ignore = false
+
+    async function loadRouters() {
+      try {
+        const response = await axios.get('http://192.168.69.70:5000/api/routers')
+        if (!ignore) {
+          setDaftarRouter(Array.isArray(response.data) ? response.data : [])
+        }
+      } catch {
+        if (!ignore) {
+          setDaftarRouter([])
+        }
+      }
+    }
+
+    loadRouters()
 
     return () => {
       ignore = true
@@ -141,6 +210,53 @@ function HotspotStok() {
     document.addEventListener('mousedown', closeMenu)
     return () => document.removeEventListener('mousedown', closeMenu)
   }, [isMenuOpen])
+
+  useEffect(() => {
+    if (!isModalOutletOpen) {
+      return undefined
+    }
+
+    let ignore = false
+
+    async function loadOutlets() {
+      setOutletLoading(true)
+      try {
+        const response = await axios.get('http://192.168.69.70:5000/api/outlets')
+        if (!ignore) {
+          setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
+        }
+      } catch {
+        if (!ignore) {
+          setDaftarOutlet([])
+        }
+      } finally {
+        if (!ignore) {
+          setOutletLoading(false)
+        }
+      }
+    }
+
+    loadOutlets()
+
+    return () => {
+      ignore = true
+    }
+  }, [isModalOutletOpen])
+
+  useEffect(() => {
+    if (!isOutletMenuOpen) {
+      return undefined
+    }
+
+    function closeOutletMenu(event) {
+      if (!event.target.closest('.outlet-menu')) {
+        setIsOutletMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', closeOutletMenu)
+    return () => document.removeEventListener('mousedown', closeOutletMenu)
+  }, [isOutletMenuOpen])
 
   const searchLower = searchTerm.toLowerCase()
   const filteredVouchers = vouchers.filter((voucher) => (
@@ -270,12 +386,12 @@ function HotspotStok() {
 
     const adminName = localStorage.getItem('admin_user') || 'System'
     const payload = {
-      router: 'ALL ROUTER',
+      router: selectedRouter,
       server: 'ALL SERVER',
       jenis_voucher: jenisVoucher,
       kode_kombinasi: kodeKombinasi,
       prefix: prefix.trim(),
-      outlet: '-Pilih-',
+      outlet: selectedOutlet.trim() || 'PUSAT',
       mikrotik_group: mikrotikGroup,
       admin: adminName,
       mitra: '',
@@ -342,6 +458,158 @@ function HotspotStok() {
     }
     return { ...card, value: formatRupiah(totalHarga) }
   })
+  const searchOutletLower = searchOutlet.toLowerCase()
+  const filteredOutlets = daftarOutlet.filter((item) => (
+    (item.nama_outlet || '').toLowerCase().includes(searchOutletLower)
+    || (item.pemilik || '').toLowerCase().includes(searchOutletLower)
+    || (item.phone || '').toLowerCase().includes(searchOutletLower)
+    || (item.alamat || '').toLowerCase().includes(searchOutletLower)
+  ))
+  const outletTotal = filteredOutlets.length
+  const outletTotalPages = Math.max(1, Math.ceil(outletTotal / outletPerPage))
+  const outletSafePage = Math.min(outletPage, outletTotalPages)
+  const outletLastIndex = outletSafePage * outletPerPage
+  const outletFirstIndex = outletLastIndex - outletPerPage
+  const outletItems = filteredOutlets.slice(outletFirstIndex, outletLastIndex)
+  const outletPageNumbers = Array.from({ length: outletTotalPages }, (_, index) => index + 1)
+  const allOutletsSelected = outletItems.length > 0
+    && outletItems.every((item) => selectedOutlets.includes(item.id))
+
+  function toggleOutlet(id) {
+    setSelectedOutlets((current) => (
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    ))
+  }
+
+  function toggleAllOutlets() {
+    const visibleIds = outletItems.map((item) => item.id)
+    if (visibleIds.length === 0) {
+      return
+    }
+    if (visibleIds.every((id) => selectedOutlets.includes(id))) {
+      setSelectedOutlets((current) => current.filter((id) => !visibleIds.includes(id)))
+      return
+    }
+    setSelectedOutlets((current) => [...new Set([...current, ...visibleIds])])
+  }
+
+  function closeOutletModal() {
+    setIsModalOutletOpen(false)
+    setIsOutletMenuOpen(false)
+    setIsModalTambahOutletOpen(false)
+  }
+
+  function openTambahOutlet() {
+    setFormOutlet(emptyFormOutlet())
+    setIsModalTambahOutletOpen(true)
+  }
+
+  function closeTambahOutlet() {
+    setIsModalTambahOutletOpen(false)
+    setFormOutlet(emptyFormOutlet())
+  }
+
+  function updateFormOutlet(event) {
+    const { name, value } = event.target
+    setFormOutlet((current) => ({ ...current, [name]: value }))
+  }
+
+  async function fetchOutlets() {
+    const response = await axios.get('http://192.168.69.70:5000/api/outlets')
+    setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
+  }
+
+  async function handleAksiOutletMassal(aksi) {
+    if (selectedOutlets.length === 0) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Pilih minimal satu outlet',
+      })
+      return
+    }
+
+    const isDelete = aksi === 'Hapus Terpilih'
+    const status = aksi === 'Set Aktif' ? 'Aktif' : 'Tidak Aktif'
+    const result = await Swal.fire({
+      title: isDelete
+        ? 'Yakin menghapus data outlet secara permanen?'
+        : `Set outlet terpilih menjadi ${status}?`,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonText: isDelete ? 'Ya, Hapus!' : 'Ya, Simpan!',
+      cancelButtonText: 'Batal',
+      confirmButtonColor: isDelete ? '#e11d48' : '#059669',
+    })
+    if (!result.isConfirmed) {
+      return
+    }
+
+    try {
+      if (isDelete) {
+        await axios.post('http://192.168.69.70:5000/api/outlets/delete-massal', {
+          ids: selectedOutlets,
+        })
+      } else {
+        await axios.post('http://192.168.69.70:5000/api/outlets/set-status-massal', {
+          ids: selectedOutlets,
+          status,
+        })
+      }
+      setIsOutletMenuOpen(false)
+      setSelectedOutlets([])
+      await fetchOutlets()
+      notifySuccess(isDelete ? 'Outlet terpilih berhasil dihapus' : 'Status outlet berhasil diperbarui')
+    } catch (requestError) {
+      Swal.fire({
+        icon: 'error',
+        title: 'Gagal',
+        text: requestError.response?.data?.message || 'Gagal memproses outlet terpilih.',
+      })
+    }
+  }
+
+  async function handleSaveOutlet(event) {
+    event.preventDefault()
+    if (!formOutlet.nama_outlet.trim()) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Nama outlet wajib diisi',
+      })
+      return
+    }
+
+    Swal.fire({
+      title: 'Menyimpan outlet...',
+      text: 'Mohon tunggu sebentar.',
+      allowOutsideClick: false,
+      allowEscapeKey: false,
+      showConfirmButton: false,
+      didOpen: () => {
+        Swal.showLoading()
+      },
+    })
+
+    try {
+      await axios.post('http://192.168.69.70:5000/api/outlets', {
+        nama_outlet: formOutlet.nama_outlet.trim(),
+        pemilik: formOutlet.pemilik.trim(),
+        phone: formOutlet.phone.trim(),
+        alamat: formOutlet.alamat.trim(),
+        tgl_gabung: formOutlet.tgl_gabung,
+      })
+      setIsModalTambahOutletOpen(false)
+      setFormOutlet(emptyFormOutlet())
+      setOutletPage(1)
+      await fetchOutlets()
+      notifySuccess('Outlet berhasil disimpan')
+    } catch (requestError) {
+      Swal.fire({
+        icon: 'error',
+        title: 'Gagal',
+        text: requestError.response?.data?.message || 'Gagal menyimpan outlet.',
+      })
+    }
+  }
   return (
     <section className="stok">
       <div className="stok-stats">
@@ -399,7 +667,9 @@ function HotspotStok() {
               onClick={
                 item.label === 'BUAT VC'
                   ? () => setIsModalBuatVcOpen(true)
-                  : showUnderDevelopment
+                  : item.label === 'OUTLET'
+                    ? () => setIsModalOutletOpen(true)
+                    : showUnderDevelopment
               }
             >
               <Icon size={16} strokeWidth={2.2} />
@@ -608,7 +878,14 @@ function HotspotStok() {
                 <div className="stok-modal-fields">
                   <label className="stok-field">
                     <span>Router</span>
-                    <input type="text" value="ALL ROUTER" readOnly />
+                    <select value={selectedRouter} onChange={(event) => setSelectedRouter(event.target.value)}>
+                      <option value="ALL ROUTER">ALL ROUTER</option>
+                      {daftarRouter.map((item) => (
+                        <option key={item.id || item.nama_router} value={item.nama_router}>
+                          {item.nama_router}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="stok-field">
                     <span>Server</span>
@@ -641,8 +918,13 @@ function HotspotStok() {
                   </label>
                   <label className="stok-field">
                     <span>Outlet</span>
-                    <select defaultValue="">
-                      <option value="">-Pilih-</option>
+                    <select value={selectedOutlet} onChange={(event) => setSelectedOutlet(event.target.value)}>
+                      <option value="">-Pilih Outlet-</option>
+                      {daftarOutletAktif.map((outlet) => (
+                        <option key={outlet.id || outlet.nama_outlet} value={outlet.nama_outlet}>
+                          {outlet.nama_outlet}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="stok-field">
@@ -722,6 +1004,264 @@ function HotspotStok() {
                 </button>
                 <button type="submit" className="stok-modal-btn stok-modal-btn-blue" disabled={saving}>
                   Generate
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isModalOutletOpen && (
+        <div className="stok-backdrop" onMouseDown={closeOutletModal}>
+          <div
+            className="stok-modal outlet-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="outlet-modal-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="outlet-head">
+              <div>
+                <p>Hotspot</p>
+                <h2 id="outlet-modal-title">Data Outlet</h2>
+              </div>
+              <button type="button" className="outlet-close" onClick={closeOutletModal} aria-label="Tutup">
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="outlet-note">
+              Outlet adalah toko, warung atau individu yang menjual voucher langsung ke konsumen dan posisi outlet berada dibawah kontrol mitra reseller
+            </div>
+
+            <div className="outlet-toolbar">
+              <div className="stok-menu outlet-menu">
+                <button
+                  type="button"
+                  className="outlet-btn outlet-btn-green"
+                  aria-expanded={isOutletMenuOpen}
+                  aria-haspopup="menu"
+                  onClick={() => setIsOutletMenuOpen((open) => !open)}
+                >
+                  <Menu size={16} />
+                  <span>MENU</span>
+                </button>
+                {isOutletMenuOpen && (
+                  <div className="stok-dropdown" role="menu">
+                    <button type="button" role="menuitem" onClick={() => handleAksiOutletMassal('Set Aktif')}>
+                      <Check size={16} />
+                      <span>Set Aktif</span>
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => handleAksiOutletMassal('Set Tidak Aktif')}>
+                      <X size={16} />
+                      <span>Set Tidak Aktif</span>
+                    </button>
+                    <button type="button" role="menuitem" className="is-danger" onClick={() => handleAksiOutletMassal('Hapus Terpilih')}>
+                      <Trash size={16} />
+                      <span>Hapus Terpilih</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              <button type="button" className="outlet-btn outlet-btn-blue" onClick={openTambahOutlet}>
+                <Plus size={16} />
+                <span>TAMBAH</span>
+              </button>
+              <select
+                aria-label="Jumlah baris outlet"
+                value={outletPerPage}
+                onChange={(event) => {
+                  setOutletPerPage(Number(event.target.value))
+                  setOutletPage(1)
+                }}
+              >
+                <option value="10">10</option>
+                <option value="20">20</option>
+              </select>
+              <label className="outlet-search">
+                <Search size={16} />
+                <input
+                  type="search"
+                  placeholder="Cari outlet..."
+                  aria-label="Cari outlet"
+                  value={searchOutlet}
+                  onChange={(event) => {
+                    setSearchOutlet(event.target.value)
+                    setOutletPage(1)
+                  }}
+                />
+              </label>
+            </div>
+
+            <div className="outlet-table-wrap">
+              {outletLoading ? (
+                <p className="outlet-loading">Memuat data outlet...</p>
+              ) : (
+                <table className="outlet-table">
+                  <thead>
+                    <tr>
+                      <th className="stok-check">
+                        <input
+                          type="checkbox"
+                          aria-label="Pilih semua outlet"
+                          checked={allOutletsSelected}
+                          onChange={toggleAllOutlets}
+                        />
+                      </th>
+                      <th>OUTLET</th>
+                      <th>PEMILIK</th>
+                      <th>PHONE</th>
+                      <th>STOK VC</th>
+                      <th>MITRA</th>
+                      <th>STATUS</th>
+                      <th>TGL GABUNG</th>
+                      <th>ALAMAT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {outletItems.length === 0 ? (
+                      <tr>
+                        <td colSpan="9" className="outlet-empty">
+                          {searchOutlet ? 'Outlet tidak ditemukan.' : 'Belum ada outlet.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      outletItems.map((item) => (
+                        <tr key={item.id} className={selectedOutlets.includes(item.id) ? 'is-selected' : undefined}>
+                          <td className="stok-check">
+                            <input
+                              type="checkbox"
+                              aria-label={`Pilih ${item.nama_outlet}`}
+                              checked={selectedOutlets.includes(item.id)}
+                              onChange={() => toggleOutlet(item.id)}
+                            />
+                          </td>
+                          <td>{item.nama_outlet}</td>
+                          <td>{item.pemilik || '-'}</td>
+                          <td>{item.phone || '-'}</td>
+                          <td className="outlet-stock">{item.stok_vc ?? 0}</td>
+                          <td>{item.mitra || '-'}</td>
+                          <td>
+                            <span className={item.status === 'Tidak Aktif' ? 'outlet-status is-inactive' : 'outlet-status is-active'}>
+                              {item.status || 'Aktif'}
+                            </span>
+                          </td>
+                          <td>{item.tgl_gabung ? formatTanggalGabung(item.tgl_gabung) : formatTanggal(item.created_at)}</td>
+                          <td>{item.alamat || '-'}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="stok-foot outlet-foot">
+              <p className="stok-info">
+                Showing {outletTotal === 0 ? 0 : outletFirstIndex + 1} to {Math.min(outletLastIndex, outletTotal)} of {outletTotal} entries
+              </p>
+              <nav className="stok-pages" aria-label="Navigasi halaman outlet">
+                <button
+                  type="button"
+                  className="stok-nav"
+                  disabled={outletSafePage <= 1}
+                  onClick={() => setOutletPage(outletSafePage - 1)}
+                >
+                  Prev
+                </button>
+                {outletPageNumbers.map((pageNumber) => (
+                  <button
+                    key={pageNumber}
+                    type="button"
+                    className={pageNumber === outletSafePage ? 'stok-page is-active' : 'stok-page'}
+                    aria-current={pageNumber === outletSafePage ? 'page' : undefined}
+                    onClick={() => setOutletPage(pageNumber)}
+                  >
+                    {pageNumber}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="stok-nav"
+                  disabled={outletSafePage >= outletTotalPages}
+                  onClick={() => setOutletPage(outletSafePage + 1)}
+                >
+                  Next
+                </button>
+              </nav>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isModalTambahOutletOpen && (
+        <div className="stok-backdrop outlet-form-backdrop" onMouseDown={closeTambahOutlet}>
+          <div
+            className="stok-modal outlet-form-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tambah-outlet-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="outlet-head">
+              <h2 id="tambah-outlet-title">OUTLET VOUCHER</h2>
+            </header>
+            <form className="outlet-form" onSubmit={handleSaveOutlet}>
+              <label className="stok-field">
+                <span>Outlet</span>
+                <input
+                  type="text"
+                  name="nama_outlet"
+                  value={formOutlet.nama_outlet}
+                  onChange={updateFormOutlet}
+                  maxLength={100}
+                  required
+                />
+              </label>
+              <label className="stok-field">
+                <span>Pemilik</span>
+                <input
+                  type="text"
+                  name="pemilik"
+                  value={formOutlet.pemilik}
+                  onChange={updateFormOutlet}
+                  maxLength={100}
+                />
+              </label>
+              <label className="stok-field">
+                <span>Phone</span>
+                <input
+                  type="text"
+                  name="phone"
+                  value={formOutlet.phone}
+                  onChange={updateFormOutlet}
+                  maxLength={50}
+                />
+              </label>
+              <label className="stok-field">
+                <span>Alamat</span>
+                <input
+                  type="text"
+                  name="alamat"
+                  value={formOutlet.alamat}
+                  onChange={updateFormOutlet}
+                />
+              </label>
+              <label className="stok-field">
+                <span>Tgl Gabung</span>
+                <input
+                  type="date"
+                  name="tgl_gabung"
+                  value={formOutlet.tgl_gabung}
+                  onChange={updateFormOutlet}
+                />
+              </label>
+              <div className="stok-modal-actions">
+                <button type="button" className="stok-modal-btn stok-modal-btn-gray" onClick={closeTambahOutlet}>
+                  Close
+                </button>
+                <button type="submit" className="stok-modal-btn stok-modal-btn-blue">
+                  Simpan
                 </button>
               </div>
             </form>

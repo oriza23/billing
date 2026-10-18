@@ -372,6 +372,12 @@ async function insertVoucher(voucher, record) {
       "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Creation-Date', ':=', NOW())",
       [voucher.username],
     );
+    if (record.nasIp) {
+      await connection.execute(
+        "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'NAS-IP-Address', '==', ?)",
+        [voucher.username, record.nasIp],
+      );
+    }
     await connection.execute(
       'INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, 1)',
       [voucher.username, record.mikrotikGroup],
@@ -523,8 +529,18 @@ router.post('/voucher/generate', async (req, res) => {
       separatePassword: jenisVoucher === 'username+password',
     });
 
+    let nasIp = '';
+    if (routerName && routerName !== 'ALL ROUTER') {
+      const [routerRows] = await pool.execute(
+        'SELECT ip_address FROM routers WHERE nama_router = ? LIMIT 1',
+        [routerName],
+      );
+      nasIp = routerRows[0]?.ip_address || '';
+    }
+
     const kodeBatch = Math.floor(Date.now() / 1000).toString();
     record.kodeBatch = kodeBatch;
+    record.nasIp = nasIp;
     await Promise.all(vouchers.map((voucher) => insertVoucher(voucher, record)));
 
     return res.json({

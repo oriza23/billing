@@ -87,7 +87,7 @@ router.post('/profil', async (req, res) => {
         [mikrotikGroup, String(shared)],
       ),
       pool.execute(
-        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Max-All-Session', ':=', ?)",
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Session-Timeout', ':=', ?)",
         [mikrotikGroup, totalDetik],
       ),
     ];
@@ -214,7 +214,7 @@ router.put('/profil/:groupname', async (req, res) => {
     }
 
     await pool.execute(
-      "DELETE FROM radgroupreply WHERE groupname = ? AND attribute = 'Max-All-Session'",
+      "DELETE FROM radgroupreply WHERE groupname = ? AND attribute IN ('Max-All-Session', 'Session-Timeout')",
       [groupname],
     );
 
@@ -228,7 +228,7 @@ router.put('/profil/:groupname', async (req, res) => {
         [rateLimit, groupname],
       ),
       pool.execute(
-        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Max-All-Session', ':=', ?)",
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Session-Timeout', ':=', ?)",
         [groupname, totalDetik],
       ),
     ]);
@@ -469,6 +469,116 @@ async function deleteVoucherEverywhere(executor, username) {
   );
   return groupResult.affectedRows + checkResult.affectedRows + webResult.affectedRows;
 }
+
+function formatDurasiDetik(value) {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  const jam = String(Math.floor(total / 3600)).padStart(2, '0');
+  const menit = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+  const detik = String(total % 60).padStart(2, '0');
+  return `${jam}:${menit}:${detik}`;
+}
+
+function formatKuotaTerpakai(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  const megabyte = value / (1024 * 1024);
+  if (megabyte >= 1024) {
+    const gigabyte = megabyte / 1024;
+    const rounded = gigabyte >= 10 ? Math.round(gigabyte) : Math.round(gigabyte * 10) / 10;
+    return `${rounded}GB`;
+  }
+  return `${Math.round(megabyte)}MB`;
+}
+
+function hitungTanggalExpired(tglAktif, durasiMaksimal) {
+  const maksimal = Number(durasiMaksimal);
+  if (!tglAktif || !Number.isFinite(maksimal) || maksimal <= 0) {
+    return null;
+  }
+  const mulai = tglAktif instanceof Date ? new Date(tglAktif.getTime()) : new Date(tglAktif);
+  if (Number.isNaN(mulai.getTime())) {
+    return null;
+  }
+  return new Date(mulai.getTime() + (maksimal * 1000));
+}
+
+router.get('/voucher-terjual', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT
+        v.id,
+        v.username,
+        v.password,
+        v.profile,
+        v.router,
+        v.server,
+        v.mitra,
+        v.outlet,
+        v.hpp,
+        v.komisi,
+        v.harga,
+        v.admin,
+        v.kode_batch,
+        v.created_at,
+        COALESCE(SUM(a.acctsessiontime), 0) AS durasi_terpakai,
+        COALESCE(SUM(COALESCE(a.acctinputoctets, 0) + COALESCE(a.acctoutputoctets, 0)), 0) AS kuota_terpakai,
+        MIN(a.acctstarttime) AS tgl_aktif,
+        MAX(g.value) AS durasi_maksimal
+      FROM hotspot_vouchers v
+      LEFT JOIN radacct a ON a.username = v.username
+      LEFT JOIN hotspot_profiles hp
+        ON hp.nama_profile = v.profile OR hp.mikrotik_group = v.profile
+      LEFT JOIN radgroupreply g
+        ON g.groupname = hp.mikrotik_group AND g.attribute = 'Session-Timeout'
+      WHERE v.status = 'Yes' OR a.radacctid IS NOT NULL
+      GROUP BY
+        v.id, v.username, v.password, v.profile, v.router, v.server, v.mitra,
+        v.outlet, v.hpp, v.komisi, v.harga, v.admin, v.kode_batch, v.created_at
+      ORDER BY tgl_aktif DESC, v.id DESC`,
+    );
+
+    const data = rows.map((row) => {
+      const terpakai = Number(row.durasi_terpakai) || 0;
+      const maksimal = Number(row.durasi_maksimal);
+      const punyaBatas = Number.isFinite(maksimal) && maksimal > 0;
+      const statusExpired = punyaBatas && terpakai >= maksimal ? 'EXPIRED' : 'AKTIF';
+      const tglExpired = hitungTanggalExpired(row.tgl_aktif, punyaBatas ? maksimal : null);
+
+      return {
+        id: row.id,
+        username: row.username,
+        password: row.password,
+        profile: row.profile,
+        router: row.router,
+        server: row.server,
+        mitra: row.mitra,
+        outlet: row.outlet,
+        hpp: Number(row.hpp) || 0,
+        komisi: Number(row.komisi) || 0,
+        harga: Number(row.harga) || 0,
+        saldo: null,
+        admin: row.admin,
+        kode_batch: row.kode_batch,
+        created_at: row.created_at,
+        tgl_aktif: row.tgl_aktif,
+        tgl_expired: tglExpired,
+        durasi_terpakai: terpakai,
+        durasi_maksimal: punyaBatas ? maksimal : null,
+        kuota_terpakai: Number(row.kuota_terpakai) || 0,
+        durasi: `${formatDurasiDetik(terpakai)} / ${punyaBatas ? formatDurasiDetik(maksimal) : 'UNLIMITED'}`,
+        kuota: `${formatKuotaTerpakai(row.kuota_terpakai)} / UNLIMITED`,
+        status_expired: statusExpired,
+      };
+    });
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil voucher terjual',
+      error: error.message,
+    });
+  }
+});
 
 router.get('/voucher', async (req, res) => {
   try {

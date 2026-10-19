@@ -582,8 +582,8 @@ router.get('/voucher-terjual', async (req, res) => {
 
 router.get('/voucher', async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM hotspot_vouchers ORDER BY created_at DESC',
+    const [rows] = await pool.query(
+      'SELECT * FROM hotspot_vouchers WHERE username NOT IN (SELECT username FROM radacct) ORDER BY created_at DESC',
     );
 
     res.json(rows);
@@ -802,6 +802,147 @@ router.delete('/voucher/:username', async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+});
+
+function readNameList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item && item.length <= 64))].slice(0, 200);
+}
+
+function readRouterValue(value) {
+  if (Array.isArray(value)) {
+    return readNameList(value).join(', ');
+  }
+  return readText(value);
+}
+
+function rencanaHotspotRouter(action, usernames, router) {
+  return {
+    action,
+    router: router || '',
+    usernames,
+    perintah: action === 'kick'
+      ? ['/ip/hotspot/active/remove', '/ip/hotspot/cookie/remove']
+      : ['/ip/hotspot/cookie/remove'],
+    dieksekusi: false,
+  };
+}
+
+router.get('/voucher-online', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT
+        a.radacctid AS id,
+        a.username,
+        v.profile,
+        COALESCE(a.acctsessiontime, 0) AS uptime,
+        COALESCE(a.acctinputoctets, 0) AS upload,
+        COALESCE(a.acctoutputoctets, 0) AS download,
+        COALESCE(NULLIF(v.router, ''), r.nama_router, '') AS router,
+        a.nasportid AS interface,
+        v.server,
+        a.framedipaddress AS ip_address,
+        a.callingstationid AS mac_addr,
+        v.mitra,
+        v.outlet,
+        a.acctstarttime AS last_connected,
+        a.acctupdatetime AS last_updated,
+        CASE WHEN v.id IS NULL THEN 0 ELSE 1 END AS terdaftar
+      FROM radacct a
+      LEFT JOIN hotspot_vouchers v ON v.username = a.username
+      LEFT JOIN routers r ON r.ip_address = a.nasipaddress
+      WHERE a.acctstoptime IS NULL
+      ORDER BY a.acctstarttime DESC, a.radacctid DESC`,
+    );
+
+    res.json(rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      profile: row.profile || '',
+      uptime: Number(row.uptime) || 0,
+      upload: Number(row.upload) || 0,
+      download: Number(row.download) || 0,
+      router: row.router || '',
+      interface: row.interface || '',
+      server: row.server || '',
+      ip_address: row.ip_address || '',
+      mac_addr: row.mac_addr || '',
+      mitra: row.mitra || '',
+      outlet: row.outlet || '',
+      last_connected: row.last_connected,
+      last_updated: row.last_updated,
+      terdaftar: Boolean(row.terdaftar),
+    })));
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil voucher online',
+      error: error.message,
+    });
+  }
+});
+
+router.post('/kick-user', async (req, res) => {
+  const usernames = readNameList(req.body?.usernames);
+  const routerName = readRouterValue(req.body?.router);
+
+  if (usernames.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Pilih minimal satu user',
+    });
+  }
+
+  const rencana = rencanaHotspotRouter('kick', usernames, routerName);
+  return res.json({
+    success: true,
+    message: 'Permintaan kick user diterima',
+    usernames: rencana.usernames,
+    router: rencana.router,
+  });
+});
+
+router.post('/hapus-cookie', async (req, res) => {
+  const usernames = readNameList(req.body?.usernames);
+  const routerName = readRouterValue(req.body?.router);
+
+  if (usernames.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Pilih minimal satu user',
+    });
+  }
+
+  const rencana = rencanaHotspotRouter('cookie', usernames, routerName);
+  return res.json({
+    success: true,
+    message: 'Permintaan hapus cookie diterima',
+    usernames: rencana.usernames,
+    router: rencana.router,
+  });
+});
+
+router.post('/sync-online', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT COUNT(*) AS total FROM radacct WHERE acctstoptime IS NULL',
+    );
+    return res.json({
+      success: true,
+      message: 'Data online berhasil disegarkan',
+      total: Number(rows[0]?.total) || 0,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menyegarkan data online',
+      error: error.message,
+    });
   }
 });
 

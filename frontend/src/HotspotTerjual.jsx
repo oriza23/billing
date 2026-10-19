@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import Swal from 'sweetalert2'
+import * as XLSX from 'xlsx'
 import {
   AlertTriangle,
   Banknote,
@@ -167,6 +168,32 @@ function HotspotTerjual() {
     { label: 'Jumlah Expired', hint: 'Kuota waktu habis', value: jumlahExpired.toLocaleString('id-ID'), icon: AlertTriangle, tone: 'expired' },
   ]
 
+  function handleExportExcel() {
+    const filteredVouchers = filteredRows
+    if (filteredVouchers.length === 0) {
+      Swal.fire('Kosong', 'Tidak ada data untuk diexport', 'warning')
+      return
+    }
+
+    const dataUntukExcel = filteredVouchers.map((voucher) => ({
+      Username: voucher.username,
+      Profile: voucher.profile,
+      'Harga Jual': voucher.harga,
+      HPP: voucher.hpp,
+      Komisi: voucher.komisi,
+      Router: voucher.router,
+      Outlet: voucher.outlet,
+      'Durasi Terpakai': voucher.durasi,
+      'Kuota Terpakai': voucher.kuota,
+      'Tgl Aktif': voucher.tgl_aktif ? formatTanggalWaktu(voucher.tgl_aktif) : '-',
+      'Tgl Expired': voucher.tgl_expired ? formatTanggalWaktu(voucher.tgl_expired) : 'UNLIMITED',
+    }))
+    const worksheet = XLSX.utils.json_to_sheet(dataUntukExcel)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data Penjualan')
+    XLSX.writeFile(workbook, 'Laporan_Voucher_Terjual.xlsx')
+  }
+
   function toggleRow(username) {
     setSelectedRows((current) => (
       current.includes(username)
@@ -214,7 +241,7 @@ function HotspotTerjual() {
               key={item.label}
               type="button"
               className={`stok-action stok-action-${item.tone}`}
-              onClick={showInfo}
+              onClick={item.label === 'EXPORT' ? handleExportExcel : showInfo}
             >
               <Icon size={16} strokeWidth={2.2} />
               <span>{item.label}</span>

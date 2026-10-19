@@ -4,7 +4,6 @@ import Swal from 'sweetalert2'
 import {
   Ban,
   CalendarPlus,
-  Cpu,
   Download,
   ExternalLink,
   FileText,
@@ -137,7 +136,6 @@ function showInfo() {
 const infoButtons = [
   { label: 'IMPORT', icon: Download, tone: 'tosca' },
   { label: 'SET BILLING', icon: Receipt, tone: 'rose' },
-  { label: 'SIMULATOR', icon: Cpu, tone: 'blue' },
   { label: 'SECRET', icon: KeyRound, tone: 'tosca' },
   { label: 'LAPORAN', icon: FileText, tone: 'yellow' },
   { label: 'PELANGGAN', icon: UserRound, tone: 'green' },

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
+import ServerPagination from './ServerPagination.jsx'
+import useDebouncedValue from './useDebouncedValue.js'
 import Swal from 'sweetalert2'
 import { RefreshCw, Search, Trash, UserX } from 'lucide-react'
 import './HotspotStok.css'
@@ -43,30 +45,49 @@ function tampil(value) {
   return text || '-'
 }
 
-async function fetchOnline() {
-  const response = await api.get(`${API}/voucher-online`)
-  return Array.isArray(response.data) ? response.data : []
+async function fetchOnline(params) {
+  const response = await api.get(`${API}/voucher-online`, { params })
+  return response.data
 }
 
 function HotspotOnline() {
   const [rows, setRows] = useState([])
+  const [totalData, setTotalData] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [fetching, setFetching] = useState(false)
   const [error, setError] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(10)
-  const [selectedIds, setSelectedIds] = useState([])
+  // Baris terpilih disimpan lengkap (id -> baris) agar aksi Kick/Hapus Cookie
+  // tetap benar walau admin berpindah halaman.
+  const [selectedMap, setSelectedMap] = useState({})
 
+  const debouncedSearch = useDebouncedValue(searchTerm.trim())
+
+  function applyPayload(payload) {
+    setRows(Array.isArray(payload?.data) ? payload.data : [])
+    setTotalData(Number(payload?.total) || 0)
+    setTotalPages(Math.max(1, Number(payload?.total_pages) || 1))
+    setError('')
+  }
+
+  // Server-side pagination: backend hanya mengirim satu halaman (LIMIT/OFFSET).
   useEffect(() => {
     let ignore = false
 
     async function loadOnline() {
+      setFetching(true)
       try {
-        const data = await fetchOnline()
-        if (!ignore) {
-          setRows(data)
-          setError('')
+        const payload = await fetchOnline({ page: currentPage, limit: itemsPerPage, q: debouncedSearch })
+        if (ignore) {
+          return
+        }
+        applyPayload(payload)
+        if (payload?.page && payload.page !== currentPage) {
+          setCurrentPage(payload.page)
         }
       } catch {
         if (!ignore) {
@@ -76,6 +97,7 @@ function HotspotOnline() {
       } finally {
         if (!ignore) {
           setLoading(false)
+          setFetching(false)
         }
       }
     }
@@ -84,49 +106,38 @@ function HotspotOnline() {
     return () => {
       ignore = true
     }
-  }, [])
+  }, [currentPage, itemsPerPage, debouncedSearch])
 
-  const keyword = searchTerm.toLowerCase()
-  const filteredRows = rows.filter((item) => !keyword || [
-    item.username,
-    item.profile,
-    item.router,
-    item.interface,
-    item.server,
-    item.ip_address,
-    item.mac_addr,
-    item.mitra,
-    item.outlet,
-  ].some((value) => String(value || '').toLowerCase().includes(keyword)))
+  const currentItems = rows
+  const page = currentPage
+  const allSelected = currentItems.length > 0 && currentItems.every((item) => selectedMap[item.id])
+  const selectedRows = Object.values(selectedMap)
 
-  const totalData = filteredRows.length
-  const totalPages = Math.max(1, Math.ceil(totalData / itemsPerPage))
-  const page = Math.min(currentPage, totalPages)
-  const lastIndex = page * itemsPerPage
-  const firstIndex = lastIndex - itemsPerPage
-  const currentItems = filteredRows.slice(firstIndex, lastIndex)
-  const showingStart = totalData === 0 ? 0 : firstIndex + 1
-  const showingEnd = Math.min(lastIndex, totalData)
-  const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1)
-  const visibleIds = currentItems.map((item) => item.id)
-  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id))
-  const selectedRows = rows.filter((item) => selectedIds.includes(item.id))
-
-  function toggleRow(id) {
-    setSelectedIds((current) => (
-      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
-    ))
+  function toggleRow(item) {
+    setSelectedMap((current) => {
+      const next = { ...current }
+      if (next[item.id]) {
+        delete next[item.id]
+      } else {
+        next[item.id] = item
+      }
+      return next
+    })
   }
 
   function toggleAll() {
-    if (visibleIds.length === 0) {
+    if (currentItems.length === 0) {
       return
     }
-    if (visibleIds.every((id) => selectedIds.includes(id))) {
-      setSelectedIds((current) => current.filter((id) => !visibleIds.includes(id)))
-      return
-    }
-    setSelectedIds((current) => [...new Set([...current, ...visibleIds])])
+    setSelectedMap((current) => {
+      const next = { ...current }
+      if (currentItems.every((item) => next[item.id])) {
+        currentItems.forEach((item) => delete next[item.id])
+      } else {
+        currentItems.forEach((item) => { next[item.id] = item })
+      }
+      return next
+    })
   }
 
   function payloadTerpilih() {
@@ -156,7 +167,7 @@ function HotspotOnline() {
     }
     try {
       const response = await api.post(`${API}/kick-user`, payloadTerpilih())
-      setSelectedIds([])
+      setSelectedMap({})
       Swal.fire({
         icon: 'success',
         title: 'Berhasil',
@@ -187,7 +198,7 @@ function HotspotOnline() {
     }
     try {
       const response = await api.post(`${API}/hapus-cookie`, payloadTerpilih())
-      setSelectedIds([])
+      setSelectedMap({})
       Swal.fire({
         icon: 'success',
         title: 'Berhasil',
@@ -211,10 +222,10 @@ function HotspotOnline() {
     })
     try {
       await api.post(`${API}/sync-online`)
-      const data = await fetchOnline()
-      setRows(data)
-      setError('')
-      setSelectedIds([])
+      const payload = await fetchOnline({ page: currentPage, limit: itemsPerPage, q: searchTerm.trim() })
+      applyPayload(payload)
+      setCurrentPage(payload.page || 1)
+      setSelectedMap({})
       Swal.fire({
         icon: 'success',
         title: 'Selesai',
@@ -263,6 +274,8 @@ function HotspotOnline() {
             <option value="10">10</option>
             <option value="20">20</option>
             <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="500">500</option>
           </select>
           <label className="stok-search">
             <Search size={16} strokeWidth={2} />
@@ -286,14 +299,14 @@ function HotspotOnline() {
             <p>Hotspot</p>
             <h1>Voucher Online</h1>
           </div>
-          <span>{loading ? 'Memuat...' : `${totalData} online`}</span>
+          <span>{loading ? 'Memuat...' : `${totalData.toLocaleString('id-ID')} online`}</span>
         </div>
 
         {loading && <p className="stok-status">Memuat data voucher online...</p>}
         {error && <p className="stok-status stok-error">{error}</p>}
 
         {!loading && !error && (
-          <div className="stok-table-wrap">
+          <div className={fetching ? 'stok-table-wrap is-fetching' : 'stok-table-wrap'}>
             <table className="online-table">
               <thead>
                 <tr>
@@ -332,14 +345,14 @@ function HotspotOnline() {
                   currentItems.map((item) => (
                     <tr
                       key={item.id}
-                      className={selectedIds.includes(item.id) ? 'is-selected' : undefined}
+                      className={selectedMap[item.id] ? 'is-selected' : undefined}
                     >
                       <td className="stok-check">
                         <input
                           type="checkbox"
                           aria-label={`Pilih ${item.username}`}
-                          checked={selectedIds.includes(item.id)}
-                          onChange={() => toggleRow(item.id)}
+                          checked={Boolean(selectedMap[item.id])}
+                          onChange={() => toggleRow(item)}
                         />
                       </td>
                       <td>{item.username}</td>
@@ -373,40 +386,15 @@ function HotspotOnline() {
         )}
 
         {!loading && !error && (
-          <div className="stok-foot">
-            <p className="stok-info">
-              Showing {showingStart} to {showingEnd} of {totalData} entries
-            </p>
-            <nav className="stok-pages" aria-label="Navigasi halaman voucher online">
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page <= 1}
-                onClick={() => setCurrentPage(page - 1)}
-              >
-                Previous
-              </button>
-              {pageNumbers.map((pageNumber) => (
-                <button
-                  key={pageNumber}
-                  type="button"
-                  className={pageNumber === page ? 'stok-page is-active' : 'stok-page'}
-                  aria-current={pageNumber === page ? 'page' : undefined}
-                  onClick={() => setCurrentPage(pageNumber)}
-                >
-                  {pageNumber}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page >= totalPages}
-                onClick={() => setCurrentPage(page + 1)}
-              >
-                Next
-              </button>
-            </nav>
-          </div>
+          <ServerPagination
+            page={page}
+            totalPages={totalPages}
+            totalData={totalData}
+            limit={itemsPerPage}
+            onPageChange={setCurrentPage}
+            label="Navigasi halaman voucher online"
+            disabled={fetching}
+          />
         )}
       </div>
     </section>

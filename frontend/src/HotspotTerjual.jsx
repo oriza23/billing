@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
+import ServerPagination from './ServerPagination.jsx'
+import useDebouncedValue from './useDebouncedValue.js'
 import Swal from 'sweetalert2'
 import * as XLSX from 'xlsx'
 import {
@@ -34,34 +36,6 @@ function formatTanggalWaktu(value) {
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-function dateKey(value) {
-  if (!value) {
-    return ''
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return ''
-  }
-  const pad = (part) => String(part).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-}
-
-function isThisMonth(value) {
-  if (!value) {
-    return false
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return false
-  }
-  const now = new Date()
-  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()
-}
-
-function uniqueValues(rows, key) {
-  return [...new Set(rows.map((row) => String(row[key] || '').trim()).filter(Boolean))]
-}
-
 const toolbar = [
   { label: 'MENU', icon: Menu, tone: 'blue' },
   { label: 'EXPORT', icon: Download, tone: 'tosca' },
@@ -72,7 +46,14 @@ const toolbar = [
 
 function HotspotTerjual() {
   const [rows, setRows] = useState([])
+  const [totalData, setTotalData] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
+  const [soldSummary, setSoldSummary] = useState({
+    jumlah: 0, total_penjualan: 0, penjualan_bulan_ini: 0, jumlah_expired: 0,
+  })
+  const [options, setOptions] = useState({ profile: [], router: [], mitra: [], outlet: [] })
   const [loading, setLoading] = useState(true)
+  const [fetching, setFetching] = useState(false)
   const [error, setError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [filterDate, setFilterDate] = useState('')
@@ -84,16 +65,67 @@ function HotspotTerjual() {
   const [itemsPerPage, setItemsPerPage] = useState(10)
   const [selectedRows, setSelectedRows] = useState([])
 
+  const debouncedSearch = useDebouncedValue(searchTerm.trim())
+
+  // Parameter filter dikirim ke backend; filtering/LIMIT/OFFSET dikerjakan di database.
+  function buildParams(extra = {}) {
+    const params = { q: debouncedSearch, ...extra }
+    if (filterDate) params.tanggal = filterDate
+    if (filterProfile !== 'all') params.profile = filterProfile
+    if (filterRouter !== 'all') params.router = filterRouter
+    if (filterMitra) params.mitra = filterMitra
+    if (filterOutlet !== 'all') params.outlet = filterOutlet
+    return params
+  }
+
+  useEffect(() => {
+    let ignore = false
+
+    async function loadOptions() {
+      try {
+        const response = await api.get('/api/hotspot/voucher-terjual/opsi')
+        if (!ignore) {
+          setOptions({
+            profile: response.data?.profile || [],
+            router: response.data?.router || [],
+            mitra: response.data?.mitra || [],
+            outlet: response.data?.outlet || [],
+          })
+        }
+      } catch {
+        // Dropdown tetap kosong; tabel tetap berfungsi.
+      }
+    }
+
+    loadOptions()
+    return () => {
+      ignore = true
+    }
+  }, [])
+
   useEffect(() => {
     let ignore = false
 
     async function loadSold() {
+      setFetching(true)
       try {
-        const response = await api.get('/api/hotspot/voucher-terjual')
-        if (!ignore) {
-          setRows(Array.isArray(response.data) ? response.data : [])
-          setError('')
+        const response = await api.get('/api/hotspot/voucher-terjual', {
+          params: buildParams({ page: currentPage, limit: itemsPerPage }),
+        })
+        if (ignore) {
+          return
         }
+        const payload = response.data
+        setRows(Array.isArray(payload?.data) ? payload.data : [])
+        setTotalData(Number(payload?.total) || 0)
+        setTotalPages(Math.max(1, Number(payload?.total_pages) || 1))
+        if (payload?.summary) {
+          setSoldSummary(payload.summary)
+        }
+        if (payload?.page && payload.page !== currentPage) {
+          setCurrentPage(payload.page)
+        }
+        setError('')
       } catch {
         if (!ignore) {
           setRows([])
@@ -102,6 +134,7 @@ function HotspotTerjual() {
       } finally {
         if (!ignore) {
           setLoading(false)
+          setFetching(false)
         }
       }
     }
@@ -110,66 +143,56 @@ function HotspotTerjual() {
     return () => {
       ignore = true
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, itemsPerPage, debouncedSearch, filterDate, filterProfile, filterRouter, filterMitra, filterOutlet])
 
   function showInfo() {
     Swal.fire('Info', 'Fitur ini masuk dalam antrean pembuatan dan belum bisa digunakan.', 'info')
   }
 
-  const keyword = searchTerm.toLowerCase()
-  const filteredRows = rows.filter((item) => {
-    const matchesSearch = !keyword || [
-      item.username,
-      item.profile,
-      item.router,
-      item.server,
-      item.mitra,
-      item.outlet,
-      item.admin,
-      item.kode_batch,
-    ].some((value) => String(value || '').toLowerCase().includes(keyword))
-    const matchesDate = !filterDate || dateKey(item.tgl_aktif) === filterDate
-    const matchesProfile = filterProfile === 'all' || item.profile === filterProfile
-    const matchesRouter = filterRouter === 'all' || item.router === filterRouter
-    const matchesMitra = !filterMitra || item.mitra === filterMitra
-    const matchesOutlet = filterOutlet === 'all' || item.outlet === filterOutlet
-    return matchesSearch && matchesDate && matchesProfile && matchesRouter && matchesMitra && matchesOutlet
-  })
-
-  const totalData = filteredRows.length
-  const totalPages = Math.max(1, Math.ceil(totalData / itemsPerPage))
-  const page = Math.min(currentPage, totalPages)
-  const lastIndex = page * itemsPerPage
-  const firstIndex = lastIndex - itemsPerPage
-  const currentItems = filteredRows.slice(firstIndex, lastIndex)
-  const showingStart = totalData === 0 ? 0 : firstIndex + 1
-  const showingEnd = Math.min(lastIndex, totalData)
-  const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1)
+  const currentItems = rows
+  const page = currentPage
   const visibleUsernames = currentItems.map((item) => item.username)
   const allSelected = visibleUsernames.length > 0
     && visibleUsernames.every((username) => selectedRows.includes(username))
-  const totalPenjualan = filteredRows.reduce((total, item) => total + (Number(item.harga) || 0), 0)
-  const penjualanBulanIni = filteredRows.reduce((total, item) => (
-    isThisMonth(item.tgl_aktif) ? total + (Number(item.harga) || 0) : total
-  ), 0)
-  const jumlahExpired = filteredRows.filter((item) => (
-    item.tgl_expired && new Date() > new Date(item.tgl_expired)
-  )).length
   const namaBulan = new Date().toLocaleDateString('id-ID', { month: 'long' })
-  const profileOptions = uniqueValues(rows, 'profile')
-  const routerOptions = uniqueValues(rows, 'router')
-  const mitraOptions = uniqueValues(rows, 'mitra')
-  const outletOptions = uniqueValues(rows, 'outlet')
 
   const summaries = [
     { label: 'Jumlah', hint: 'Voucher terjual', value: totalData.toLocaleString('id-ID'), icon: Ticket, tone: 'blue' },
-    { label: 'Total Penjualan', hint: 'Nilai jual', value: formatRupiah(totalPenjualan), icon: Banknote, tone: 'teal' },
-    { label: `Total ${namaBulan}`, hint: 'Penjualan bulan ini', value: formatRupiah(penjualanBulanIni), icon: Calendar, tone: 'amber' },
-    { label: 'Jumlah Expired', hint: 'Kuota waktu habis', value: jumlahExpired.toLocaleString('id-ID'), icon: AlertTriangle, tone: 'expired' },
+    { label: 'Total Penjualan', hint: 'Nilai jual', value: formatRupiah(soldSummary.total_penjualan), icon: Banknote, tone: 'teal' },
+    { label: `Total ${namaBulan}`, hint: 'Penjualan bulan ini', value: formatRupiah(soldSummary.penjualan_bulan_ini), icon: Calendar, tone: 'amber' },
+    { label: 'Jumlah Expired', hint: 'Kuota waktu habis', value: (Number(soldSummary.jumlah_expired) || 0).toLocaleString('id-ID'), icon: AlertTriangle, tone: 'expired' },
   ]
 
-  function handleExportExcel() {
-    const filteredVouchers = filteredRows
+  async function handleExportExcel() {
+    if (totalData === 0) {
+      Swal.fire('Kosong', 'Tidak ada data untuk diexport', 'warning')
+      return
+    }
+
+    // Export mengambil seluruh hasil filter dari backend (bukan hanya halaman aktif).
+    Swal.fire({
+      title: 'Menyiapkan export...',
+      allowOutsideClick: false,
+      allowEscapeKey: false,
+      showConfirmButton: false,
+      didOpen: () => {
+        Swal.showLoading()
+      },
+    })
+
+    let filteredVouchers
+    try {
+      const response = await api.get('/api/hotspot/voucher-terjual', {
+        params: buildParams({ all: 1 }),
+      })
+      filteredVouchers = Array.isArray(response.data?.data) ? response.data.data : []
+    } catch {
+      Swal.fire('Gagal', 'Data export gagal diambil.', 'error')
+      return
+    }
+    Swal.close()
+
     if (filteredVouchers.length === 0) {
       Swal.fire('Kosong', 'Tidak ada data untuk diexport', 'warning')
       return
@@ -272,7 +295,7 @@ function HotspotTerjual() {
           }}
         >
           <option value="all">All Profile</option>
-          {profileOptions.map((name) => (
+          {options.profile.map((name) => (
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
@@ -285,7 +308,7 @@ function HotspotTerjual() {
           }}
         >
           <option value="all">All Router</option>
-          {routerOptions.map((name) => (
+          {options.router.map((name) => (
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
@@ -298,7 +321,7 @@ function HotspotTerjual() {
           }}
         >
           <option value="">Pilih Mitra</option>
-          {mitraOptions.map((name) => (
+          {options.mitra.map((name) => (
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
@@ -311,7 +334,7 @@ function HotspotTerjual() {
           }}
         >
           <option value="all">Semua Outlet</option>
-          {outletOptions.map((name) => (
+          {options.outlet.map((name) => (
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
@@ -325,6 +348,9 @@ function HotspotTerjual() {
         >
           <option value="10">10</option>
           <option value="20">20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="500">500</option>
         </select>
         <label className="stok-search">
           <Search size={16} strokeWidth={2} />
@@ -347,14 +373,14 @@ function HotspotTerjual() {
             <p>Hotspot</p>
             <h1>Voucher Terjual</h1>
           </div>
-          <span>{loading ? 'Memuat...' : `${totalData} voucher`}</span>
+          <span>{loading ? 'Memuat...' : `${totalData.toLocaleString('id-ID')} voucher`}</span>
         </div>
 
         {loading && <p className="stok-status">Memuat data voucher...</p>}
         {error && <p className="stok-status stok-error">{error}</p>}
 
         {!loading && !error && (
-          <div className="stok-table-wrap">
+          <div className={fetching ? 'stok-table-wrap is-fetching' : 'stok-table-wrap'}>
             <table className="terjual-table">
               <thead>
                 <tr>
@@ -443,40 +469,15 @@ function HotspotTerjual() {
         )}
 
         {!loading && !error && (
-          <div className="stok-foot">
-            <p className="stok-info">
-              Showing {showingStart} to {showingEnd} of {totalData} entries
-            </p>
-            <nav className="stok-pages" aria-label="Navigasi halaman voucher terjual">
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page <= 1}
-                onClick={() => setCurrentPage(page - 1)}
-              >
-                Previous
-              </button>
-              {pageNumbers.map((pageNumber) => (
-                <button
-                  key={pageNumber}
-                  type="button"
-                  className={pageNumber === page ? 'stok-page is-active' : 'stok-page'}
-                  aria-current={pageNumber === page ? 'page' : undefined}
-                  onClick={() => setCurrentPage(pageNumber)}
-                >
-                  {pageNumber}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page >= totalPages}
-                onClick={() => setCurrentPage(page + 1)}
-              >
-                Next
-              </button>
-            </nav>
-          </div>
+          <ServerPagination
+            page={page}
+            totalPages={totalPages}
+            totalData={totalData}
+            limit={itemsPerPage}
+            onPageChange={setCurrentPage}
+            label="Navigasi halaman voucher terjual"
+            disabled={fetching}
+          />
         )}
       </div>
     </section>

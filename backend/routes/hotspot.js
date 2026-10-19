@@ -19,6 +19,41 @@ function readText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+// ---- Server-side pagination helpers ----------------------------------------
+const MAX_PAGE_LIMIT = 500;
+const MAX_EXPORT_ROWS = 50000;
+
+function readPaging(query, defaultLimit = 10) {
+  const limit = Math.min(Math.max(parseInt(query?.limit, 10) || defaultLimit, 1), MAX_PAGE_LIMIT);
+  const page = Math.max(parseInt(query?.page, 10) || 1, 1);
+  return { limit, page };
+}
+
+function readSearch(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 100) : '';
+}
+
+// Escape karakter wildcard LIKE agar pencarian "50%" atau "a_b" bersifat harfiah.
+function likePattern(value) {
+  return `%${value.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+// Bangun klausa pencarian "(kolom1 LIKE ? OR kolom2 LIKE ? ...)".
+function searchClause(columns, term, where, params) {
+  if (!term) {
+    return;
+  }
+  where.push(`(${columns.map((column) => `${column} LIKE ?`).join(' OR ')})`);
+  columns.forEach(() => params.push(likePattern(term)));
+}
+
+// Hitung total dulu, jepit halaman ke rentang valid, lalu hitung OFFSET.
+function resolvePage(total, page, limit) {
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const safePage = Math.min(page, totalPages);
+  return { page: safePage, totalPages, offset: (safePage - 1) * limit };
+}
+
 router.get('/profil', async (req, res) => {
   try {
     const [rows] = await pool.execute(
@@ -364,6 +399,28 @@ function randomFromCharset(charset, length) {
   return code;
 }
 
+// Batas jumlah voucher per sekali generate (stress test target: 2.000 - 3.000).
+const MAX_VOUCHER_QTY = 5000;
+// Batas baris per satu query bulk insert (jauh di bawah max_allowed_packet MariaDB).
+const BULK_CHUNK_SIZE = 5000;
+const GENERATE_LOCK_NAME = 'billing_hotspot_voucher_generate';
+
+// Aturan Auto-Length: semakin besar qty, semakin panjang kode minimal agar
+// ruang kombinasi longgar dan tidak terjadi loop tabrakan tanpa akhir.
+function minimumLengthForQty(jumlah) {
+  if (jumlah > 1000) {
+    return 6;
+  }
+  if (jumlah > 100) {
+    return 5;
+  }
+  return 1;
+}
+
+// Generate seluruh voucher di memori. Jika kombinasi unik mentok pada panjang
+// tertentu, panjang otomatis ditambah 1 digit lalu batch diulang (panjang
+// seragam dalam satu batch). Tidak ada loop tak terbatas: percobaan dibatasi
+// dan panjang dibatasi MAX_CODE_LENGTH.
 function createVoucherBatch({
   jumlah,
   panjang,
@@ -372,85 +429,95 @@ function createVoucherBatch({
   usedUsernames,
   separatePassword,
 }) {
-  const reserved = new Set(usedUsernames);
-  const vouchers = [];
-  let attempts = 0;
-  const attemptLimit = Math.max(jumlah * 40, 200);
+  let length = panjang;
 
-  while (vouchers.length < jumlah && attempts < attemptLimit) {
-    attempts += 1;
-    const username = `${prefix}${randomFromCharset(charset, panjang)}`;
-    if (reserved.has(username)) {
-      continue;
-    }
+  while (length <= MAX_CODE_LENGTH) {
+    const reserved = new Set(usedUsernames);
+    const vouchers = [];
+    const attemptLimit = Math.max(jumlah * 20, 200);
+    let attempts = 0;
 
-    let password = username;
-    if (separatePassword) {
-      let guard = 0;
-      do {
-        password = randomFromCharset(charset, panjang);
-        guard += 1;
-      } while (password === username && guard < 8);
-      if (password === username) {
+    while (vouchers.length < jumlah && attempts < attemptLimit) {
+      attempts += 1;
+      const username = `${prefix}${randomFromCharset(charset, length)}`;
+      if (reserved.has(username)) {
         continue;
       }
+
+      let password = username;
+      if (separatePassword) {
+        password = randomFromCharset(charset, length);
+        if (password === username) {
+          continue;
+        }
+      }
+
+      reserved.add(username);
+      vouchers.push({ username, password });
     }
 
-    reserved.add(username);
-    vouchers.push({ username, password });
+    if (vouchers.length >= jumlah) {
+      return { vouchers, panjang: length };
+    }
+
+    // Mentok: tambah 1 digit otomatis.
+    length += 1;
   }
 
-  if (vouchers.length < jumlah) {
-    const error = new Error('Kode unik tidak cukup');
-    error.code = 'CODE_EXHAUSTED';
-    throw error;
-  }
-
-  return vouchers;
+  const error = new Error('Kode unik tidak cukup');
+  error.code = 'CODE_EXHAUSTED';
+  throw error;
 }
 
-async function insertVoucher(voucher, record) {
-  const connection = await pool.getConnection();
+async function bulkInsert(connection, sql, rows) {
+  for (let offset = 0; offset < rows.length; offset += BULK_CHUNK_SIZE) {
+    // query() (bukan execute()) agar placeholder "VALUES ?" menerima array multidimensi.
+    await connection.query(sql, [rows.slice(offset, offset + BULK_CHUNK_SIZE)]);
+  }
+}
 
-  try {
-    await connection.beginTransaction();
-    await connection.execute(
-      "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
-      [voucher.username, voucher.password],
-    );
+// Bulk insert: seluruh voucher masuk ke radcheck, radusergroup, dan
+// hotspot_vouchers masing-masing lewat SATU query, dalam satu transaksi.
+async function insertVouchersBulk(connection, vouchers, record) {
+  const radcheckRows = [];
+  const radusergroupRows = [];
+  const voucherRows = [];
+
+  for (const voucher of vouchers) {
+    radcheckRows.push([voucher.username, 'Cleartext-Password', ':=', voucher.password]);
     if (record.nasIp) {
-      await connection.execute(
-        "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'NAS-IP-Address', '==', ?)",
-        [voucher.username, record.nasIp],
-      );
+      radcheckRows.push([voucher.username, 'NAS-IP-Address', '==', record.nasIp]);
     }
-    await connection.execute(
-      'INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, 1)',
-      [voucher.username, record.mikrotikGroup],
-    );
-    await connection.execute(
-      'INSERT INTO hotspot_vouchers (username, password, profile, router, server, mitra, outlet, hpp, komisi, harga, admin, kode_batch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [
-        voucher.username,
-        voucher.password,
-        record.profile,
-        record.router,
-        record.server,
-        record.mitra,
-        record.outlet,
-        record.hpp,
-        record.komisi,
-        record.harga,
-        record.admin,
-        record.kodeBatch,
-      ],
+    radusergroupRows.push([voucher.username, record.mikrotikGroup, 1]);
+    voucherRows.push([
+      voucher.username,
+      voucher.password,
+      record.profile,
+      record.router,
+      record.server,
+      record.mitra,
+      record.outlet,
+      record.hpp,
+      record.komisi,
+      record.harga,
+      record.admin,
+      record.kodeBatch,
+    ]);
+  }
+
+  await connection.beginTransaction();
+  try {
+    await bulkInsert(connection, 'INSERT INTO radcheck (username, attribute, op, value) VALUES ?', radcheckRows);
+    await bulkInsert(connection, 'INSERT INTO radusergroup (username, groupname, priority) VALUES ?', radusergroupRows);
+    await bulkInsert(
+      connection,
+      'INSERT INTO hotspot_vouchers (username, password, profile, router, server, mitra, outlet, hpp, komisi, harga, admin, kode_batch) VALUES ?',
+      voucherRows,
     );
     await connection.commit();
   } catch (error) {
     await connection.rollback();
     throw error;
-  } finally {
-    connection.release();
   }
 }
 
@@ -501,76 +568,164 @@ function hitungTanggalExpired(tglAktif, durasiMaksimal) {
   return new Date(mulai.getTime() + (maksimal * 1000));
 }
 
-router.get('/voucher-terjual', async (req, res) => {
+// Agregasi pemakaian per voucher (tanpa ORDER BY / LIMIT) - dipakai sebagai subquery.
+const SOLD_BASE_SQL = `SELECT
+    v.id,
+    v.username,
+    v.password,
+    v.profile,
+    v.router,
+    v.server,
+    v.mitra,
+    v.outlet,
+    v.hpp,
+    v.komisi,
+    v.harga,
+    v.admin,
+    v.kode_batch,
+    v.created_at,
+    COALESCE(SUM(a.acctsessiontime), 0) AS durasi_terpakai,
+    COALESCE(SUM(COALESCE(a.acctinputoctets, 0) + COALESCE(a.acctoutputoctets, 0)), 0) AS kuota_terpakai,
+    MIN(a.acctstarttime) AS tgl_aktif,
+    CAST(MAX(g.value) AS UNSIGNED) AS durasi_maksimal
+  FROM hotspot_vouchers v
+  LEFT JOIN radacct a ON a.username = v.username
+  LEFT JOIN hotspot_profiles hp
+    ON hp.nama_profile = v.profile OR hp.mikrotik_group = v.profile
+  LEFT JOIN radgroupreply g
+    ON g.groupname = hp.mikrotik_group AND g.attribute = 'Session-Timeout'
+  WHERE v.status = 'Yes' OR a.radacctid IS NOT NULL
+  GROUP BY
+    v.id, v.username, v.password, v.profile, v.router, v.server, v.mitra,
+    v.outlet, v.hpp, v.komisi, v.harga, v.admin, v.kode_batch, v.created_at`;
+
+function mapSoldRow(row) {
+  const terpakai = Number(row.durasi_terpakai) || 0;
+  const maksimal = Number(row.durasi_maksimal);
+  const punyaBatas = Number.isFinite(maksimal) && maksimal > 0;
+  const statusExpired = punyaBatas && terpakai >= maksimal ? 'EXPIRED' : 'AKTIF';
+  const tglExpired = hitungTanggalExpired(row.tgl_aktif, punyaBatas ? maksimal : null);
+
+  return {
+    id: row.id,
+    username: row.username,
+    password: row.password,
+    profile: row.profile,
+    router: row.router,
+    server: row.server,
+    mitra: row.mitra,
+    outlet: row.outlet,
+    hpp: Number(row.hpp) || 0,
+    komisi: Number(row.komisi) || 0,
+    harga: Number(row.harga) || 0,
+    saldo: null,
+    admin: row.admin,
+    kode_batch: row.kode_batch,
+    created_at: row.created_at,
+    tgl_aktif: row.tgl_aktif,
+    tgl_expired: tglExpired,
+    durasi_terpakai: terpakai,
+    durasi_maksimal: punyaBatas ? maksimal : null,
+    kuota_terpakai: Number(row.kuota_terpakai) || 0,
+    durasi: `${formatDurasiDetik(terpakai)} / ${punyaBatas ? formatDurasiDetik(maksimal) : 'UNLIMITED'}`,
+    kuota: `${formatKuotaTerpakai(row.kuota_terpakai)} / UNLIMITED`,
+    status_expired: statusExpired,
+  };
+}
+
+// Opsi dropdown filter (distinct) untuk halaman Voucher Terjual.
+router.get('/voucher-terjual/opsi', async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT
-        v.id,
-        v.username,
-        v.password,
-        v.profile,
-        v.router,
-        v.server,
-        v.mitra,
-        v.outlet,
-        v.hpp,
-        v.komisi,
-        v.harga,
-        v.admin,
-        v.kode_batch,
-        v.created_at,
-        COALESCE(SUM(a.acctsessiontime), 0) AS durasi_terpakai,
-        COALESCE(SUM(COALESCE(a.acctinputoctets, 0) + COALESCE(a.acctoutputoctets, 0)), 0) AS kuota_terpakai,
-        MIN(a.acctstarttime) AS tgl_aktif,
-        MAX(g.value) AS durasi_maksimal
-      FROM hotspot_vouchers v
-      LEFT JOIN radacct a ON a.username = v.username
-      LEFT JOIN hotspot_profiles hp
-        ON hp.nama_profile = v.profile OR hp.mikrotik_group = v.profile
-      LEFT JOIN radgroupreply g
-        ON g.groupname = hp.mikrotik_group AND g.attribute = 'Session-Timeout'
-      WHERE v.status = 'Yes' OR a.radacctid IS NOT NULL
-      GROUP BY
-        v.id, v.username, v.password, v.profile, v.router, v.server, v.mitra,
-        v.outlet, v.hpp, v.komisi, v.harga, v.admin, v.kode_batch, v.created_at
-      ORDER BY tgl_aktif DESC, v.id DESC`,
+      `SELECT DISTINCT v.profile, v.router, v.mitra, v.outlet
+       FROM hotspot_vouchers v
+       WHERE v.status = 'Yes'
+          OR EXISTS (SELECT 1 FROM radacct a WHERE a.username = v.username)`,
     );
-
-    const data = rows.map((row) => {
-      const terpakai = Number(row.durasi_terpakai) || 0;
-      const maksimal = Number(row.durasi_maksimal);
-      const punyaBatas = Number.isFinite(maksimal) && maksimal > 0;
-      const statusExpired = punyaBatas && terpakai >= maksimal ? 'EXPIRED' : 'AKTIF';
-      const tglExpired = hitungTanggalExpired(row.tgl_aktif, punyaBatas ? maksimal : null);
-
-      return {
-        id: row.id,
-        username: row.username,
-        password: row.password,
-        profile: row.profile,
-        router: row.router,
-        server: row.server,
-        mitra: row.mitra,
-        outlet: row.outlet,
-        hpp: Number(row.hpp) || 0,
-        komisi: Number(row.komisi) || 0,
-        harga: Number(row.harga) || 0,
-        saldo: null,
-        admin: row.admin,
-        kode_batch: row.kode_batch,
-        created_at: row.created_at,
-        tgl_aktif: row.tgl_aktif,
-        tgl_expired: tglExpired,
-        durasi_terpakai: terpakai,
-        durasi_maksimal: punyaBatas ? maksimal : null,
-        kuota_terpakai: Number(row.kuota_terpakai) || 0,
-        durasi: `${formatDurasiDetik(terpakai)} / ${punyaBatas ? formatDurasiDetik(maksimal) : 'UNLIMITED'}`,
-        kuota: `${formatKuotaTerpakai(row.kuota_terpakai)} / UNLIMITED`,
-        status_expired: statusExpired,
-      };
+    const unik = (key) => [...new Set(rows.map((row) => String(row[key] || '').trim()).filter(Boolean))].sort();
+    res.json({
+      profile: unik('profile'),
+      router: unik('router'),
+      mitra: unik('mitra'),
+      outlet: unik('outlet'),
     });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil opsi filter',
+      error: error.message,
+    });
+  }
+});
 
-    res.json(data);
+router.get('/voucher-terjual', async (req, res) => {
+  try {
+    const exportAll = req.query.all === '1';
+    const { limit, page: requestedPage } = readPaging(req.query);
+    const where = [];
+    const params = [];
+
+    searchClause(
+      ['s.username', 's.profile', 's.router', 's.server', 's.mitra', 's.outlet', 's.admin', 's.kode_batch'],
+      readSearch(req.query.q),
+      where,
+      params,
+    );
+    const tanggal = readText(req.query.tanggal);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(tanggal)) {
+      where.push('DATE(s.tgl_aktif) = ?');
+      params.push(tanggal);
+    }
+    for (const key of ['profile', 'router', 'mitra', 'outlet']) {
+      const value = readText(req.query[key]);
+      if (value) {
+        where.push(`s.${key} = ?`);
+        params.push(value);
+      }
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const [summaryRows] = await pool.query(
+      `SELECT
+        COUNT(*) AS jumlah,
+        COALESCE(SUM(s.harga), 0) AS total_penjualan,
+        COALESCE(SUM(CASE WHEN s.tgl_aktif IS NOT NULL
+          AND DATE_FORMAT(s.tgl_aktif, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
+          THEN s.harga ELSE 0 END), 0) AS penjualan_bulan_ini,
+        COALESCE(SUM(CASE WHEN s.durasi_maksimal > 0 AND s.tgl_aktif IS NOT NULL
+          AND DATE_ADD(s.tgl_aktif, INTERVAL s.durasi_maksimal SECOND) < NOW()
+          THEN 1 ELSE 0 END), 0) AS jumlah_expired
+      FROM (${SOLD_BASE_SQL}) s ${whereSql}`,
+      params,
+    );
+    const summary = summaryRows[0] || {};
+    const total = Number(summary.jumlah) || 0;
+    const { page, totalPages, offset } = resolvePage(total, requestedPage, limit);
+
+    const orderSql = 'ORDER BY s.tgl_aktif DESC, s.id DESC';
+    const [rows] = exportAll
+      ? await pool.query(
+        `SELECT s.* FROM (${SOLD_BASE_SQL}) s ${whereSql} ${orderSql} LIMIT ?`,
+        [...params, MAX_EXPORT_ROWS],
+      )
+      : await pool.query(
+        `SELECT s.* FROM (${SOLD_BASE_SQL}) s ${whereSql} ${orderSql} LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+      );
+
+    res.json({
+      data: rows.map(mapSoldRow),
+      total,
+      page,
+      limit,
+      total_pages: totalPages,
+      summary: {
+        jumlah: total,
+        total_penjualan: Number(summary.total_penjualan) || 0,
+        penjualan_bulan_ini: Number(summary.penjualan_bulan_ini) || 0,
+        jumlah_expired: Number(summary.jumlah_expired) || 0,
+      },
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -582,11 +737,50 @@ router.get('/voucher-terjual', async (req, res) => {
 
 router.get('/voucher', async (req, res) => {
   try {
+    const { limit, page: requestedPage } = readPaging(req.query);
+    // Stok = voucher yang belum pernah dipakai (belum ada sesi di radacct).
+    const where = ['NOT EXISTS (SELECT 1 FROM radacct a WHERE a.username = v.username)'];
+    const params = [];
+    searchClause(
+      ['v.kode_batch', 'v.username', 'v.profile', 'v.router', 'v.server', 'v.mitra', 'v.outlet'],
+      readSearch(req.query.q),
+      where,
+      params,
+    );
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+
+    const [summaryRows] = await pool.query(
+      `SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(v.hpp), 0) AS total_hpp,
+        COALESCE(SUM(v.komisi), 0) AS total_komisi,
+        COALESCE(SUM(v.harga), 0) AS total_harga
+      FROM hotspot_vouchers v ${whereSql}`,
+      params,
+    );
+    const summary = summaryRows[0] || {};
+    const total = Number(summary.total) || 0;
+    const { page, totalPages, offset } = resolvePage(total, requestedPage, limit);
+
     const [rows] = await pool.query(
-      'SELECT * FROM hotspot_vouchers WHERE username NOT IN (SELECT username FROM radacct) ORDER BY created_at DESC',
+      `SELECT v.* FROM hotspot_vouchers v ${whereSql}
+       ORDER BY v.created_at DESC, v.id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
     );
 
-    res.json(rows);
+    res.json({
+      data: rows,
+      total,
+      page,
+      limit,
+      total_pages: totalPages,
+      summary: {
+        total_stok: total,
+        total_hpp: Number(summary.total_hpp) || 0,
+        total_komisi: Number(summary.total_komisi) || 0,
+        total_harga: Number(summary.total_harga) || 0,
+      },
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -610,10 +804,10 @@ router.post('/voucher/generate', async (req, res) => {
   const admin = readText(req.body?.admin) || 'System';
   const charset = CHARSETS[kodeKombinasi];
 
-  if (!Number.isInteger(jumlah) || jumlah < 1 || jumlah > 500) {
+  if (!Number.isInteger(jumlah) || jumlah < 1 || jumlah > MAX_VOUCHER_QTY) {
     return res.status(400).json({
       success: false,
-      message: 'Jumlah voucher harus antara 1 dan 500',
+      message: `Jumlah voucher harus antara 1 dan ${MAX_VOUCHER_QTY}`,
     });
   }
 
@@ -645,8 +839,23 @@ router.post('/voucher/generate', async (req, res) => {
     });
   }
 
+  let connection;
+  let lockAcquired = false;
+
   try {
-    const [profiles] = await pool.execute(
+    // Satu koneksi khusus + advisory lock: dua proses generate bersamaan tidak
+    // akan menghasilkan username yang sama.
+    connection = await pool.getConnection();
+    const [lockRows] = await connection.query('SELECT GET_LOCK(?, 30) AS locked', [GENERATE_LOCK_NAME]);
+    lockAcquired = Number(lockRows[0]?.locked) === 1;
+    if (!lockAcquired) {
+      return res.status(503).json({
+        success: false,
+        message: 'Server sedang memproses pembuatan voucher lain, coba lagi sebentar',
+      });
+    }
+
+    const [profiles] = await connection.execute(
       'SELECT nama_profile, harga_jual, komisi_reseller, (harga_jual - komisi_reseller) AS hpp FROM hotspot_profiles WHERE mikrotik_group = ? LIMIT 1',
       [mikrotikGroup],
     );
@@ -671,33 +880,39 @@ router.post('/voucher/generate', async (req, res) => {
       harga: Number(profile.harga_jual) || 0,
       admin,
     };
-    const [existingRows] = await pool.execute(
+
+    let nasIp = '';
+    if (routerName && routerName !== 'ALL ROUTER') {
+      const [routerRows] = await connection.execute(
+        'SELECT ip_address FROM routers WHERE nama_router = ? LIMIT 1',
+        [routerName],
+      );
+      nasIp = routerRows[0]?.ip_address || '';
+    }
+    record.kodeBatch = Math.floor(Date.now() / 1000).toString();
+    record.nasIp = nasIp;
+
+    const [existingRows] = await connection.query(
       'SELECT username FROM radcheck UNION SELECT username FROM hotspot_vouchers',
     );
     const usedUsernames = existingRows.map((row) => row.username);
-    const panjang = resolveCodeLength(usedUsernames, prefix, jumlah, panjangDiminta, charset);
-    const vouchers = createVoucherBatch({
+
+    // Auto-Length berdasarkan qty (qty > 100 => min 5, qty > 1000 => min 6),
+    // lalu pastikan ruang kombinasi cukup.
+    const panjangAwal = Math.max(panjangDiminta, minimumLengthForQty(jumlah));
+    const panjangDipakai = resolveCodeLength(usedUsernames, prefix, jumlah, panjangAwal, charset);
+
+    // Kumpulkan semua voucher di memori, panjang bisa naik otomatis jika mentok.
+    const { vouchers, panjang } = createVoucherBatch({
       jumlah,
-      panjang,
+      panjang: panjangDipakai,
       prefix,
       charset,
       usedUsernames,
       separatePassword: jenisVoucher === 'username+password',
     });
 
-    let nasIp = '';
-    if (routerName && routerName !== 'ALL ROUTER') {
-      const [routerRows] = await pool.execute(
-        'SELECT ip_address FROM routers WHERE nama_router = ? LIMIT 1',
-        [routerName],
-      );
-      nasIp = routerRows[0]?.ip_address || '';
-    }
-
-    const kodeBatch = Math.floor(Date.now() / 1000).toString();
-    record.kodeBatch = kodeBatch;
-    record.nasIp = nasIp;
-    await Promise.all(vouchers.map((voucher) => insertVoucher(voucher, record)));
+    await insertVouchersBulk(connection, vouchers, record);
 
     return res.json({
       success: true,
@@ -719,6 +934,17 @@ router.post('/voucher/generate', async (req, res) => {
         : 'Gagal membuat voucher',
       error: error.message,
     });
+  } finally {
+    if (connection) {
+      if (lockAcquired) {
+        try {
+          await connection.query('SELECT RELEASE_LOCK(?)', [GENERATE_LOCK_NAME]);
+        } catch (releaseError) {
+          // Lock otomatis lepas saat koneksi ditutup.
+        }
+      }
+      connection.release();
+    }
   }
 });
 
@@ -835,8 +1061,18 @@ function rencanaHotspotRouter(action, usernames, router) {
 
 router.get('/voucher-online', async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT
+    const { limit, page: requestedPage } = readPaging(req.query);
+    const where = [];
+    const params = [];
+    searchClause(
+      ['o.username', 'o.profile', 'o.router', 'o.interface', 'o.server', 'o.ip_address', 'o.mac_addr', 'o.mitra', 'o.outlet'],
+      readSearch(req.query.q),
+      where,
+      params,
+    );
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const baseSql = `SELECT
         a.radacctid AS id,
         a.username,
         v.profile,
@@ -856,28 +1092,45 @@ router.get('/voucher-online', async (req, res) => {
       FROM radacct a
       LEFT JOIN hotspot_vouchers v ON v.username = a.username
       LEFT JOIN routers r ON r.ip_address = a.nasipaddress
-      WHERE a.acctstoptime IS NULL
-      ORDER BY a.acctstarttime DESC, a.radacctid DESC`,
+      WHERE a.acctstoptime IS NULL`;
+
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS total FROM (${baseSql}) o ${whereSql}`,
+      params,
+    );
+    const total = Number(countRows[0]?.total) || 0;
+    const { page, totalPages, offset } = resolvePage(total, requestedPage, limit);
+
+    const [rows] = await pool.query(
+      `SELECT o.* FROM (${baseSql}) o ${whereSql}
+       ORDER BY o.last_connected DESC, o.id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
     );
 
-    res.json(rows.map((row) => ({
-      id: row.id,
-      username: row.username,
-      profile: row.profile || '',
-      uptime: Number(row.uptime) || 0,
-      upload: Number(row.upload) || 0,
-      download: Number(row.download) || 0,
-      router: row.router || '',
-      interface: row.interface || '',
-      server: row.server || '',
-      ip_address: row.ip_address || '',
-      mac_addr: row.mac_addr || '',
-      mitra: row.mitra || '',
-      outlet: row.outlet || '',
-      last_connected: row.last_connected,
-      last_updated: row.last_updated,
-      terdaftar: Boolean(row.terdaftar),
-    })));
+    res.json({
+      data: rows.map((row) => ({
+        id: row.id,
+        username: row.username,
+        profile: row.profile || '',
+        uptime: Number(row.uptime) || 0,
+        upload: Number(row.upload) || 0,
+        download: Number(row.download) || 0,
+        router: row.router || '',
+        interface: row.interface || '',
+        server: row.server || '',
+        ip_address: row.ip_address || '',
+        mac_addr: row.mac_addr || '',
+        mitra: row.mitra || '',
+        outlet: row.outlet || '',
+        last_connected: row.last_connected,
+        last_updated: row.last_updated,
+        terdaftar: Boolean(row.terdaftar),
+      })),
+      total,
+      page,
+      limit,
+      total_pages: totalPages,
+    });
   } catch (error) {
     res.status(500).json({
       success: false,

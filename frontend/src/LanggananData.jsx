@@ -279,11 +279,17 @@ function LanggananData() {
     setIsMenuOpen(false)
   }
 
+  function resetForm() {
+    setEditingId(null)
+    setForm(emptyForm())
+  }
+
   function closeModal() {
-    if (!saving) {
-      setIsModalOpen(false)
-      setEditingId(null)
+    if (saving) {
+      return
     }
+    setIsModalOpen(false)
+    resetForm()
   }
 
   function payloadFromForm() {
@@ -317,7 +323,7 @@ function LanggananData() {
       }
       await loadData()
       setIsModalOpen(false)
-      setEditingId(null)
+      resetForm()
       setSelectedIds([])
       Swal.fire({
         icon: 'success',

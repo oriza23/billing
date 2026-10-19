@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import api from './api/axios.js'
+import ServerPagination from './ServerPagination.jsx'
+import useDebouncedValue from './useDebouncedValue.js'
 import Swal from 'sweetalert2'
 import {
   Banknote,
@@ -92,7 +94,13 @@ function HotspotStok() {
   const [selectedOutlet, setSelectedOutlet] = useState('')
   const [selectedRouter, setSelectedRouter] = useState('ALL ROUTER')
   const [vouchers, setVouchers] = useState([])
+  const [totalData, setTotalData] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
+  const [voucherSummary, setVoucherSummary] = useState({
+    total_stok: 0, total_hpp: 0, total_komisi: 0, total_harga: 0,
+  })
   const [loading, setLoading] = useState(true)
+  const [fetching, setFetching] = useState(false)
   const [error, setError] = useState('')
   const [mikrotikGroup, setMikrotikGroup] = useState('')
   const [jumlah, setJumlah] = useState(10)
@@ -101,7 +109,11 @@ function HotspotStok() {
   const [jenisVoucher, setJenisVoucher] = useState('username=password')
   const [kodeKombinasi, setKodeKombinasi] = useState('huruf-kecil')
   const [saving, setSaving] = useState(false)
-  const [selectedVouchers, setSelectedVouchers] = useState([])
+  // Kunci sinkron anti klik ganda (state React baru update setelah render).
+  const generatingRef = useRef(false)
+  // Voucher terpilih disimpan lengkap (username -> baris) agar tetap bisa
+  // di-print/dihapus walau admin berpindah halaman.
+  const [selectedMap, setSelectedMap] = useState({})
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isModalBuatVcOpen, setIsModalBuatVcOpen] = useState(false)
   const [isModalOutletOpen, setIsModalOutletOpen] = useState(false)
@@ -118,20 +130,69 @@ function HotspotStok() {
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(10)
 
-  async function fetchVouchers() {
-    const response = await api.get('/api/hotspot/voucher')
-    setVouchers(Array.isArray(response.data) ? response.data : [])
+  const debouncedSearch = useDebouncedValue(searchTerm.trim())
+
+  function applyVoucherResponse(payload) {
+    setVouchers(Array.isArray(payload?.data) ? payload.data : [])
+    setTotalData(Number(payload?.total) || 0)
+    setTotalPages(Math.max(1, Number(payload?.total_pages) || 1))
+    if (payload?.summary) {
+      setVoucherSummary(payload.summary)
+    }
     setError('')
   }
+
+  // Muat ulang halaman tertentu (mis. halaman 1 setelah generate) dengan filter aktif.
+  async function fetchVouchers(targetPage = currentPage) {
+    const response = await api.get('/api/hotspot/voucher', {
+      params: { page: targetPage, limit: itemsPerPage, q: searchTerm.trim() },
+    })
+    applyVoucherResponse(response.data)
+    setCurrentPage(response.data.page)
+  }
+
+  // Server-side pagination: hanya satu halaman data yang diminta dari backend.
+  useEffect(() => {
+    let ignore = false
+
+    async function loadPage() {
+      setFetching(true)
+      try {
+        const response = await api.get('/api/hotspot/voucher', {
+          params: { page: currentPage, limit: itemsPerPage, q: debouncedSearch },
+        })
+        if (ignore) {
+          return
+        }
+        applyVoucherResponse(response.data)
+        if (response.data.page !== currentPage) {
+          setCurrentPage(response.data.page)
+        }
+      } catch {
+        if (!ignore) {
+          setError('Gagal memuat data voucher.')
+        }
+      } finally {
+        if (!ignore) {
+          setLoading(false)
+          setFetching(false)
+        }
+      }
+    }
+
+    loadPage()
+    return () => {
+      ignore = true
+    }
+  }, [currentPage, itemsPerPage, debouncedSearch])
 
   useEffect(() => {
     let ignore = false
 
     async function loadData() {
       try {
-        const [profilResponse, voucherResponse, outletResponse] = await Promise.all([
+        const [profilResponse, outletResponse] = await Promise.all([
           api.get('/api/hotspot/profil'),
-          api.get('/api/hotspot/voucher'),
           api.get('/api/outlets').catch(() => ({ data: [] })),
         ])
         if (ignore) {
@@ -142,16 +203,11 @@ function HotspotStok() {
         const outlets = Array.isArray(outletResponse.data) ? outletResponse.data : []
         setDaftarProfil(profiles)
         setMikrotikGroup((current) => current || profiles[0]?.mikrotik_group || '')
-        setVouchers(Array.isArray(voucherResponse.data) ? voucherResponse.data : [])
         setDaftarOutletAktif(outlets.filter((item) => item.status === 'Aktif'))
         setError('')
       } catch {
         if (!ignore) {
-          setError('Gagal memuat data voucher.')
-        }
-      } finally {
-        if (!ignore) {
-          setLoading(false)
+          setError('Gagal memuat data profil.')
         }
       }
     }
@@ -258,46 +314,37 @@ function HotspotStok() {
     return () => document.removeEventListener('mousedown', closeOutletMenu)
   }, [isOutletMenuOpen])
 
-  const searchLower = searchTerm.toLowerCase()
-  const filteredVouchers = vouchers.filter((voucher) => (
-    (voucher.kode_batch || '').toLowerCase().includes(searchLower)
-    || (voucher.username || '').toLowerCase().includes(searchLower)
-    || (voucher.profile || '').toLowerCase().includes(searchLower)
-    || (voucher.router || '').toLowerCase().includes(searchLower)
-    || (voucher.server || '').toLowerCase().includes(searchLower)
-    || (voucher.mitra || '').toLowerCase().includes(searchLower)
-    || (voucher.outlet || '').toLowerCase().includes(searchLower)
-  ))
-  const totalData = filteredVouchers.length
-  const totalPages = Math.max(1, Math.ceil(totalData / itemsPerPage))
-  const page = Math.min(currentPage, totalPages)
-  const indexOfLastItem = page * itemsPerPage
-  const indexOfFirstItem = indexOfLastItem - itemsPerPage
-  const currentItems = filteredVouchers.slice(indexOfFirstItem, indexOfLastItem)
-  const showingStart = totalData === 0 ? 0 : indexOfFirstItem + 1
-  const showingEnd = Math.min(indexOfLastItem, totalData)
-  const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1)
+  const currentItems = vouchers
+  const page = currentPage
   const allSelected = currentItems.length > 0
-    && currentItems.every((item) => selectedVouchers.includes(item.username))
+    && currentItems.every((item) => selectedMap[item.username])
+  const selectedVouchers = Object.keys(selectedMap)
 
-  function toggleRow(username) {
-    setSelectedVouchers((current) => (
-      current.includes(username)
-        ? current.filter((item) => item !== username)
-        : [...current, username]
-    ))
+  function toggleRow(item) {
+    setSelectedMap((current) => {
+      const next = { ...current }
+      if (next[item.username]) {
+        delete next[item.username]
+      } else {
+        next[item.username] = item
+      }
+      return next
+    })
   }
 
   function toggleAll() {
-    const visibleUsernames = currentItems.map((item) => item.username)
-    if (visibleUsernames.length === 0) {
+    if (currentItems.length === 0) {
       return
     }
-    if (visibleUsernames.every((username) => selectedVouchers.includes(username))) {
-      setSelectedVouchers((current) => current.filter((username) => !visibleUsernames.includes(username)))
-      return
-    }
-    setSelectedVouchers((current) => [...new Set([...current, ...visibleUsernames])])
+    setSelectedMap((current) => {
+      const next = { ...current }
+      if (currentItems.every((item) => next[item.username])) {
+        currentItems.forEach((item) => delete next[item.username])
+      } else {
+        currentItems.forEach((item) => { next[item.username] = item })
+      }
+      return next
+    })
   }
 
   function showUnderDevelopment() {
@@ -310,8 +357,7 @@ function HotspotStok() {
 
   function handlePrintSelected() {
     setIsMenuOpen(false)
-    const dataPrint = vouchers
-      .filter((item) => selectedVouchers.includes(item.username))
+    const dataPrint = Object.values(selectedMap)
       .map((item) => {
         const profil = daftarProfil.find((profile) => profile.nama_profile === item.profile)
         return {
@@ -342,7 +388,7 @@ function HotspotStok() {
       return
     }
 
-    const selectedRows = vouchers.filter((item) => selectedVouchers.includes(item.username))
+    const selectedRows = Object.values(selectedMap)
     const batchIds = new Set(selectedRows.map((item) => item.kode_batch ?? null))
     if (batchIds.size > 1) {
       Swal.fire(
@@ -369,7 +415,7 @@ function HotspotStok() {
         usernames: selectedVouchers,
       })
       setIsMenuOpen(false)
-      setSelectedVouchers([])
+      setSelectedMap({})
       await fetchVouchers()
       notifySuccess('Data sukses diperbarui')
     } catch (requestError) {
@@ -383,6 +429,10 @@ function HotspotStok() {
 
   async function handleGenerate(event) {
     event.preventDefault()
+
+    if (generatingRef.current) {
+      return
+    }
 
     const adminName = localStorage.getItem('admin_user') || 'System'
     const payload = {
@@ -407,10 +457,13 @@ function HotspotStok() {
       return
     }
 
+    generatingRef.current = true
+    setSaving(true)
     setIsModalBuatVcOpen(false)
+
     Swal.fire({
-      title: 'Membuat voucher...',
-      text: 'Mohon tunggu sebentar.',
+      title: 'Sedang Memproses...',
+      text: 'Mencetak ribuan voucher, harap tunggu.',
       allowOutsideClick: false,
       allowEscapeKey: false,
       showConfirmButton: false,
@@ -419,20 +472,28 @@ function HotspotStok() {
       },
     })
 
-    setSaving(true)
     try {
       await api.post('/api/hotspot/voucher/generate', payload)
-      await fetchVouchers()
-      notifySuccess('Voucher berhasil dibuat')
-    } catch (requestError) {
-      Swal.fire({
-        icon: 'error',
-        title: 'Gagal',
-        text: requestError.response?.data?.message || 'Gagal membuat voucher.',
-      })
-    } finally {
+    } catch {
+      Swal.close()
+      Swal.fire('Gagal!', 'Terjadi kesalahan saat generate voucher. Silakan coba lagi.', 'error')
+      generatingRef.current = false
       setSaving(false)
+      return
     }
+
+    // Generate sukses: kosongkan form, lalu muat ulang tabel agar voucher baru tampil.
+    resetVoucherForm()
+    try {
+      await fetchVouchers(1)
+    } catch {
+      setError('Voucher berhasil dibuat, tetapi tabel gagal dimuat ulang. Muat ulang halaman.')
+    }
+
+    Swal.close()
+    Swal.fire('Berhasil!', 'Voucher sukses dibuat dan dimasukkan ke database.', 'success')
+    generatingRef.current = false
+    setSaving(false)
   }
 
   const selectedProfile = daftarProfil.find((item) => item.mikrotik_group === mikrotikGroup)
@@ -442,10 +503,10 @@ function HotspotStok() {
     ? Number(selectedProfile.hpp)
     : hargaJual - komisi
   const jumlahVoucher = Math.max(0, Number(jumlah) || 0)
-  const totalStok = filteredVouchers.length
-  const totalHpp = sumColumn(filteredVouchers, 'hpp')
-  const totalKomisi = sumColumn(filteredVouchers, 'komisi')
-  const totalHarga = sumColumn(filteredVouchers, 'harga')
+  const totalStok = voucherSummary.total_stok
+  const totalHpp = voucherSummary.total_hpp
+  const totalKomisi = voucherSummary.total_komisi
+  const totalHarga = voucherSummary.total_harga
   const summaries = summaryCards.map((card) => {
     if (card.key === 'stok') {
       return { ...card, value: totalStok.toLocaleString('id-ID') }
@@ -491,6 +552,27 @@ function HotspotStok() {
       return
     }
     setSelectedOutlets((current) => [...new Set([...current, ...visibleIds])])
+  }
+
+  // Kembalikan form Buat Voucher ke nilai awal (prefix dan outlet dikosongkan,
+  // sisanya kembali ke pilihan bawaan).
+  function resetVoucherForm() {
+    setSelectedRouter('ALL ROUTER')
+    setJenisVoucher('username=password')
+    setKodeKombinasi('huruf-kecil')
+    setPrefix('')
+    setSelectedOutlet('')
+    setMikrotikGroup(daftarProfil[0]?.mikrotik_group || '')
+    setJumlah(10)
+    setPanjang(6)
+  }
+
+  function closeVoucherModal() {
+    if (saving) {
+      return
+    }
+    setIsModalBuatVcOpen(false)
+    resetVoucherForm()
   }
 
   function closeOutletModal() {
@@ -713,6 +795,8 @@ function HotspotStok() {
           <option value="10">10</option>
           <option value="20">20</option>
           <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="500">500</option>
         </select>
 
         <label className="stok-search">
@@ -737,14 +821,14 @@ function HotspotStok() {
             <p>Data Radius</p>
             <h1>Daftar Voucher</h1>
           </div>
-          <span>{loading ? 'Memuat...' : `${filteredVouchers.length} voucher`}</span>
+          <span>{loading ? 'Memuat...' : `${totalData.toLocaleString('id-ID')} voucher`}</span>
         </div>
 
         {loading && <p className="stok-status">Memuat data voucher...</p>}
         {error && <p className="stok-status stok-error">{error}</p>}
 
         {!loading && !error && (
-          <div className="stok-table-wrap">
+          <div className={fetching ? 'stok-table-wrap is-fetching' : 'stok-table-wrap'}>
             <table className="stok-table">
               <thead>
                 <tr>
@@ -780,17 +864,17 @@ function HotspotStok() {
                     </td>
                   </tr>
                 ) : (
-                  currentItems.map((item, index) => (
+                  currentItems.map((item) => (
                     <tr
-                      key={`${item.username}-${index}`}
-                      className={selectedVouchers.includes(item.username) ? 'is-selected' : undefined}
+                      key={item.id ?? item.username}
+                      className={selectedMap[item.username] ? 'is-selected' : undefined}
                     >
                       <td className="stok-check">
                         <input
                           type="checkbox"
                           aria-label={`Pilih ${item.username}`}
-                          checked={selectedVouchers.includes(item.username)}
-                          onChange={() => toggleRow(item.username)}
+                          checked={Boolean(selectedMap[item.username])}
+                          onChange={() => toggleRow(item)}
                         />
                       </td>
                       <td>
@@ -823,45 +907,20 @@ function HotspotStok() {
         )}
 
         {!loading && !error && (
-          <div className="stok-foot">
-            <p className="stok-info">
-              Showing {showingStart} to {showingEnd} of {totalData} entries
-            </p>
-            <nav className="stok-pages" aria-label="Navigasi halaman">
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page <= 1}
-                onClick={() => setCurrentPage(page - 1)}
-              >
-                Previous
-              </button>
-              {pageNumbers.map((pageNumber) => (
-                <button
-                  key={pageNumber}
-                  type="button"
-                  className={pageNumber === page ? 'stok-page is-active' : 'stok-page'}
-                  aria-current={pageNumber === page ? 'page' : undefined}
-                  onClick={() => setCurrentPage(pageNumber)}
-                >
-                  {pageNumber}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="stok-nav"
-                disabled={page >= totalPages}
-                onClick={() => setCurrentPage(page + 1)}
-              >
-                Next
-              </button>
-            </nav>
-          </div>
+          <ServerPagination
+            page={page}
+            totalPages={totalPages}
+            totalData={totalData}
+            limit={itemsPerPage}
+            onPageChange={setCurrentPage}
+            label="Navigasi halaman"
+            disabled={fetching}
+          />
         )}
       </div>
 
       {isModalBuatVcOpen && (
-        <div className="stok-backdrop" onMouseDown={() => { if (!saving) setIsModalBuatVcOpen(false) }}>
+        <div className="stok-backdrop" onMouseDown={closeVoucherModal}>
           <div
             className="stok-modal"
             role="dialog"
@@ -947,7 +1006,7 @@ function HotspotStok() {
                     <input
                       type="number"
                       min="1"
-                      max="500"
+                      max="5000"
                       value={jumlah}
                       onChange={(event) => setJumlah(event.target.value)}
                       required
@@ -997,7 +1056,7 @@ function HotspotStok() {
                 <button
                   type="button"
                   className="stok-modal-btn stok-modal-btn-gray"
-                  onClick={() => setIsModalBuatVcOpen(false)}
+                  onClick={closeVoucherModal}
                   disabled={saving}
                 >
                   Batal

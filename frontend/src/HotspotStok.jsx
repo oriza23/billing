@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import {
   Banknote,
@@ -119,7 +119,7 @@ function HotspotStok() {
   const [itemsPerPage, setItemsPerPage] = useState(10)
 
   async function fetchVouchers() {
-    const response = await axios.get('http://192.168.69.70:5000/api/hotspot/voucher')
+    const response = await api.get('/api/hotspot/voucher')
     setVouchers(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -130,9 +130,9 @@ function HotspotStok() {
     async function loadData() {
       try {
         const [profilResponse, voucherResponse, outletResponse] = await Promise.all([
-          axios.get('http://192.168.69.70:5000/api/hotspot/profil'),
-          axios.get('http://192.168.69.70:5000/api/hotspot/voucher'),
-          axios.get('http://192.168.69.70:5000/api/outlets').catch(() => ({ data: [] })),
+          api.get('/api/hotspot/profil'),
+          api.get('/api/hotspot/voucher'),
+          api.get('/api/outlets').catch(() => ({ data: [] })),
         ])
         if (ignore) {
           return
@@ -168,7 +168,7 @@ function HotspotStok() {
 
     async function loadRouters() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/routers')
+        const response = await api.get('/api/routers')
         if (!ignore) {
           setDaftarRouter(Array.isArray(response.data) ? response.data : [])
         }
@@ -221,7 +221,7 @@ function HotspotStok() {
     async function loadOutlets() {
       setOutletLoading(true)
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/outlets')
+        const response = await api.get('/api/outlets')
         if (!ignore) {
           setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
         }
@@ -365,7 +365,7 @@ function HotspotStok() {
     }
 
     try {
-      await axios.post('http://192.168.69.70:5000/api/hotspot/voucher/delete-massal', {
+      await api.post('/api/hotspot/voucher/delete-massal', {
         usernames: selectedVouchers,
       })
       setIsMenuOpen(false)
@@ -421,7 +421,7 @@ function HotspotStok() {
 
     setSaving(true)
     try {
-      await axios.post('http://192.168.69.70:5000/api/hotspot/voucher/generate', payload)
+      await api.post('/api/hotspot/voucher/generate', payload)
       await fetchVouchers()
       notifySuccess('Voucher berhasil dibuat')
     } catch (requestError) {
@@ -515,7 +515,7 @@ function HotspotStok() {
   }
 
   async function fetchOutlets() {
-    const response = await axios.get('http://192.168.69.70:5000/api/outlets')
+    const response = await api.get('/api/outlets')
     setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
   }
 
@@ -546,11 +546,11 @@ function HotspotStok() {
 
     try {
       if (isDelete) {
-        await axios.post('http://192.168.69.70:5000/api/outlets/delete-massal', {
+        await api.post('/api/outlets/delete-massal', {
           ids: selectedOutlets,
         })
       } else {
-        await axios.post('http://192.168.69.70:5000/api/outlets/set-status-massal', {
+        await api.post('/api/outlets/set-status-massal', {
           ids: selectedOutlets,
           status,
         })
@@ -590,7 +590,7 @@ function HotspotStok() {
     })
 
     try {
-      await axios.post('http://192.168.69.70:5000/api/outlets', {
+      await api.post('/api/outlets', {
         nama_outlet: formOutlet.nama_outlet.trim(),
         pemilik: formOutlet.pemilik.trim(),
         phone: formOutlet.phone.trim(),

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import './PppoeProfil.css'
 
@@ -16,7 +16,7 @@ function PppoeProfil() {
   const [selectedGroup, setSelectedGroup] = useState('')
 
   async function fetchProfil() {
-    const response = await axios.get('http://192.168.69.70:5000/api/pppoe/profil')
+    const response = await api.get('/api/pppoe/profil')
     setProfil(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -26,7 +26,7 @@ function PppoeProfil() {
 
     async function loadProfil() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/pppoe/profil')
+        const response = await api.get('/api/pppoe/profil')
         if (!ignore) {
           setProfil(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -95,12 +95,12 @@ function PppoeProfil() {
 
     try {
       if (editMode) {
-        await axios.put(
-          `http://192.168.69.70:5000/api/pppoe/profil/${encodeURIComponent(selectedGroup)}`,
+        await api.put(
+          `/api/pppoe/profil/${encodeURIComponent(selectedGroup)}`,
           { rate_limit: rateLimit },
         )
       } else {
-        await axios.post('http://192.168.69.70:5000/api/pppoe/profil', {
+        await api.post('/api/pppoe/profil', {
           groupname,
           rate_limit: rateLimit,
         })
@@ -132,8 +132,8 @@ function PppoeProfil() {
     setFormError('')
 
     try {
-      await axios.delete(
-        `http://192.168.69.70:5000/api/pppoe/profil/${encodeURIComponent(targetGroup)}`,
+      await api.delete(
+        `/api/pppoe/profil/${encodeURIComponent(targetGroup)}`,
       )
       if (selectedGroup === targetGroup) {
         resetForm()

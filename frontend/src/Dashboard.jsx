@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Swal from 'sweetalert2'
+import { clearSession } from './api/auth.js'
+import ServerClock from './ServerClock.jsx'
 import './Dashboard.css'
 
 const langgananMenu = [
@@ -18,6 +20,7 @@ const hotspotMenu = [
 
 const sistemMenu = [
   { to: '/manajemen-admin', label: 'Manajemen Admin' },
+  { to: '/sistem/pengaturan', label: 'Pengaturan' },
 ]
 
 export function DashboardHome() {
@@ -69,7 +72,7 @@ function Dashboard() {
   const [openMenus, setOpenMenus] = useState({
     langganan: location.pathname.startsWith('/langganan') || location.pathname.startsWith('/dashboard/pppoe'),
     hotspot: location.pathname.startsWith('/dashboard/hotspot'),
-    sistem: location.pathname.startsWith('/manajemen-admin'),
+    sistem: location.pathname.startsWith('/manajemen-admin') || location.pathname.startsWith('/sistem'),
   })
 
   useEffect(() => {
@@ -79,7 +82,7 @@ function Dashboard() {
     if (location.pathname.startsWith('/dashboard/hotspot')) {
       setOpenMenus((current) => ({ ...current, hotspot: true }))
     }
-    if (location.pathname.startsWith('/manajemen-admin')) {
+    if (location.pathname.startsWith('/manajemen-admin') || location.pathname.startsWith('/sistem')) {
       setOpenMenus((current) => ({ ...current, sistem: true }))
     }
   }, [location.pathname])
@@ -96,7 +99,7 @@ function Dashboard() {
       return
     }
 
-    localStorage.removeItem('admin_user')
+    clearSession()
     navigate('/')
   }
 
@@ -116,6 +119,7 @@ function Dashboard() {
             <strong>Panel Admin</strong>
           </div>
         </div>
+        <ServerClock />
 
         <nav className="sidebar-nav" aria-label="Menu utama">
           <NavLink to="/dashboard" end className="sidebar-link">

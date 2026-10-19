@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import './PppoePelanggan.css'
 
@@ -18,7 +18,7 @@ function PppoePelanggan() {
   const [selectedUsername, setSelectedUsername] = useState('')
 
   async function fetchPelanggan() {
-    const response = await axios.get('http://192.168.69.70:5000/api/pppoe/pelanggan')
+    const response = await api.get('/api/pppoe/pelanggan')
     setPelanggan(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -28,7 +28,7 @@ function PppoePelanggan() {
 
     async function loadPelanggan() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/pppoe/pelanggan')
+        const response = await api.get('/api/pppoe/pelanggan')
         if (!ignore) {
           setPelanggan(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -56,7 +56,7 @@ function PppoePelanggan() {
 
     async function loadProfil() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/pppoe/profil')
+        const response = await api.get('/api/pppoe/profil')
         if (ignore) {
           return
         }
@@ -127,8 +127,8 @@ function PppoePelanggan() {
     setFormError('')
 
     try {
-      await axios.delete(
-        `http://192.168.69.70:5000/api/pppoe/pelanggan/${encodeURIComponent(targetUsername)}`,
+      await api.delete(
+        `/api/pppoe/pelanggan/${encodeURIComponent(targetUsername)}`,
       )
       if (selectedUsername === targetUsername) {
         resetForm()
@@ -162,12 +162,12 @@ function PppoePelanggan() {
 
     try {
       if (editMode) {
-        await axios.put(
-          `http://192.168.69.70:5000/api/pppoe/pelanggan/${encodeURIComponent(selectedUsername)}`,
+        await api.put(
+          `/api/pppoe/pelanggan/${encodeURIComponent(selectedUsername)}`,
           { password, paket },
         )
       } else {
-        await axios.post('http://192.168.69.70:5000/api/pppoe/pelanggan', {
+        await api.post('/api/pppoe/pelanggan', {
           username,
           password,
           paket,

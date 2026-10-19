@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import {
   Ban,
@@ -23,8 +23,8 @@ import {
 import './HotspotStok.css'
 import './LanggananData.css'
 
-const API = 'http://192.168.69.70:5000/api/langganan/data'
-const PROFIL_API = 'http://192.168.69.70:5000/api/langganan/profil'
+const API = '/api/langganan/data'
+const PROFIL_API = '/api/langganan/profil'
 
 function todayKey() {
   const date = new Date()
@@ -35,7 +35,7 @@ function todayKey() {
 function emptyForm() {
   const today = todayKey()
   return {
-    nolayanan: `LYN${Date.now().toString().slice(-8)}`,
+    nolayanan: Date.now().toString().slice(-8),
     pelanggan: '',
     ktg: 'PPP',
     media_tipe: 'Fiber Optic',
@@ -159,8 +159,8 @@ function LanggananData() {
 
   async function loadData() {
     const [customerResponse, profileResponse] = await Promise.all([
-      axios.get(API),
-      axios.get(PROFIL_API),
+      api.get(API),
+      api.get(PROFIL_API),
     ])
     setRows(Array.isArray(customerResponse.data) ? customerResponse.data : [])
     setProfiles(Array.isArray(profileResponse.data) ? profileResponse.data : [])
@@ -173,8 +173,8 @@ function LanggananData() {
     async function load() {
       try {
         const [customerResponse, profileResponse] = await Promise.all([
-          axios.get(API),
-          axios.get(PROFIL_API),
+          api.get(API),
+          api.get(PROFIL_API),
         ])
         if (!ignore) {
           setRows(Array.isArray(customerResponse.data) ? customerResponse.data : [])
@@ -311,9 +311,9 @@ function LanggananData() {
     try {
       const payload = payloadFromForm()
       if (editingId) {
-        await axios.put(`${API}/${encodeURIComponent(editingId)}`, payload)
+        await api.put(`${API}/${encodeURIComponent(editingId)}`, payload)
       } else {
-        await axios.post(API, payload)
+        await api.post(API, payload)
       }
       await loadData()
       setIsModalOpen(false)
@@ -357,7 +357,7 @@ function LanggananData() {
       didOpen: () => Swal.showLoading(),
     })
     try {
-      await Promise.all(selectedRows.map((item) => axios.delete(`${API}/${encodeURIComponent(item.id)}`)))
+      await Promise.all(selectedRows.map((item) => api.delete(`${API}/${encodeURIComponent(item.id)}`)))
       await loadData()
       setSelectedIds([])
       Swal.fire({
@@ -389,7 +389,7 @@ function LanggananData() {
       return
     }
     try {
-      await Promise.all(selectedRows.map((item) => axios.put(
+      await Promise.all(selectedRows.map((item) => api.put(
         `${API}/${encodeURIComponent(item.id)}`,
         { ...formFromRow(item), status, profil_id: item.profil_id || null },
       )))
@@ -642,7 +642,7 @@ function LanggananData() {
               </button>
             </header>
             <div className="data-form-grid">
-              <label>No Layanan<input value={form.nolayanan} onChange={(event) => updateForm('nolayanan', event.target.value)} /></label>
+              <label>No Layanan<input type="text" inputMode="numeric" pattern="[0-9]*" value={form.nolayanan} onChange={(event) => updateForm('nolayanan', event.target.value.replace(/\D/g, ''))} /></label>
               <label>Pelanggan<input value={form.pelanggan} onChange={(event) => updateForm('pelanggan', event.target.value)} required /></label>
               <label>KTG<input value={form.ktg} onChange={(event) => updateForm('ktg', event.target.value)} /></label>
               <label>
@@ -690,13 +690,10 @@ function LanggananData() {
               <label>MAC Address<input value={form.mac_address} onChange={(event) => updateForm('mac_address', event.target.value)} /></label>
               <label>Router<input value={form.router} onChange={(event) => updateForm('router', event.target.value)} /></label>
               <label>Server<input value={form.server} onChange={(event) => updateForm('server', event.target.value)} /></label>
-              <label>ACS<input value={form.acs} onChange={(event) => updateForm('acs', event.target.value)} /></label>
               <label>Addr List<input value={form.addr_list} onChange={(event) => updateForm('addr_list', event.target.value)} /></label>
               <label>Wilayah<input value={form.wilayah} onChange={(event) => updateForm('wilayah', event.target.value)} /></label>
               <label>Alamat Pasang<input value={form.alamat_pasang} onChange={(event) => updateForm('alamat_pasang', event.target.value)} /></label>
               <label>Tgl Pasang<input type="date" value={form.tgl_pasang} onChange={(event) => updateForm('tgl_pasang', event.target.value)} /></label>
-              <label>Mitra<input value={form.mitra} onChange={(event) => updateForm('mitra', event.target.value)} /></label>
-              <label>Kode Unik<input value={form.kode_unik} onChange={(event) => updateForm('kode_unik', event.target.value)} /></label>
               <label className="data-note-field">Note<textarea value={form.note} onChange={(event) => updateForm('note', event.target.value)} rows="2" /></label>
             </div>
             <div className="data-modal-actions">

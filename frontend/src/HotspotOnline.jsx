@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import { RefreshCw, Search, Trash, UserX } from 'lucide-react'
 import './HotspotStok.css'
 import './HotspotOnline.css'
 
-const API = 'http://192.168.69.70:5000/api/hotspot'
+const API = '/api/hotspot'
 
 function formatBytes(bytes) {
   const value = Math.max(0, Number(bytes) || 0)
@@ -44,7 +44,7 @@ function tampil(value) {
 }
 
 async function fetchOnline() {
-  const response = await axios.get(`${API}/voucher-online`)
+  const response = await api.get(`${API}/voucher-online`)
   return Array.isArray(response.data) ? response.data : []
 }
 
@@ -155,7 +155,7 @@ function HotspotOnline() {
       return
     }
     try {
-      const response = await axios.post(`${API}/kick-user`, payloadTerpilih())
+      const response = await api.post(`${API}/kick-user`, payloadTerpilih())
       setSelectedIds([])
       Swal.fire({
         icon: 'success',
@@ -186,7 +186,7 @@ function HotspotOnline() {
       return
     }
     try {
-      const response = await axios.post(`${API}/hapus-cookie`, payloadTerpilih())
+      const response = await api.post(`${API}/hapus-cookie`, payloadTerpilih())
       setSelectedIds([])
       Swal.fire({
         icon: 'success',
@@ -210,7 +210,7 @@ function HotspotOnline() {
       },
     })
     try {
-      await axios.post(`${API}/sync-online`)
+      await api.post(`${API}/sync-online`)
       const data = await fetchOnline()
       setRows(data)
       setError('')

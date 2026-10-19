@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import './PppoeOnline.css'
 
 function formatLoginTime(value) {
@@ -26,7 +26,7 @@ function PppoeOnline() {
   const [disconnecting, setDisconnecting] = useState('')
 
   async function fetchOnline() {
-    const response = await axios.get('http://192.168.69.70:5000/api/pppoe/online')
+    const response = await api.get('/api/pppoe/online')
     setSessions(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -36,7 +36,7 @@ function PppoeOnline() {
 
     async function loadOnline() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/pppoe/online')
+        const response = await api.get('/api/pppoe/online')
         if (!ignore) {
           setSessions(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -68,8 +68,8 @@ function PppoeOnline() {
     setDisconnecting(`${session.username}|${session.ip_address}`)
     setActionError('')
 
-    axios
-      .post('http://192.168.69.70:5000/api/pppoe/disconnect', {
+    api
+      .post('/api/pppoe/disconnect', {
         username: session.username,
         ip_address: session.ip_address,
       })

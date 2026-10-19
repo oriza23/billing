@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import './PppoeProfil.css'
 import './RouterMaster.css'
 
-const API_URL = 'http://192.168.69.70:5000/api/routers'
+const API_URL = '/api/routers'
 
 const emptyForm = {
   namaRouter: '',
@@ -24,7 +24,7 @@ function RouterMaster() {
   const [selectedId, setSelectedId] = useState(null)
 
   async function fetchRouters() {
-    const response = await axios.get(API_URL)
+    const response = await api.get(API_URL)
     setRouters(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -34,7 +34,7 @@ function RouterMaster() {
 
     async function loadRouters() {
       try {
-        const response = await axios.get(API_URL)
+        const response = await api.get(API_URL)
         if (!ignore) {
           setRouters(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -121,9 +121,9 @@ function RouterMaster() {
     setSaving(true)
     try {
       if (editMode) {
-        await axios.put(`${API_URL}/${selectedId}`, payload)
+        await api.put(`${API_URL}/${selectedId}`, payload)
       } else {
-        await axios.post(API_URL, payload)
+        await api.post(API_URL, payload)
       }
       resetForm()
       await fetchRouters()
@@ -150,7 +150,7 @@ function RouterMaster() {
 
     setDeletingId(item.id)
     try {
-      await axios.delete(`${API_URL}/${item.id}`)
+      await api.delete(`${API_URL}/${item.id}`)
       if (selectedId === item.id) {
         resetForm()
       }

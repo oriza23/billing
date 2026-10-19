@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import { Menu, Pencil, Plus, Search, Trash, X } from 'lucide-react'
 import './HotspotStok.css'
 import './LanggananProfil.css'
 
-const API = 'http://192.168.69.70:5000/api/langganan/profil'
+const API = '/api/langganan/profil'
 const TIPE_OPTIONS = ['Rumahan', 'Bisnis', 'Kantor', 'Sekolah']
 const MEDIA_OPTIONS = ['Fiber Optic', 'Wireless', 'LAN', 'Radio']
 const HARGA_PALET = [
@@ -76,7 +76,7 @@ function LanggananProfil() {
   const [saving, setSaving] = useState(false)
 
   async function loadProfiles() {
-    const response = await axios.get(API)
+    const response = await api.get(API)
     setRows(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -86,7 +86,7 @@ function LanggananProfil() {
 
     async function load() {
       try {
-        const response = await axios.get(API)
+        const response = await api.get(API)
         if (!ignore) {
           setRows(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -226,9 +226,9 @@ function LanggananProfil() {
     })
     try {
       if (editingId) {
-        await axios.put(`${API}/${encodeURIComponent(editingId)}`, payload)
+        await api.put(`${API}/${encodeURIComponent(editingId)}`, payload)
       } else {
-        await axios.post(API, payload)
+        await api.post(API, payload)
       }
       await loadProfiles()
       setIsModalOpen(false)
@@ -277,7 +277,7 @@ function LanggananProfil() {
       },
     })
     try {
-      await Promise.all(selectedRows.map((item) => axios.delete(`${API}/${encodeURIComponent(item.id)}`)))
+      await Promise.all(selectedRows.map((item) => api.delete(`${API}/${encodeURIComponent(item.id)}`)))
       await loadProfiles()
       setSelectedIds([])
       Swal.fire({

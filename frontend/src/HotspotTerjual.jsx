@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import * as XLSX from 'xlsx'
 import {
@@ -89,7 +89,7 @@ function HotspotTerjual() {
 
     async function loadSold() {
       try {
-        const response = await axios.get('http://192.168.69.70:5000/api/hotspot/voucher-terjual')
+        const response = await api.get('/api/hotspot/voucher-terjual')
         if (!ignore) {
           setRows(Array.isArray(response.data) ? response.data : [])
           setError('')

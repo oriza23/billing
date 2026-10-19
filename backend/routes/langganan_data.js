@@ -224,6 +224,26 @@ function sqlValues(customer) {
   ];
 }
 
+const KODE_UNIK_MIN = 10;
+const KODE_UNIK_MAX = 999;
+const KODE_UNIK_MAX_TRIES = 200;
+const INSERT_LOCK = 'langganan_pelanggan_insert';
+
+async function generateKodeUnik(conn) {
+  for (let attempt = 0; attempt < KODE_UNIK_MAX_TRIES; attempt += 1) {
+    const kode = String(Math.floor(Math.random() * (KODE_UNIK_MAX - KODE_UNIK_MIN + 1)) + KODE_UNIK_MIN);
+    const [rows] = await conn.execute(
+      `SELECT kode_unik FROM langganan_pelanggan
+       WHERE kode_unik = ? AND status IN ('Aktif', 'Isolir') LIMIT 1`,
+      [kode],
+    );
+    if (rows.length === 0) {
+      return kode;
+    }
+  }
+  return null;
+}
+
 router.post('/', async (req, res) => {
   const customer = readCustomer(req.body);
   if (!customerIsValid(customer)) {
@@ -232,9 +252,55 @@ router.post('/', async (req, res) => {
       message: 'Nama pelanggan, username, dan status wajib diisi',
     });
   }
+  if (customer.nolayanan && !/^\d+$/.test(customer.nolayanan)) {
+    return res.status(400).json({
+      success: false,
+      message: 'No Layanan hanya boleh berisi angka!',
+    });
+  }
 
+  // Kode unik dibuat otomatis oleh backend; acs & mitra belum diinput dari form.
+  customer.acs = '';
+  customer.mitra = '';
+  customer.kode_unik = '';
+
+  let conn;
+  let locked = false;
   try {
-    const [result] = await pool.execute(
+    conn = await pool.getConnection();
+    // Serialisasi proses simpan agar pengecekan unik tidak bentrok antar request bersamaan.
+    const [[lockRow]] = await conn.query('SELECT GET_LOCK(?, 10) AS got', [INSERT_LOCK]);
+    locked = Number(lockRow.got) === 1;
+    if (!locked) {
+      return res.status(503).json({
+        success: false,
+        message: 'Server sedang sibuk, silakan coba lagi',
+      });
+    }
+
+    if (customer.nolayanan) {
+      const [existing] = await conn.execute(
+        'SELECT nolayanan FROM langganan_pelanggan WHERE nolayanan = ? LIMIT 1',
+        [customer.nolayanan],
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No Layanan sudah terdaftar!',
+        });
+      }
+    }
+
+    const kodeUnik = await generateKodeUnik(conn);
+    if (!kodeUnik) {
+      return res.status(409).json({
+        success: false,
+        message: 'Kode unik habis, tidak ada angka tersedia',
+      });
+    }
+    customer.kode_unik = kodeUnik;
+
+    const [result] = await conn.execute(
       `INSERT INTO langganan_pelanggan
         (nolayanan, pelanggan, ktg, media_tipe, profil_id, jns_tagihan, siklus, tgl_aktif, tgl_isolir,
          username, password, ip_address, mac_address, router, server, acs, addr_list, wilayah,
@@ -246,6 +312,7 @@ router.post('/', async (req, res) => {
       success: true,
       message: 'Data langganan berhasil disimpan',
       id: result.insertId,
+      kode_unik: kodeUnik,
     });
   } catch (error) {
     if (error.code === 'ER_NO_REFERENCED_ROW_2') {
@@ -259,6 +326,13 @@ router.post('/', async (req, res) => {
       message: 'Gagal menyimpan data langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      if (locked) {
+        await conn.query('SELECT RELEASE_LOCK(?)', [INSERT_LOCK]).catch(() => {});
+      }
+      conn.release();
+    }
   }
 });
 
@@ -277,10 +351,10 @@ router.put('/:id', async (req, res) => {
       `UPDATE langganan_pelanggan
        SET nolayanan = ?, pelanggan = ?, ktg = ?, media_tipe = ?, profil_id = ?, jns_tagihan = ?,
            siklus = ?, tgl_aktif = ?, tgl_isolir = ?, username = ?, password = ?, ip_address = ?,
-           mac_address = ?, router = ?, server = ?, acs = ?, addr_list = ?, wilayah = ?,
-           alamat_pasang = ?, tgl_pasang = ?, mitra = ?, kode_unik = ?, note = ?, status = ?
+           mac_address = ?, router = ?, server = ?, addr_list = ?, wilayah = ?,
+           alamat_pasang = ?, tgl_pasang = ?, note = ?, status = ?
        WHERE id = ?`,
-      [...sqlValues(customer), id],
+      [...sqlValues(customer).filter((_, index) => ![15, 20, 21].includes(index)), id],
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({

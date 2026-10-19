@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import { Check, Funnel, List, Menu, Plus, Search, Trash, Wifi, X } from 'lucide-react'
 import './HotspotProfil.css'
@@ -58,7 +58,7 @@ function HotspotProfil() {
   const [form, setForm] = useState(emptyForm)
 
   async function fetchProfil() {
-    const response = await axios.get('http://192.168.69.70:5000/api/hotspot/profil')
+    const response = await api.get('/api/hotspot/profil')
     return Array.isArray(response.data) ? response.data : []
   }
 
@@ -196,7 +196,7 @@ function HotspotProfil() {
 
     setSaving(true)
     try {
-      await axios.post('http://192.168.69.70:5000/api/hotspot/profil', payload)
+      await api.post('/api/hotspot/profil', payload)
       setIsModalOpen(false)
       setForm(emptyForm)
       const rows = await fetchProfil()
@@ -235,7 +235,7 @@ function HotspotProfil() {
     }
 
     try {
-      await axios.post('http://192.168.69.70:5000/api/hotspot/profil/delete-massal', {
+      await api.post('/api/hotspot/profil/delete-massal', {
         groupnames: selectedProfiles,
       })
       const rows = await fetchProfil()

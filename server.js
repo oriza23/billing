@@ -1,12 +1,18 @@
 const express = require('express');
 const cors = require('cors');
 const pool = require('./database');
+const requireAuth = require('./backend/middleware/auth');
 
 const app = express();
 const PORT = 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// Login bersifat publik; semua route /api lainnya wajib membawa token JWT.
+app.use('/api/auth', require('./backend/routes/auth'));
+app.use('/api', requireAuth);
+
 app.use('/api/pppoe', require('./backend/routes/pppoe'));
 app.use('/api/hotspot', require('./backend/routes/hotspot'));
 app.use('/api/admins', require('./backend/routes/admins'));
@@ -17,45 +23,9 @@ const langgananProfilRouter = require('./backend/routes/langganan_profil');
 app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
-
-app.post('/api/login', async (req, res) => {
-  const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-
-  if (!username || !password) {
-    return res.status(401).json({
-      success: false,
-      message: 'Username atau password salah',
-    });
-  }
-
-  try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM web_admins WHERE username = ? AND password = ?',
-      [username, password],
-    );
-
-    if (rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Username atau password salah',
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: 'Login berhasil',
-      username: rows[0].username,
-      role: rows[0].role,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal memeriksa data login',
-      error: error.message,
-    });
-  }
-});
+const settingsRouter = require('./backend/routes/settings');
+app.use('/api/settings', settingsRouter);
+app.use('/api/system', require('./backend/routes/system_health'));
 
 async function ensureAdminTable() {
   await pool.query(
@@ -106,6 +76,13 @@ async function start() {
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
+  await settingsRouter.ensureTable();
+  const timezone = await settingsRouter.loadTimezone();
+  console.log(`Zona waktu server: ${timezone}`);
+  const osTimezone = require('./backend/system_time').readOsTimezone();
+  if (osTimezone !== timezone) {
+    console.warn(`Peringatan: zona waktu OS (${osTimezone || 'tidak diketahui'}) berbeda dengan pengaturan web (${timezone}). Simpan ulang di menu Sistem > Pengaturan untuk menyamakan.`);
+  }
   app.listen(PORT, () => {
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });

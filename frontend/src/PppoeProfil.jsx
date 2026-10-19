@@ -151,7 +151,7 @@ function PppoeProfil() {
     <section className="profil">
       <header className="profil-header">
         <p>Group RADIUS</p>
-        <h1>Profil PPPoE</h1>
+        <h1>Profil Langganan</h1>
       </header>
 
       <form className="profil-form" onSubmit={handleSubmit}>

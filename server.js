@@ -13,6 +13,10 @@ app.use('/api/admins', require('./backend/routes/admins'));
 app.use('/api/routers', require('./backend/routes/routers'));
 const outletsRouter = require('./backend/routes/outlets');
 app.use('/api/outlets', outletsRouter);
+const langgananProfilRouter = require('./backend/routes/langganan_profil');
+app.use('/api/langganan/profil', langgananProfilRouter);
+const langgananDataRouter = require('./backend/routes/langganan_data');
+app.use('/api/langganan/data', langgananDataRouter);
 
 app.post('/api/login', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
@@ -100,6 +104,8 @@ async function start() {
   await ensureRoutersTable();
   await ensureOutletsTable();
   await outletsRouter.ensureTglGabungColumn();
+  await langgananProfilRouter.ensureTable();
+  await langgananDataRouter.ensureTable();
   app.listen(PORT, () => {
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });

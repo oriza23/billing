@@ -94,7 +94,7 @@ function PppoeOnline() {
     <section className="monitoring">
       <header className="monitoring-header">
         <p>Sesi Aktif</p>
-        <h1>Pelanggan Online</h1>
+        <h1>Langganan Online</h1>
       </header>
 
       <div className="monitoring-card">

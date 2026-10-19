@@ -3,10 +3,10 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Swal from 'sweetalert2'
 import './Dashboard.css'
 
-const pppoeMenu = [
-  { to: '/dashboard/pppoe/profil', label: 'Profil PPPoE' },
-  { to: '/dashboard/pppoe/pelanggan', label: 'Data Pelanggan' },
-  { to: '/dashboard/pppoe/online', label: 'Pelanggan Online' },
+const langgananMenu = [
+  { to: '/langganan/profil', label: 'Profil Langganan' },
+  { to: '/langganan/data', label: 'Data Langganan' },
+  { to: '/langganan/online', label: 'Langganan Online' },
 ]
 
 const hotspotMenu = [
@@ -67,14 +67,14 @@ function Dashboard() {
   const location = useLocation()
   const navigate = useNavigate()
   const [openMenus, setOpenMenus] = useState({
-    pppoe: location.pathname.startsWith('/dashboard/pppoe'),
+    langganan: location.pathname.startsWith('/langganan') || location.pathname.startsWith('/dashboard/pppoe'),
     hotspot: location.pathname.startsWith('/dashboard/hotspot'),
     sistem: location.pathname.startsWith('/manajemen-admin'),
   })
 
   useEffect(() => {
-    if (location.pathname.startsWith('/dashboard/pppoe')) {
-      setOpenMenus((current) => ({ ...current, pppoe: true }))
+    if (location.pathname.startsWith('/langganan') || location.pathname.startsWith('/dashboard/pppoe')) {
+      setOpenMenus((current) => ({ ...current, langganan: true }))
     }
     if (location.pathname.startsWith('/dashboard/hotspot')) {
       setOpenMenus((current) => ({ ...current, hotspot: true }))
@@ -122,10 +122,10 @@ function Dashboard() {
             Dashboard
           </NavLink>
           <MenuGroup
-            label="PPPoE"
-            items={pppoeMenu}
-            open={openMenus.pppoe}
-            onToggle={() => toggleMenu('pppoe')}
+            label="Langganan"
+            items={langgananMenu}
+            open={openMenus.langganan}
+            onToggle={() => toggleMenu('langganan')}
           />
           <MenuGroup
             label="Hotspot"

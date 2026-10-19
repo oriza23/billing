@@ -187,7 +187,7 @@ function PppoePelanggan() {
     <section className="pelanggan">
       <header className="pelanggan-header">
         <p>Data RADIUS</p>
-        <h1>Data Pelanggan</h1>
+        <h1>Data Langganan</h1>
       </header>
 
       <form className="pelanggan-form" onSubmit={handleSubmit}>

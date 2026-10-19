@@ -46,7 +46,7 @@ function tampil(value) {
 }
 
 async function fetchOnline(params) {
-  const response = await api.get(`${API}/voucher-online`, { params })
+  const response = await api.get(`${API}/online`, { params })
   return response.data
 }
 
@@ -358,10 +358,7 @@ function HotspotOnline() {
                       <td>{item.username}</td>
                       <td>
                         <span className="online-profile">
-                          <span
-                            className={item.terdaftar ? 'online-dot is-online' : 'online-dot'}
-                            aria-hidden="true"
-                          />
+                          <span className="online-dot is-online" aria-hidden="true" />
                           {tampil(item.profile)}
                         </span>
                       </td>

@@ -178,6 +178,10 @@ async function ensureTable() {
         ON DELETE SET NULL
     )`,
   );
+  // Index untuk JOIN radacct.username -> langganan_pelanggan.username (halaman Langganan Online).
+  await pool.query(
+    'ALTER TABLE langganan_pelanggan ADD INDEX IF NOT EXISTS idx_langganan_username (username)',
+  );
 }
 
 router.ensureTable = ensureTable;

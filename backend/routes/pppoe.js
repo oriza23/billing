@@ -271,21 +271,8 @@ router.delete('/pelanggan/:username', async (req, res) => {
   }
 });
 
-router.get('/online', async (req, res) => {
-  try {
-    const [rows] = await pool.execute(
-      'SELECT username, framedipaddress AS ip_address, acctstarttime AS login_time FROM radacct WHERE acctstoptime IS NULL',
-    );
-
-    res.json(rows);
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Gagal mengambil data pelanggan online',
-      error: error.message,
-    });
-  }
-});
+// Daftar user online dipindah ke GET /api/langganan/online (khusus langganan)
+// dan GET /api/hotspot/online (khusus voucher) agar data tidak tercampur.
 
 function isIpv4(value) {
   if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(value)) {

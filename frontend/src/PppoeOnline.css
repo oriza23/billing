@@ -110,3 +110,48 @@
     font-size: 26px;
   }
 }
+
+.monitoring-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-bottom: 1px solid #e6eef5;
+}
+
+.monitoring-total {
+  color: #4b647a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.monitoring-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitoring-tools select,
+.monitoring-tools input {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #cfdde8;
+  border-radius: 8px;
+  background: #fff;
+  color: #16324f;
+  font: inherit;
+  font-size: 14px;
+}
+
+.monitoring-tools input {
+  width: 240px;
+  max-width: 100%;
+}
+
+.monitoring-table-wrap.is-fetching {
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}

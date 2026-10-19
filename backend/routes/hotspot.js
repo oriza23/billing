@@ -1059,51 +1059,63 @@ function rencanaHotspotRouter(action, usernames, router) {
   };
 }
 
-router.get('/voucher-online', async (req, res) => {
+// ---- User online Hotspot ---------------------------------------------------
+// Hanya sesi aktif radacct (acctstoptime IS NULL) milik username yang ada di
+// tabel hotspot_vouchers. INNER JOIN memakai index radacct.acctstoptime lalu
+// lookup UNIQUE hotspot_vouchers.username, sehingga sesi PPPoE tidak ikut.
+// Tabel routers diringkas per IP (tabel kecil) agar tidak menggandakan baris.
+const ONLINE_ROUTER_EXPR = "COALESCE(NULLIF(v.router, ''), r.nama_router, '')";
+const ONLINE_FROM_SQL = `FROM radacct a
+  INNER JOIN hotspot_vouchers v ON v.username = a.username
+  LEFT JOIN (
+    SELECT ip_address, MIN(nama_router) AS nama_router FROM routers GROUP BY ip_address
+  ) r ON r.ip_address = a.nasipaddress`;
+
+router.get('/online', async (req, res) => {
   try {
     const { limit, page: requestedPage } = readPaging(req.query);
-    const where = [];
+    const where = ['a.acctstoptime IS NULL'];
     const params = [];
     searchClause(
-      ['o.username', 'o.profile', 'o.router', 'o.interface', 'o.server', 'o.ip_address', 'o.mac_addr', 'o.mitra', 'o.outlet'],
+      [
+        'a.username', 'v.profile', ONLINE_ROUTER_EXPR, 'a.nasportid', 'v.server',
+        'a.framedipaddress', 'a.callingstationid', 'v.mitra', 'v.outlet',
+      ],
       readSearch(req.query.q),
       where,
       params,
     );
-    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const whereSql = `WHERE ${where.join(' AND ')}`;
 
-    const baseSql = `SELECT
-        a.radacctid AS id,
-        a.username,
-        v.profile,
-        COALESCE(a.acctsessiontime, 0) AS uptime,
-        COALESCE(a.acctinputoctets, 0) AS upload,
-        COALESCE(a.acctoutputoctets, 0) AS download,
-        COALESCE(NULLIF(v.router, ''), r.nama_router, '') AS router,
-        a.nasportid AS interface,
-        v.server,
-        a.framedipaddress AS ip_address,
-        a.callingstationid AS mac_addr,
-        v.mitra,
-        v.outlet,
-        a.acctstarttime AS last_connected,
-        a.acctupdatetime AS last_updated,
-        CASE WHEN v.id IS NULL THEN 0 ELSE 1 END AS terdaftar
-      FROM radacct a
-      LEFT JOIN hotspot_vouchers v ON v.username = a.username
-      LEFT JOIN routers r ON r.ip_address = a.nasipaddress
-      WHERE a.acctstoptime IS NULL`;
-
+    // COUNT tidak membawa kolom/sort apa pun, jadi cukup ringan.
     const [countRows] = await pool.query(
-      `SELECT COUNT(*) AS total FROM (${baseSql}) o ${whereSql}`,
+      `SELECT COUNT(*) AS total ${ONLINE_FROM_SQL} ${whereSql}`,
       params,
     );
     const total = Number(countRows[0]?.total) || 0;
     const { page, totalPages, offset } = resolvePage(total, requestedPage, limit);
 
     const [rows] = await pool.query(
-      `SELECT o.* FROM (${baseSql}) o ${whereSql}
-       ORDER BY o.last_connected DESC, o.id DESC LIMIT ? OFFSET ?`,
+      `SELECT
+         a.radacctid AS id,
+         a.username,
+         v.profile,
+         COALESCE(a.acctsessiontime, 0) AS uptime,
+         COALESCE(a.acctinputoctets, 0) AS upload,
+         COALESCE(a.acctoutputoctets, 0) AS download,
+         ${ONLINE_ROUTER_EXPR} AS router,
+         a.nasportid AS interface,
+         v.server,
+         a.framedipaddress AS ip_address,
+         a.callingstationid AS mac_addr,
+         v.mitra,
+         v.outlet,
+         a.acctstarttime AS last_connected,
+         a.acctupdatetime AS last_updated
+       ${ONLINE_FROM_SQL}
+       ${whereSql}
+       ORDER BY a.acctstarttime DESC, a.radacctid DESC
+       LIMIT ? OFFSET ?`,
       [...params, limit, offset],
     );
 
@@ -1124,7 +1136,6 @@ router.get('/voucher-online', async (req, res) => {
         outlet: row.outlet || '',
         last_connected: row.last_connected,
         last_updated: row.last_updated,
-        terdaftar: Boolean(row.terdaftar),
       })),
       total,
       page,
@@ -1183,7 +1194,9 @@ router.post('/hapus-cookie', async (req, res) => {
 router.post('/sync-online', async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT COUNT(*) AS total FROM radacct WHERE acctstoptime IS NULL',
+      `SELECT COUNT(*) AS total FROM radacct a
+       INNER JOIN hotspot_vouchers v ON v.username = a.username
+       WHERE a.acctstoptime IS NULL`,
     );
     return res.json({
       success: true,

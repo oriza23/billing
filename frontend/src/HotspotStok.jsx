@@ -22,7 +22,31 @@ import {
   Wallet,
   X,
 } from 'lucide-react'
-import './HotspotStok.css'
+
+const iconTone = {
+  blue: 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-200',
+  teal: 'bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-200',
+  amber: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200',
+  indigo: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-200',
+}
+
+const actionTone = {
+  blue: 'bg-blue-600 hover:bg-blue-500',
+  red: 'bg-rose-600 hover:bg-rose-500',
+  green: 'bg-emerald-600 hover:bg-emerald-500',
+  navy: 'bg-blue-900 hover:bg-blue-800',
+  ink: 'bg-gray-800 hover:bg-gray-700',
+  rose: 'bg-rose-400 hover:bg-rose-300',
+  orange: 'bg-orange-500 hover:bg-orange-400',
+}
+
+const actionBtn = 'inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg border-0 px-3.5 text-xs font-bold tracking-wide text-white shadow-md transition-colors duration-300'
+const fieldClass = 'grid min-w-0 gap-1.5 text-xs font-semibold tracking-wide text-gray-600 dark:text-gray-300'
+const controlClass = 'box-border h-10 w-full min-w-0 rounded-lg border border-gray-300 bg-gray-50 px-3 text-sm font-medium text-gray-900 outline-none transition-colors duration-300 focus:border-blue-800 focus:bg-white focus:ring-2 focus:ring-blue-800/20 read-only:bg-gray-100 read-only:text-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:focus:bg-gray-900 dark:read-only:bg-gray-950 dark:read-only:text-gray-400'
+const modalShell = 'max-h-[calc(100vh-3rem)] w-full overflow-auto rounded-2xl bg-white text-gray-900 shadow-2xl transition-colors duration-300 dark:bg-gray-800 dark:text-gray-100'
+const modalBtn = 'inline-flex h-10 cursor-pointer items-center justify-center rounded-lg border-0 px-4 text-sm font-bold text-white transition-colors duration-300 disabled:cursor-wait disabled:opacity-70'
+const thClass = 'bg-sky-900 px-4 py-3 text-left text-xs font-bold tracking-wide text-sky-50 uppercase whitespace-nowrap'
+const tdClass = 'border-b border-gray-100 px-4 py-3 text-left text-sm whitespace-nowrap text-gray-800 dark:border-gray-700 dark:text-gray-100'
 
 function formatRupiah(value) {
   const number = Number(value) || 0
@@ -693,18 +717,18 @@ function HotspotStok() {
     }
   }
   return (
-    <section className="stok">
-      <div className="stok-stats">
+    <section className="grid w-full gap-4 text-left text-gray-900 transition-colors duration-300 dark:text-gray-100">
+      <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
         {summaries.map((item) => {
           const Icon = item.icon
           return (
-            <article key={item.label} className={`stok-stat stok-stat-${item.tone}`}>
+            <article key={item.label} className="flex min-h-27 items-start justify-between gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm transition-colors duration-300 dark:border-gray-700 dark:bg-gray-800">
               <div>
-                <p>{item.label}</p>
-                <strong>{item.value}</strong>
-                <span>{item.hint}</span>
+                <p className="m-0 text-xs font-bold tracking-wider text-gray-500 uppercase dark:text-gray-400">{item.label}</p>
+                <strong className="mt-2 block text-lg font-bold tracking-tight whitespace-nowrap text-gray-900 dark:text-gray-100">{item.value}</strong>
+                <span className="mt-1.5 block text-xs font-semibold text-gray-400 dark:text-gray-500">{item.hint}</span>
               </div>
-              <span className="stok-stat-icon" aria-hidden="true">
+              <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${iconTone[item.tone] || iconTone.blue}`} aria-hidden="true">
                 <Icon size={22} strokeWidth={2} />
               </span>
             </article>
@@ -712,11 +736,11 @@ function HotspotStok() {
         })}
       </div>
 
-      <div className="stok-toolbar" role="toolbar" aria-label="Aksi stok voucher">
-        <div className="stok-menu">
+      <div className="flex flex-wrap gap-2" role="toolbar" aria-label="Aksi stok voucher">
+        <div className="relative z-30">
           <button
             type="button"
-            className="stok-action stok-action-blue"
+            className={`${actionBtn} bg-blue-600 hover:bg-blue-500`}
             aria-expanded={isMenuOpen}
             aria-haspopup="menu"
             onClick={() => setIsMenuOpen((open) => !open)}
@@ -726,12 +750,12 @@ function HotspotStok() {
           </button>
 
           {isMenuOpen && (
-            <div className="stok-dropdown" role="menu">
-              <button type="button" role="menuitem" onClick={handlePrintSelected}>
+            <div className="absolute top-full left-0 z-30 mt-2 grid min-w-48 gap-0.5 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800" role="menu">
+              <button type="button" role="menuitem" className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-lg border-0 bg-transparent px-2.5 text-left text-[13px] font-bold text-gray-800 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700" onClick={handlePrintSelected}>
                 <Printer size={16} strokeWidth={2.2} />
                 <span>Print Terpilih</span>
               </button>
-              <button type="button" role="menuitem" className="is-danger" onClick={handleDeleteSelected}>
+              <button type="button" role="menuitem" className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-lg border-0 bg-transparent px-2.5 text-left text-[13px] font-bold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950" onClick={handleDeleteSelected}>
                 <Trash size={16} strokeWidth={2.2} />
                 <span>Hapus Terpilih</span>
               </button>
@@ -745,7 +769,7 @@ function HotspotStok() {
             <button
               key={item.label}
               type="button"
-              className={`stok-action stok-action-${item.tone}`}
+              className={`${actionBtn} ${actionTone[item.tone] || actionTone.blue}`}
               onClick={
                 item.label === 'BUAT VC'
                   ? () => setIsModalBuatVcOpen(true)
@@ -761,29 +785,30 @@ function HotspotStok() {
         })}
       </div>
 
-      <div className="stok-filters">
-        <label className="stok-filter stok-filter-date">
+      <div className="flex flex-wrap gap-2.5 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm transition-colors duration-300 dark:border-gray-700 dark:bg-gray-800">
+        <label className="flex h-10 w-full items-center gap-2 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-gray-500 sm:w-42 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300">
           <Calendar size={16} strokeWidth={2} />
-          <input type="date" name="tanggal" aria-label="Tanggal" />
+          <input className="w-full min-w-0 border-0 bg-transparent text-[13px] font-semibold text-gray-900 outline-none dark:text-gray-100" type="date" name="tanggal" aria-label="Tanggal" />
         </label>
 
-        <select name="profile" aria-label="All Profile" defaultValue="all">
+        <select className="h-10 min-w-36 flex-1 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-semibold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100" name="profile" aria-label="All Profile" defaultValue="all">
           <option value="all">All Profile</option>
         </select>
 
-        <select name="router" aria-label="All Router" defaultValue="all">
+        <select className="h-10 min-w-36 flex-1 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-semibold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100" name="router" aria-label="All Router" defaultValue="all">
           <option value="all">All Router</option>
         </select>
 
-        <select name="mitra" aria-label="Pilih Mitra" defaultValue="">
+        <select className="h-10 min-w-36 flex-1 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-semibold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100" name="mitra" aria-label="Pilih Mitra" defaultValue="">
           <option value="">Pilih Mitra</option>
         </select>
 
-        <select name="outlet" aria-label="Semua Outlet" defaultValue="all">
+        <select className="h-10 min-w-36 flex-1 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-semibold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100" name="outlet" aria-label="Semua Outlet" defaultValue="all">
           <option value="all">Semua Outlet</option>
         </select>
 
         <select
+          className="h-10 min-w-24 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-semibold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           name="limit"
           aria-label="Jumlah baris"
           value={itemsPerPage}
@@ -799,9 +824,10 @@ function HotspotStok() {
           <option value="500">500</option>
         </select>
 
-        <label className="stok-search">
+        <label className="flex h-10 min-w-56 flex-1 items-center gap-2 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300">
           <Search size={16} strokeWidth={2} />
           <input
+            className="w-full min-w-0 border-0 bg-transparent text-[13px] font-semibold text-gray-900 outline-none placeholder:text-gray-400 dark:text-gray-100"
             type="search"
             name="q"
             placeholder="Cari voucher..."
@@ -815,51 +841,52 @@ function HotspotStok() {
         </label>
       </div>
 
-      <div className="stok-panel">
-        <div className="stok-panel-head">
+      <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition-colors duration-300 dark:border-gray-700 dark:bg-gray-800">
+        <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-4 py-4 dark:border-gray-700">
           <div>
-            <p>Data Radius</p>
-            <h1>Daftar Voucher</h1>
+            <p className="m-0 mb-0.5 text-[11px] font-bold tracking-[0.12em] text-cyan-700 uppercase dark:text-cyan-300">Data Radius</p>
+            <h1 className="m-0 text-xl font-bold tracking-tight text-gray-900 dark:text-gray-100">Daftar Voucher</h1>
           </div>
-          <span>{loading ? 'Memuat...' : `${totalData.toLocaleString('id-ID')} voucher`}</span>
+          <span className="text-[13px] font-bold text-gray-500 dark:text-gray-400">{loading ? 'Memuat...' : `${totalData.toLocaleString('id-ID')} voucher`}</span>
         </div>
 
-        {loading && <p className="stok-status">Memuat data voucher...</p>}
-        {error && <p className="stok-status stok-error">{error}</p>}
+        {loading && <p className="m-0 px-4 py-5 text-sm text-gray-500 dark:text-gray-400">Memuat data voucher...</p>}
+        {error && <p className="m-0 px-4 py-5 text-sm font-semibold text-rose-700 dark:text-rose-300">{error}</p>}
 
         {!loading && !error && (
-          <div className={fetching ? 'stok-table-wrap is-fetching' : 'stok-table-wrap'}>
-            <table className="stok-table">
+          <div className={fetching ? 'pointer-events-none overflow-x-auto opacity-55 transition-opacity' : 'overflow-x-auto transition-opacity'}>
+            <table className="w-full min-w-[1480px] border-collapse">
               <thead>
                 <tr>
-                  <th className="stok-check">
+                  <th className={`${thClass} w-12 pr-0`}>
                     <input
+                      className="h-4 w-4 accent-cyan-700"
                       type="checkbox"
                       aria-label="Pilih semua voucher"
                       checked={allSelected}
                       onChange={toggleAll}
                     />
                   </th>
-                  <th>KODE</th>
-                  <th>USERNAME</th>
-                  <th>PASSWORD</th>
-                  <th>PROFILE</th>
-                  <th>ROUTER</th>
-                  <th>SERVER</th>
-                  <th>MITRA</th>
-                  <th>OUTLET</th>
-                  <th>HPP</th>
-                  <th>KOMISI</th>
-                  <th>HARGA</th>
-                  <th>SALDO/STATUS</th>
-                  <th>ADMIN</th>
-                  <th>TGL PEMBUATAN</th>
+                  <th className={thClass}>KODE</th>
+                  <th className={thClass}>USERNAME</th>
+                  <th className={thClass}>PASSWORD</th>
+                  <th className={thClass}>PROFILE</th>
+                  <th className={thClass}>ROUTER</th>
+                  <th className={thClass}>SERVER</th>
+                  <th className={thClass}>MITRA</th>
+                  <th className={thClass}>OUTLET</th>
+                  <th className={thClass}>HPP</th>
+                  <th className={thClass}>KOMISI</th>
+                  <th className={thClass}>HARGA</th>
+                  <th className={thClass}>SALDO/STATUS</th>
+                  <th className={thClass}>ADMIN</th>
+                  <th className={thClass}>TGL PEMBUATAN</th>
                 </tr>
               </thead>
               <tbody>
                 {currentItems.length === 0 ? (
                   <tr>
-                    <td colSpan="15" className="stok-empty">
+                    <td colSpan="15" className={`${tdClass} text-center text-gray-500 dark:text-gray-400`}>
                       {searchTerm ? 'Voucher tidak ditemukan.' : 'Belum ada voucher.'}
                     </td>
                   </tr>
@@ -867,37 +894,38 @@ function HotspotStok() {
                   currentItems.map((item) => (
                     <tr
                       key={item.id ?? item.username}
-                      className={selectedMap[item.username] ? 'is-selected' : undefined}
+                      className={selectedMap[item.username] ? 'bg-sky-50 dark:bg-sky-950' : 'transition-colors duration-300 hover:bg-sky-50/80 dark:hover:bg-gray-900'}
                     >
-                      <td className="stok-check">
+                      <td className={`${tdClass} w-12 pr-0`}>
                         <input
+                          className="h-4 w-4 accent-cyan-700"
                           type="checkbox"
                           aria-label={`Pilih ${item.username}`}
                           checked={Boolean(selectedMap[item.username])}
                           onChange={() => toggleRow(item)}
                         />
                       </td>
-                      <td>
-                        <span className="stok-code">{item.kode_batch || '-'}</span>
+                      <td className={tdClass}>
+                        <span className="font-mono text-[13px] font-bold tracking-wide">{item.kode_batch || '-'}</span>
                       </td>
-                      <td>{item.username}</td>
-                      <td className="password-cell">
-                        <span className="pwd-masked">••••••••</span>
-                        <span className="pwd-revealed">{item.password}</span>
+                      <td className={tdClass}>{item.username}</td>
+                      <td className={`${tdClass} group cursor-pointer`}>
+                        <span className="group-hover:hidden">••••••••</span>
+                        <span className="hidden group-hover:inline">{item.password}</span>
                       </td>
-                      <td>
-                        <span className="stok-profil">{item.profile || '-'}</span>
+                      <td className={tdClass}>
+                        <span className="inline-flex min-h-6.5 items-center rounded-full bg-sky-100 px-2.5 text-xs font-bold text-sky-900 dark:bg-sky-950 dark:text-sky-100">{item.profile || '-'}</span>
                       </td>
-                      <td>{item.router || '-'}</td>
-                      <td>{item.server || '-'}</td>
-                      <td>{item.mitra || '-'}</td>
-                      <td>{item.outlet || '-'}</td>
-                      <td>{formatRupiah(item.hpp)}</td>
-                      <td>{formatRupiah(item.komisi)}</td>
-                      <td>{formatRupiah(item.harga)}</td>
-                      <td>{item.status || '-'}</td>
-                      <td>{item.admin || '-'}</td>
-                      <td>{formatTanggal(item.created_at)}</td>
+                      <td className={tdClass}>{item.router || '-'}</td>
+                      <td className={tdClass}>{item.server || '-'}</td>
+                      <td className={tdClass}>{item.mitra || '-'}</td>
+                      <td className={tdClass}>{item.outlet || '-'}</td>
+                      <td className={tdClass}>{formatRupiah(item.hpp)}</td>
+                      <td className={tdClass}>{formatRupiah(item.komisi)}</td>
+                      <td className={tdClass}>{formatRupiah(item.harga)}</td>
+                      <td className={tdClass}>{item.status || '-'}</td>
+                      <td className={tdClass}>{item.admin || '-'}</td>
+                      <td className={tdClass}>{formatTanggal(item.created_at)}</td>
                     </tr>
                   ))
                 )}
@@ -920,22 +948,22 @@ function HotspotStok() {
       </div>
 
       {isModalBuatVcOpen && (
-        <div className="stok-backdrop" onMouseDown={closeVoucherModal}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 sm:p-6" onMouseDown={closeVoucherModal}>
           <div
-            className="stok-modal"
+            className={`${modalShell} max-w-5xl`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="stok-modal-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <header className="stok-modal-head">
-              <h2 id="stok-modal-title">Buat Voucher</h2>
-              <p>Kode dibuat dari prefix dan huruf serta angka acak.</p>
+            <header className="px-6 pt-6">
+              <h2 id="stok-modal-title" className="m-0 text-xl font-bold tracking-wide text-gray-900 dark:text-gray-100">Buat Voucher</h2>
+              <p className="mt-1.5 mb-0 text-[13px] text-gray-500 dark:text-gray-400">Kode dibuat dari prefix dan huruf serta angka acak.</p>
             </header>
-            <form className="stok-modal-form" onSubmit={handleGenerate}>
-              <div className="stok-modal-grid">
-                <div className="stok-modal-fields">
-                  <label className="stok-field">
+            <form className="grid gap-4 px-6 pt-4 pb-6 [&_input]:box-border [&_input]:h-10 [&_input]:w-full [&_input]:rounded-lg [&_input]:border [&_input]:border-gray-300 [&_input]:bg-gray-50 [&_input]:px-3 [&_input]:text-sm [&_input]:font-medium [&_input]:text-gray-900 [&_input]:outline-none [&_input]:transition-colors [&_input]:duration-300 [&_input]:read-only:bg-gray-100 [&_input]:read-only:text-gray-500 [&_input]:focus:border-blue-800 [&_input]:focus:bg-white [&_input]:focus:ring-2 [&_input]:focus:ring-blue-800/20 dark:[&_input]:border-gray-600 dark:[&_input]:bg-gray-900 dark:[&_input]:text-gray-100 dark:[&_input]:focus:bg-gray-900 dark:[&_input]:read-only:bg-gray-950 [&_select]:box-border [&_select]:h-10 [&_select]:w-full [&_select]:rounded-lg [&_select]:border [&_select]:border-gray-300 [&_select]:bg-gray-50 [&_select]:px-3 [&_select]:text-sm [&_select]:font-medium [&_select]:text-gray-900 [&_select]:outline-none [&_select]:focus:border-blue-800 [&_select]:focus:bg-white [&_select]:focus:ring-2 [&_select]:focus:ring-blue-800/20 dark:[&_select]:border-gray-600 dark:[&_select]:bg-gray-900 dark:[&_select]:text-gray-100 dark:[&_select]:focus:bg-gray-900" onSubmit={handleGenerate}>
+              <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-3">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:col-span-2">
+                  <label className={fieldClass}>
                     <span>Router</span>
                     <select value={selectedRouter} onChange={(event) => setSelectedRouter(event.target.value)}>
                       <option value="ALL ROUTER">ALL ROUTER</option>
@@ -946,18 +974,18 @@ function HotspotStok() {
                       ))}
                     </select>
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Server</span>
                     <input type="text" value="ALL SERVER" readOnly />
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Jenis Voucher</span>
                     <select value={jenisVoucher} onChange={(event) => setJenisVoucher(event.target.value)}>
                       <option value="username=password">username=password</option>
                       <option value="username+password">username+password</option>
                     </select>
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Kode Kombinasi</span>
                     <select value={kodeKombinasi} onChange={(event) => setKodeKombinasi(event.target.value)}>
                       <option value="huruf-kecil">Huruf Kecil</option>
@@ -966,7 +994,7 @@ function HotspotStok() {
                       <option value="angka-huruf">Angka &amp; Huruf</option>
                     </select>
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Prefix</span>
                     <input
                       type="text"
@@ -975,7 +1003,7 @@ function HotspotStok() {
                       onChange={(event) => setPrefix(event.target.value)}
                     />
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Outlet</span>
                     <select value={selectedOutlet} onChange={(event) => setSelectedOutlet(event.target.value)}>
                       <option value="">-Pilih Outlet-</option>
@@ -986,7 +1014,7 @@ function HotspotStok() {
                       ))}
                     </select>
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Profile</span>
                     <select
                       value={mikrotikGroup}
@@ -1001,7 +1029,7 @@ function HotspotStok() {
                       ))}
                     </select>
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Jumlah</span>
                     <input
                       type="number"
@@ -1012,7 +1040,7 @@ function HotspotStok() {
                       required
                     />
                   </label>
-                  <label className="stok-field">
+                  <label className={fieldClass}>
                     <span>Panjang Karakter</span>
                     <input
                       type="number"
@@ -1025,43 +1053,43 @@ function HotspotStok() {
                   </label>
                 </div>
 
-                <aside className="stok-summary" aria-label="Ringkasan harga">
-                  <h3>Ringkasan Harga</h3>
-                  <p>{selectedProfile?.nama_profile || 'Pilih profile'}</p>
-                  <dl>
-                    <div>
-                      <dt>Harga Pokok</dt>
-                      <dd>{formatRupiah(hargaPokok)}</dd>
+                <aside className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900" aria-label="Ringkasan harga">
+                  <h3 className="m-0 text-[15px] font-bold text-gray-900 dark:text-gray-100">Ringkasan Harga</h3>
+                  <p className="mt-1 mb-3 text-[13px] font-semibold text-gray-500 dark:text-gray-400">{selectedProfile?.nama_profile || 'Pilih profile'}</p>
+                  <dl className="m-0 grid gap-2">
+                    <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg bg-white px-2.5 dark:bg-gray-800">
+                      <dt className="text-xs font-bold text-gray-500 dark:text-gray-400">Harga Pokok</dt>
+                      <dd className="m-0 text-[13px] font-bold whitespace-nowrap">{formatRupiah(hargaPokok)}</dd>
                     </div>
-                    <div>
-                      <dt>Harga Jual</dt>
-                      <dd>{formatRupiah(hargaJual)}</dd>
+                    <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg bg-white px-2.5 dark:bg-gray-800">
+                      <dt className="text-xs font-bold text-gray-500 dark:text-gray-400">Harga Jual</dt>
+                      <dd className="m-0 text-[13px] font-bold whitespace-nowrap">{formatRupiah(hargaJual)}</dd>
                     </div>
-                    <div>
-                      <dt>Komisi</dt>
-                      <dd>{formatRupiah(komisi)}</dd>
+                    <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg bg-white px-2.5 dark:bg-gray-800">
+                      <dt className="text-xs font-bold text-gray-500 dark:text-gray-400">Komisi</dt>
+                      <dd className="m-0 text-[13px] font-bold whitespace-nowrap">{formatRupiah(komisi)}</dd>
                     </div>
-                    <div>
-                      <dt>Total Komisi</dt>
-                      <dd>{formatRupiah(komisi * jumlahVoucher)}</dd>
+                    <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg bg-white px-2.5 dark:bg-gray-800">
+                      <dt className="text-xs font-bold text-gray-500 dark:text-gray-400">Total Komisi</dt>
+                      <dd className="m-0 text-[13px] font-bold whitespace-nowrap">{formatRupiah(komisi * jumlahVoucher)}</dd>
                     </div>
-                    <div>
-                      <dt>Total Harga Pokok</dt>
-                      <dd>{formatRupiah(hargaPokok * jumlahVoucher)}</dd>
+                    <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg bg-white px-2.5 dark:bg-gray-800">
+                      <dt className="text-xs font-bold text-gray-500 dark:text-gray-400">Total Harga Pokok</dt>
+                      <dd className="m-0 text-[13px] font-bold whitespace-nowrap">{formatRupiah(hargaPokok * jumlahVoucher)}</dd>
                     </div>
                   </dl>
                 </aside>
               </div>
-              <div className="stok-modal-actions">
+              <div className="flex justify-end gap-2.5">
                 <button
                   type="button"
-                  className="stok-modal-btn stok-modal-btn-gray"
+                  className={`${modalBtn} bg-slate-500 hover:bg-slate-600`}
                   onClick={closeVoucherModal}
                   disabled={saving}
                 >
                   Batal
                 </button>
-                <button type="submit" className="stok-modal-btn stok-modal-btn-blue" disabled={saving}>
+                <button type="submit" className={`${modalBtn} bg-blue-900 hover:bg-blue-800`} disabled={saving}>
                   Generate
                 </button>
               </div>
@@ -1071,33 +1099,33 @@ function HotspotStok() {
       )}
 
       {isModalOutletOpen && (
-        <div className="stok-backdrop" onMouseDown={closeOutletModal}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 sm:p-6" onMouseDown={closeOutletModal}>
           <div
-            className="stok-modal outlet-modal"
+            className={`${modalShell} flex max-w-6xl flex-col p-4 sm:p-5`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="outlet-modal-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <header className="outlet-head">
+            <header className="flex items-start justify-between gap-3">
               <div>
-                <p>Hotspot</p>
-                <h2 id="outlet-modal-title">Data Outlet</h2>
+                <p className="m-0 mb-1 text-xs font-bold tracking-[0.12em] text-cyan-700 uppercase dark:text-cyan-300">Hotspot</p>
+                <h2 id="outlet-modal-title" className="m-0 text-[22px] font-bold tracking-tight">Data Outlet</h2>
               </div>
-              <button type="button" className="outlet-close" onClick={closeOutletModal} aria-label="Tutup">
+              <button type="button" className="grid h-8.5 w-8.5 cursor-pointer place-items-center rounded-lg border border-gray-200 bg-white text-gray-800 transition-colors duration-300 hover:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-700" onClick={closeOutletModal} aria-label="Tutup">
                 <X size={18} />
               </button>
             </header>
 
-            <div className="outlet-note">
+            <div className="mt-3.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-3 text-[13px] leading-snug font-semibold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
               Outlet adalah toko, warung atau individu yang menjual voucher langsung ke konsumen dan posisi outlet berada dibawah kontrol mitra reseller
             </div>
 
-            <div className="outlet-toolbar">
-              <div className="stok-menu outlet-menu">
+            <div className="mt-3.5 flex flex-wrap items-center gap-2">
+              <div className="relative z-30">
                 <button
                   type="button"
-                  className="outlet-btn outlet-btn-green"
+                  className={`${actionBtn} h-9 bg-emerald-600 hover:bg-emerald-500`}
                   aria-expanded={isOutletMenuOpen}
                   aria-haspopup="menu"
                   onClick={() => setIsOutletMenuOpen((open) => !open)}
@@ -1106,27 +1134,28 @@ function HotspotStok() {
                   <span>MENU</span>
                 </button>
                 {isOutletMenuOpen && (
-                  <div className="stok-dropdown" role="menu">
-                    <button type="button" role="menuitem" onClick={() => handleAksiOutletMassal('Set Aktif')}>
+                  <div className="absolute top-full left-0 z-30 mt-2 grid min-w-48 gap-0.5 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800" role="menu">
+                    <button type="button" role="menuitem" className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-lg border-0 bg-transparent px-2.5 text-left text-[13px] font-bold text-gray-800 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => handleAksiOutletMassal('Set Aktif')}>
                       <Check size={16} />
                       <span>Set Aktif</span>
                     </button>
-                    <button type="button" role="menuitem" onClick={() => handleAksiOutletMassal('Set Tidak Aktif')}>
+                    <button type="button" role="menuitem" className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-lg border-0 bg-transparent px-2.5 text-left text-[13px] font-bold text-gray-800 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => handleAksiOutletMassal('Set Tidak Aktif')}>
                       <X size={16} />
                       <span>Set Tidak Aktif</span>
                     </button>
-                    <button type="button" role="menuitem" className="is-danger" onClick={() => handleAksiOutletMassal('Hapus Terpilih')}>
+                    <button type="button" role="menuitem" className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-lg border-0 bg-transparent px-2.5 text-left text-[13px] font-bold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950" onClick={() => handleAksiOutletMassal('Hapus Terpilih')}>
                       <Trash size={16} />
                       <span>Hapus Terpilih</span>
                     </button>
                   </div>
                 )}
               </div>
-              <button type="button" className="outlet-btn outlet-btn-blue" onClick={openTambahOutlet}>
+              <button type="button" className={`${actionBtn} h-9 bg-blue-600 hover:bg-blue-500`} onClick={openTambahOutlet}>
                 <Plus size={16} />
                 <span>TAMBAH</span>
               </button>
               <select
+                className="h-9 rounded-lg border border-gray-300 bg-gray-50 px-2.5 text-[13px] font-bold text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 aria-label="Jumlah baris outlet"
                 value={outletPerPage}
                 onChange={(event) => {
@@ -1137,9 +1166,10 @@ function HotspotStok() {
                 <option value="10">10</option>
                 <option value="20">20</option>
               </select>
-              <label className="outlet-search">
+              <label className="ml-auto flex h-9 min-w-55 items-center gap-2 rounded-lg border border-gray-300 bg-gray-50 px-3 text-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300">
                 <Search size={16} />
                 <input
+                  className="w-full min-w-0 border-0 bg-transparent text-[13px] text-gray-900 outline-none dark:text-gray-100"
                   type="search"
                   placeholder="Cari outlet..."
                   aria-label="Cari outlet"
@@ -1152,15 +1182,16 @@ function HotspotStok() {
               </label>
             </div>
 
-            <div className="outlet-table-wrap">
+            <div className="mt-3.5 overflow-auto">
               {outletLoading ? (
-                <p className="outlet-loading">Memuat data outlet...</p>
+                <p className="px-3.5 py-5 text-sm text-gray-500">Memuat data outlet...</p>
               ) : (
-                <table className="outlet-table">
+                <table className="w-full min-w-[860px] border-collapse [&_td]:border-b [&_td]:border-gray-100 [&_td]:px-3.5 [&_td]:py-3 [&_td]:text-left [&_td]:text-sm [&_td]:whitespace-nowrap [&_td]:text-gray-800 dark:[&_td]:border-gray-700 dark:[&_td]:text-gray-100 [&_th]:bg-sky-900 [&_th]:px-3.5 [&_th]:py-3 [&_th]:text-left [&_th]:text-xs [&_th]:font-bold [&_th]:whitespace-nowrap [&_th]:text-sky-50">
                   <thead>
                     <tr>
-                      <th className="stok-check">
+                      <th className="w-12">
                         <input
+                          className="h-4 w-4 accent-cyan-200"
                           type="checkbox"
                           aria-label="Pilih semua outlet"
                           checked={allOutletsSelected}
@@ -1180,15 +1211,16 @@ function HotspotStok() {
                   <tbody>
                     {outletItems.length === 0 ? (
                       <tr>
-                        <td colSpan="9" className="outlet-empty">
+                        <td colSpan="9" className="text-center text-gray-500">
                           {searchOutlet ? 'Outlet tidak ditemukan.' : 'Belum ada outlet.'}
                         </td>
                       </tr>
                     ) : (
                       outletItems.map((item) => (
-                        <tr key={item.id} className={selectedOutlets.includes(item.id) ? 'is-selected' : undefined}>
-                          <td className="stok-check">
+                        <tr key={item.id} className={selectedOutlets.includes(item.id) ? 'bg-sky-50 dark:bg-sky-950' : 'hover:bg-sky-50/70 dark:hover:bg-gray-900'}>
+                          <td className="w-12">
                             <input
+                              className="h-4 w-4 accent-cyan-700"
                               type="checkbox"
                               aria-label={`Pilih ${item.nama_outlet}`}
                               checked={selectedOutlets.includes(item.id)}
@@ -1198,10 +1230,10 @@ function HotspotStok() {
                           <td>{item.nama_outlet}</td>
                           <td>{item.pemilik || '-'}</td>
                           <td>{item.phone || '-'}</td>
-                          <td className="outlet-stock">{item.stok_vc ?? 0}</td>
+                          <td className="font-extrabold text-rose-600">{item.stok_vc ?? 0}</td>
                           <td>{item.mitra || '-'}</td>
                           <td>
-                            <span className={item.status === 'Tidak Aktif' ? 'outlet-status is-inactive' : 'outlet-status is-active'}>
+                            <span className={item.status === 'Tidak Aktif' ? 'inline-flex min-h-6.5 items-center rounded-full bg-rose-100 px-2.5 text-xs font-bold text-rose-800 dark:bg-rose-950 dark:text-rose-200' : 'inline-flex min-h-6.5 items-center rounded-full bg-emerald-100 px-2.5 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'}>
                               {item.status || 'Aktif'}
                             </span>
                           </td>
@@ -1215,14 +1247,14 @@ function HotspotStok() {
               )}
             </div>
 
-            <div className="stok-foot outlet-foot">
-              <p className="stok-info">
+            <div className="mt-2 flex flex-col items-start justify-between gap-3 border-t border-gray-200 pt-3 sm:flex-row sm:items-center dark:border-gray-700">
+              <p className="m-0 text-[13px] font-semibold text-gray-500 dark:text-gray-400">
                 Showing {outletTotal === 0 ? 0 : outletFirstIndex + 1} to {Math.min(outletLastIndex, outletTotal)} of {outletTotal} entries
               </p>
-              <nav className="stok-pages" aria-label="Navigasi halaman outlet">
+              <nav className="ml-auto flex flex-wrap items-center gap-1.5" aria-label="Navigasi halaman outlet">
                 <button
                   type="button"
-                  className="stok-nav"
+                  className="inline-flex h-9 min-w-9 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-[13px] font-bold text-gray-800 transition-colors duration-300 disabled:cursor-not-allowed disabled:text-gray-400 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   disabled={outletSafePage <= 1}
                   onClick={() => setOutletPage(outletSafePage - 1)}
                 >
@@ -1232,7 +1264,7 @@ function HotspotStok() {
                   <button
                     key={pageNumber}
                     type="button"
-                    className={pageNumber === outletSafePage ? 'stok-page is-active' : 'stok-page'}
+                    className={pageNumber === outletSafePage ? 'inline-flex h-9 min-w-9 items-center justify-center rounded-lg border border-blue-600 bg-blue-600 px-3 text-[13px] font-bold text-white' : 'inline-flex h-9 min-w-9 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-[13px] font-bold text-gray-800 transition-colors duration-300 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100'}
                     aria-current={pageNumber === outletSafePage ? 'page' : undefined}
                     onClick={() => setOutletPage(pageNumber)}
                   >
@@ -1241,7 +1273,7 @@ function HotspotStok() {
                 ))}
                 <button
                   type="button"
-                  className="stok-nav"
+                  className="inline-flex h-9 min-w-9 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-[13px] font-bold text-gray-800 transition-colors duration-300 disabled:cursor-not-allowed disabled:text-gray-400 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   disabled={outletSafePage >= outletTotalPages}
                   onClick={() => setOutletPage(outletSafePage + 1)}
                 >
@@ -1254,19 +1286,19 @@ function HotspotStok() {
       )}
 
       {isModalTambahOutletOpen && (
-        <div className="stok-backdrop outlet-form-backdrop" onMouseDown={closeTambahOutlet}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4 sm:p-6" onMouseDown={closeTambahOutlet}>
           <div
-            className="stok-modal outlet-form-modal"
+            className={`${modalShell} max-w-3xl p-6`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="tambah-outlet-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <header className="outlet-head">
-              <h2 id="tambah-outlet-title">OUTLET VOUCHER</h2>
+            <header>
+              <h2 id="tambah-outlet-title" className="m-0 text-[22px] font-bold tracking-tight">OUTLET VOUCHER</h2>
             </header>
-            <form className="outlet-form" onSubmit={handleSaveOutlet}>
-              <label className="stok-field">
+            <form className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 [&_input]:box-border [&_input]:h-10 [&_input]:w-full [&_input]:rounded-lg [&_input]:border [&_input]:border-gray-300 [&_input]:bg-gray-50 [&_input]:px-3 [&_input]:text-sm [&_input]:text-gray-900 [&_input]:outline-none [&_input]:focus:border-blue-800 [&_input]:focus:ring-2 [&_input]:focus:ring-blue-800/20 dark:[&_input]:border-gray-600 dark:[&_input]:bg-gray-900 dark:[&_input]:text-gray-100" onSubmit={handleSaveOutlet}>
+              <label className={fieldClass}>
                 <span>Outlet</span>
                 <input
                   type="text"
@@ -1277,7 +1309,7 @@ function HotspotStok() {
                   required
                 />
               </label>
-              <label className="stok-field">
+              <label className={fieldClass}>
                 <span>Pemilik</span>
                 <input
                   type="text"
@@ -1287,7 +1319,7 @@ function HotspotStok() {
                   maxLength={100}
                 />
               </label>
-              <label className="stok-field">
+              <label className={fieldClass}>
                 <span>Phone</span>
                 <input
                   type="text"
@@ -1297,7 +1329,7 @@ function HotspotStok() {
                   maxLength={50}
                 />
               </label>
-              <label className="stok-field">
+              <label className={`${fieldClass} sm:col-span-2`}>
                 <span>Alamat</span>
                 <input
                   type="text"
@@ -1306,7 +1338,7 @@ function HotspotStok() {
                   onChange={updateFormOutlet}
                 />
               </label>
-              <label className="stok-field">
+              <label className={fieldClass}>
                 <span>Tgl Gabung</span>
                 <input
                   type="date"
@@ -1315,11 +1347,11 @@ function HotspotStok() {
                   onChange={updateFormOutlet}
                 />
               </label>
-              <div className="stok-modal-actions">
-                <button type="button" className="stok-modal-btn stok-modal-btn-gray" onClick={closeTambahOutlet}>
+              <div className="flex justify-end gap-2.5 sm:col-span-2">
+                <button type="button" className={`${modalBtn} bg-slate-500 hover:bg-slate-600`} onClick={closeTambahOutlet}>
                   Close
                 </button>
-                <button type="submit" className="stok-modal-btn stok-modal-btn-blue">
+                <button type="submit" className={`${modalBtn} bg-blue-900 hover:bg-blue-800`}>
                   Simpan
                 </button>
               </div>

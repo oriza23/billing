@@ -541,12 +541,20 @@
 }
 
 .stok-modal {
-  width: min(980px, 100%);
+  width: min(1024px, 100%);
   max-height: calc(100vh - 48px);
   overflow: auto;
   border-radius: 18px;
   background: #fff;
   box-shadow: 0 24px 60px rgba(8, 24, 44, 0.28);
+}
+
+/* Tanpa border-box, input width:100% + padding melebar keluar kolom dan menimpa kolom sebelah. */
+.stok-modal,
+.stok-modal *,
+.stok-modal *::before,
+.stok-modal *::after {
+  box-sizing: border-box;
 }
 
 .stok-modal-head {
@@ -572,17 +580,23 @@
   padding: 18px 22px 22px;
 }
 
+/* Form input 2/3 lebar, Ringkasan Harga 1/3 lebar. */
 .stok-modal-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
-  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 32px;
   align-items: start;
 }
 
 .stok-modal-fields {
+  grid-column: span 2;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.stok-summary {
+  grid-column: span 1;
 }
 
 .stok-field input[readonly] {
@@ -918,13 +932,14 @@
 }
 
 .outlet-form-modal {
-  width: min(460px, 100%);
-  padding: 22px;
+  width: min(768px, 100%);
+  padding: 24px;
 }
 
 .outlet-form {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
   margin-top: 16px;
 }
 
@@ -955,9 +970,25 @@
     justify-content: center;
   }
 
-  .stok-modal-grid,
+}
+
+/* Di bawah 768px: Ringkasan Harga turun ke bawah form. */
+@media (max-width: 767px) {
+  .stok-modal-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
   .stok-modal-fields,
-  .stok-modal-form {
-    grid-template-columns: 1fr;
+  .stok-summary {
+    grid-column: auto;
+  }
+}
+
+/* Di bawah 640px: input berbaris satu kolom. */
+@media (max-width: 639px) {
+  .stok-modal-fields,
+  .outlet-form {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

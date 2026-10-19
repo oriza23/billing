@@ -74,9 +74,11 @@ function ServerClock() {
   const display = timezone && text ? text : timezone ? formatServerTime(Date.now() + offsetRef.current, timezone) : '...'
 
   return (
-    <div className="sidebar-clock" title="Waktu server saat ini">
-      <span>Waktu Server</span>
-      <strong>{display}{timezone ? ` ${ZONE_LABELS[timezone] || ''}` : ''}</strong>
+    <div className="-mt-3 grid gap-0.5 rounded-lg border border-sky-200/25 bg-white/10 px-3 py-2" title="Waktu server saat ini">
+      <span className="text-[10px] font-bold tracking-[0.12em] text-sky-200 uppercase">Waktu Server</span>
+      <strong className="text-[13px] font-semibold whitespace-nowrap text-white tabular-nums">
+        {display}{timezone ? ` ${ZONE_LABELS[timezone] || ''}` : ''}
+      </strong>
     </div>
   )
 }

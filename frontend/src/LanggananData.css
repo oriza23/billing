@@ -202,12 +202,19 @@
 }
 
 .data-modal {
-  width: min(920px, 100%);
+  width: min(1024px, 100%);
   max-height: calc(100vh - 48px);
   overflow: auto;
   border-radius: 16px;
   background: #fff;
   box-shadow: 0 24px 60px rgba(8, 24, 42, 0.28);
+}
+
+.data-modal,
+.data-modal *,
+.data-modal *::before,
+.data-modal *::after {
+  box-sizing: border-box;
 }
 
 .data-modal-head,
@@ -250,13 +257,14 @@
 .data-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 16px;
   padding: 8px 20px;
 }
 
 .data-form-grid label {
   display: grid;
   gap: 6px;
+  min-width: 0;
   color: #47627a;
   font-size: 12px;
   font-weight: 750;
@@ -320,10 +328,13 @@
   background: #2563eb;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 639px) {
   .data-form-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@media (max-width: 720px) {
 
   .data-toolbar .stok-search {
     margin-left: 0;

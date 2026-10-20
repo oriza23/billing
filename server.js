@@ -24,6 +24,8 @@ app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
 app.use('/api/langganan/online', require('./backend/routes/langganan_online'));
+const pelangganRouter = require('./backend/routes/pelanggan');
+app.use('/api/pelanggan', pelangganRouter);
 const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
@@ -77,6 +79,7 @@ async function start() {
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
+  await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
   const timezone = await settingsRouter.loadTimezone();
   console.log(`Zona waktu server: ${timezone}`);

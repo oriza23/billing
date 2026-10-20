@@ -38,6 +38,7 @@ function App() {
             <Route path="hotspot/terjual" element={<HotspotTerjual />} />
             <Route path="hotspot/online" element={<HotspotOnline />} />
           </Route>
+          <Route path="/pelanggan" element={<Navigate to="/langganan/data" replace />} />
           <Route path="/langganan" element={<Dashboard />}>
             <Route path="profil" element={<LanggananProfil />} />
             <Route path="data" element={<LanggananData />} />

@@ -20,6 +20,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import DataPelanggan from './DataPelanggan.jsx'
 import './HotspotStok.css'
 import './LanggananData.css'
 
@@ -138,7 +139,7 @@ const infoButtons = [
   { label: 'SET BILLING', icon: Receipt, tone: 'rose' },
   { label: 'SECRET', icon: KeyRound, tone: 'tosca' },
   { label: 'LAPORAN', icon: FileText, tone: 'yellow' },
-  { label: 'PELANGGAN', icon: UserRound, tone: 'green' },
+  { label: 'Pelanggan', icon: UserRound, tone: 'green' },
   { label: 'KODE UNIK', icon: Hash, tone: 'yellow' },
 ]
 
@@ -156,6 +157,7 @@ function LanggananData() {
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [isPelangganOpen, setIsPelangganOpen] = useState(false)
 
   async function loadData() {
     const [customerResponse, profileResponse] = await Promise.all([
@@ -460,7 +462,12 @@ function LanggananData() {
         {infoButtons.map((item) => {
           const Icon = item.icon
           return (
-            <button key={item.label} type="button" className={`stok-action data-action-${item.tone}`} onClick={showInfo}>
+            <button
+              key={item.label}
+              type="button"
+              className={`stok-action data-action-${item.tone}`}
+              onClick={item.label === 'Pelanggan' ? () => setIsPelangganOpen(true) : showInfo}
+            >
               <Icon size={16} strokeWidth={2.2} />
               <span>{item.label}</span>
             </button>
@@ -709,6 +716,8 @@ function LanggananData() {
           </form>
         </div>
       )}
+
+      <DataPelanggan open={isPelangganOpen} onClose={() => setIsPelangganOpen(false)} />
     </section>
   )
 }

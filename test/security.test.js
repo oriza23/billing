@@ -216,7 +216,7 @@ test('generate voucher mencatat username dari token, bukan dari body', async () 
   assert.equal(JSON.stringify(insert.params).includes('bukan-dari-token'), false);
 });
 
-test('profil baru dan profil yang diubah menulis Session-Timeout dan Max-All-Session', async () => {
+test('profil baru dan profil yang diubah menulis Max-All-Session tanpa Session-Timeout', async () => {
   const created = installPool();
   const createResponse = await call('POST', '/api/hotspot/profil', {
     token: sign('admin', 'admin'),
@@ -233,8 +233,9 @@ test('profil baru dan profil yang diubah menulis Session-Timeout dan Max-All-Ses
     },
   });
   assert.equal(createResponse.status, 200, JSON.stringify(createResponse.body));
-  assert.deepEqual(attributeValues(created, 'Session-Timeout'), ['3600']);
+  assert.deepEqual(attributeValues(created, 'Session-Timeout'), []);
   assert.deepEqual(attributeValues(created, 'Max-All-Session'), ['3600']);
+  assert.equal(created.some((item) => item.sql.includes('Session-Timeout')), false);
 
   const updated = installPool({
     execute: async (sql) => {
@@ -256,8 +257,9 @@ test('profil baru dan profil yang diubah menulis Session-Timeout dan Max-All-Ses
     },
   });
   assert.equal(updateResponse.status, 200, JSON.stringify(updateResponse.body));
-  assert.deepEqual(attributeValues(updated, 'Session-Timeout'), ['172800']);
+  assert.deepEqual(attributeValues(updated, 'Session-Timeout'), []);
   assert.deepEqual(attributeValues(updated, 'Max-All-Session'), ['172800']);
+  assert.equal(updated.some((item) => item.sql.includes('Session-Timeout')), false);
   assert.equal(
     updated.some((item) => item.sql.includes('DELETE') && item.sql.includes('Max-All-Session')),
     false,

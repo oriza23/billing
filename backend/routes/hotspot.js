@@ -17,17 +17,9 @@ function masaAktifKeDetik(jumlah, satuan) {
   return jumlah * MASA_AKTIF_DETIK[satuan];
 }
 
-// Session-Timeout membatasi satu sesi. Max-All-Session di radgroupcheck adalah
-// batas kumulatif yang dibaca sqlcounter. Keduanya diisi dengan masa aktif yang sama.
+// Batas kumulatif yang dibaca sqlcounter. Jawaban Session-Timeout sebesar sisa
+// waktu dibuat modul itu, bukan baris radgroupreply.
 async function writeMasaAktif(executor, groupname, totalDetik) {
-  await executor.execute(
-    "DELETE FROM radgroupreply WHERE groupname = ? AND attribute = 'Session-Timeout'",
-    [groupname],
-  );
-  await executor.execute(
-    "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Session-Timeout', ':=', ?)",
-    [groupname, totalDetik],
-  );
   const [updated] = await executor.execute(
     "UPDATE radgroupcheck SET op = ':=', value = ? WHERE groupname = ? AND attribute = 'Max-All-Session'",
     [totalDetik, groupname],
@@ -608,8 +600,8 @@ const SOLD_BASE_SQL = `SELECT
   LEFT JOIN radacct a ON a.username = v.username
   LEFT JOIN hotspot_profiles hp
     ON hp.nama_profile = v.profile OR hp.mikrotik_group = v.profile
-  LEFT JOIN radgroupreply g
-    ON g.groupname = hp.mikrotik_group AND g.attribute = 'Session-Timeout'
+  LEFT JOIN radgroupcheck g
+    ON g.groupname = hp.mikrotik_group AND g.attribute = 'Max-All-Session'
   WHERE v.status = 'Yes' OR a.radacctid IS NOT NULL
   GROUP BY
     v.id, v.username, v.password, v.profile, v.router, v.server, v.mitra,

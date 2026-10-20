@@ -4,28 +4,13 @@ Modul `mods-available/hotspot_time` menjumlahkan `acctsessiontime` di `radacct` 
 
 ## Pemasangan
 
-1. Salin `mods-available/hotspot_time` ke `/etc/freeradius/3.0/mods-available/hotspot_time`.
+1. Salin `mods-available/hotspot_time` ke `/etc/freeradius/3.0/mods-available/hotspot_time` (pemilik `freerad`, mode `640`).
 2. Aktifkan modul: `ln -s ../mods-available/hotspot_time /etc/freeradius/3.0/mods-enabled/hotspot_time`.
-3. Di bagian `authorize` situs (biasanya `sites-enabled/default`), panggil `hotspot_time` **sebelum** modul `sql`:
+3. Di bagian `authorize` situs `sites-enabled/default`, panggil `hotspot_time` tepat sesudah `sql`.
+4. `freeradius -XC`, lalu muat ulang FreeRADIUS hanya jika pemeriksaan itu berhasil.
 
-```
-authorize {
-    # ... modul lain ...
-    hotspot_time
-    sql
-    # ...
-}
-```
+Aplikasi menulis `radgroupcheck` / `Max-All-Session` sebesar masa aktif profil dalam detik. `Session-Timeout` pada jawaban RADIUS diisi modul ini sebesar sisa waktu, bukan dari `radgroupreply`.
 
-4. `radiusd -XC`, lalu muat ulang FreeRADIUS.
+## Batas
 
-Aplikasi menulis dua atribut saat profil disimpan atau diubah:
-
-- `radgroupreply` / `Session-Timeout`: batas satu sesi.
-- `radgroupcheck` / `Max-All-Session`: batas kumulatif seluruh sesi, sama dengan masa aktif profil dalam detik.
-
-## Batas yang tidak ditutup modul ini
-
-`sqlcounter` hanya berjalan saat pengguna autentikasi. Sesi yang sudah terhubung tidak dipotong di tengah jalan; NAS tetap memakai `Session-Timeout` yang diterima saat sesi itu dimulai. Sisa waktu kumulatif baru diterapkan pada autentikasi berikutnya: jawaban membawa `Session-Timeout` sebesar sisa detik, atau permintaan ditolak bila jatah sudah habis.
-
-Job aplikasi (setiap 60 detik) adalah pengaman bila modul ini belum dipasang. Job itu menulis `radcheck` `Auth-Type := Reject` setelah `SUM(acctsessiontime)` mencapai batas, sehingga login berikutnya ditolak. Job itu juga tidak memutus sesi yang sedang berjalan.
+`sqlcounter` menghitung sisa waktu saat pengguna autentikasi, dari catatan `radacct` yang sudah masuk. Sisa waktu di tengah sesi yang sedang berjalan bergantung pada accounting MikroTik: sebelum interim update atau accounting stop tercatat, hitungan kumulatif belum bertambah. `shared` lebih dari 1 masih bisa terlewati sedikit, karena dua perangkat yang login bersamaan sama-sama menerima sisa waktu yang sama sebelum salah satu sesi tercatat.

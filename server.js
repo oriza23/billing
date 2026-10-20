@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const pool = require('./database');
 const requireAuth = require('./backend/middleware/auth');
+const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
+const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
 
 const app = express();
 const PORT = 5000;
@@ -34,16 +36,7 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
 
 async function ensureAdminTable() {
-  await pool.query(
-    "CREATE TABLE IF NOT EXISTS web_admins (id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(50) UNIQUE, password VARCHAR(255), role VARCHAR(20) DEFAULT 'admin')",
-  );
-
-  const [rows] = await pool.query('SELECT COUNT(*) AS total FROM web_admins');
-  if (Number(rows[0].total) === 0) {
-    await pool.execute(
-      "INSERT IGNORE INTO web_admins (username, password) VALUES ('admin', 'admin12345')",
-    );
-  }
+  await ensureBootstrapAdmin(pool);
 }
 
 async function ensureHotspotProfilesTable() {
@@ -104,6 +97,7 @@ async function start() {
   if (osTimezone !== timezone) {
     console.warn(`Peringatan: zona waktu OS (${osTimezone || 'tidak diketahui'}) berbeda dengan pengaturan web (${timezone}). Simpan ulang di menu Sistem > Pengaturan untuk menyamakan.`);
   }
+  startExpiredVoucherEnforcement();
   app.listen(PORT, () => {
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });

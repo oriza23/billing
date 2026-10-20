@@ -1,0 +1,16 @@
+# Counter kumulatif voucher hotspot.
+# check_name membaca Max-All-Session dari radgroupcheck.
+# reply_name menimpa Session-Timeout di jawaban dengan sisa waktu.
+sqlcounter hotspot_time {
+	sql_module_instance = sql
+	dialect = mysql
+
+	counter_name = Max-All-Session
+	check_name = Max-All-Session
+	reply_name = Session-Timeout
+
+	key = User-Name
+	reset = never
+
+	query = "SELECT SUM(acctsessiontime) FROM radacct WHERE username='%{${key}}'"
+}

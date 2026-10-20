@@ -3,6 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const pool = require('../../database');
 const requireAuth = require('../middleware/auth');
+const { hashPassword, isScryptHash, verifyPassword } = require('../password');
 const { secret, expiresIn } = require('../config/jwt');
 
 const router = express.Router();
@@ -71,13 +72,27 @@ router.post('/login', async (req, res) => {
       [username],
     );
     const admin = rows[0];
+    const stored = admin?.password;
+    const hashed = isScryptHash(stored);
+    const passwordOk = hashed
+      ? await verifyPassword(password, stored)
+      : Boolean(admin) && sameText(stored, password);
 
-    if (!admin || !sameText(admin.password, password)) {
+    if (!passwordOk) {
       recordFailure(key);
       return res.status(401).json({
         success: false,
         message: 'Username atau password salah',
       });
+    }
+
+    // Akun lama yang masih polos: izinkan login ini, lalu simpan ulang sebagai hash.
+    if (!hashed) {
+      const upgraded = await hashPassword(password);
+      await pool.execute(
+        'UPDATE web_admins SET password = ? WHERE username = ?',
+        [upgraded, admin.username],
+      );
     }
 
     failedAttempts.delete(key);

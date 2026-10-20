@@ -1,8 +1,10 @@
 const express = require('express');
 const pool = require('../../database');
 const systemTime = require('../system_time');
+const requireRole = require('../middleware/requireRole');
 
 const router = express.Router();
+const requireAdmin = requireRole('admin');
 
 const TIMEZONE_KEY = 'timezone';
 const DEFAULT_TIMEZONE = 'Asia/Makassar';
@@ -88,7 +90,7 @@ router.get('/time-status', async (req, res) => {
   }
 });
 
-router.post('/timezone', async (req, res) => {
+router.post('/timezone', requireAdmin, async (req, res) => {
   const timezone = typeof req.body?.timezone === 'string' ? req.body.timezone.trim() : '';
   if (!TIMEZONES.includes(timezone)) {
     return res.status(400).json({

@@ -1,7 +1,9 @@
 const express = require('express');
 const pool = require('../../database');
+const requireRole = require('../middleware/requireRole');
 
 const router = express.Router();
+const requireAdmin = requireRole('admin');
 
 function readText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -36,7 +38,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const { namaRouter, ipAddress, secret, deskripsi } = readRouterBody(req.body);
 
   if (!namaRouter || !ipAddress || !secret) {
@@ -66,7 +68,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAdmin, async (req, res) => {
   const id = readId(req.params.id);
   const { namaRouter, ipAddress, secret, deskripsi } = readRouterBody(req.body);
 
@@ -103,7 +105,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   const id = readId(req.params.id);
 
   if (!id) {

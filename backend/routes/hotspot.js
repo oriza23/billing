@@ -529,20 +529,82 @@ async function insertVouchersBulk(connection, vouchers, record) {
   }
 }
 
-async function deleteVoucherEverywhere(executor, username) {
-  const [groupResult] = await executor.execute(
-    'DELETE FROM radusergroup WHERE username = ?',
-    [username],
-  );
-  const [checkResult] = await executor.execute(
-    'DELETE FROM radcheck WHERE username = ?',
-    [username],
-  );
-  const [webResult] = await executor.execute(
-    'DELETE FROM hotspot_vouchers WHERE username = ?',
-    [username],
-  );
-  return groupResult.affectedRows + checkResult.affectedRows + webResult.affectedRows;
+const VOUCHER_DELETE_TABLES = ['hotspot_vouchers', 'radcheck', 'radreply', 'radusergroup', 'radacct'];
+
+function sqlPlaceholders(count) {
+  return new Array(count).fill('?').join(', ');
+}
+
+// Hapus massal dan hapus satu voucher. Hanya username yang ada di hotspot_vouchers.
+// radgroupreply, radgroupcheck, dan akun PPPoE tidak ikut terhapus.
+async function deleteHotspotVouchers(usernames) {
+  const requested = [...new Set(
+    usernames
+      .filter((item) => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )];
+  if (requested.length === 0) {
+    return { jumlah: 0 };
+  }
+
+  const connection = await pool.getConnection();
+  let committed = false;
+
+  try {
+    await connection.beginTransaction();
+    const [ownedRows] = await connection.query(
+      `SELECT DISTINCT username FROM hotspot_vouchers WHERE username IN (${sqlPlaceholders(requested.length)})`,
+      requested,
+    );
+    const targets = ownedRows.map((row) => row.username);
+    if (targets.length === 0) {
+      await connection.rollback();
+      return { jumlah: 0 };
+    }
+
+    const marks = sqlPlaceholders(targets.length);
+    const [postauthRows] = await connection.query(
+      'SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+      ['radpostauth'],
+    );
+    const tables = Number(postauthRows[0]?.total) > 0
+      ? [...VOUCHER_DELETE_TABLES, 'radpostauth']
+      : VOUCHER_DELETE_TABLES;
+
+    for (const table of tables) {
+      await connection.query(
+        `DELETE FROM \`${table}\` WHERE username IN (${marks})`,
+        targets,
+      );
+    }
+    await connection.commit();
+    committed = true;
+
+    for (const table of VOUCHER_DELETE_TABLES) {
+      const [left] = await connection.query(
+        `SELECT COUNT(*) AS total FROM \`${table}\` WHERE username IN (${marks})`,
+        targets,
+      );
+      if (Number(left[0]?.total) !== 0) {
+        const error = new Error(`Penghapusan tidak tuntas, masih ada baris di ${table}`);
+        throw error;
+      }
+    }
+
+    return { jumlah: targets.length };
+  } catch (error) {
+    if (!committed) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Transaksi sudah ditutup.
+      }
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 function formatDurasiDetik(value) {
@@ -979,29 +1041,27 @@ router.post('/voucher/delete-massal', requireAdmin, async (req, res) => {
     });
   }
 
-  const connection = await pool.getConnection();
-
   try {
-    await connection.beginTransaction();
-    await connection.query('DELETE FROM radusergroup WHERE username IN (?)', [usernames]);
-    await connection.query('DELETE FROM radcheck WHERE username IN (?)', [usernames]);
-    await connection.query('DELETE FROM hotspot_vouchers WHERE username IN (?)', [usernames]);
-    await connection.commit();
-
+    const { jumlah } = await deleteHotspotVouchers(usernames);
+    if (jumlah === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Voucher tidak ditemukan',
+      });
+    }
     return res.json({
       success: true,
       message: 'Voucher berhasil dihapus',
-      jumlah: usernames.length,
+      jumlah,
     });
   } catch (error) {
-    await connection.rollback();
     return res.status(500).json({
       success: false,
-      message: 'Gagal menghapus voucher',
+      message: error.message && error.message.startsWith('Penghapusan tidak tuntas')
+        ? error.message
+        : 'Gagal menghapus voucher',
       error: error.message,
     });
-  } finally {
-    connection.release();
   }
 });
 
@@ -1015,14 +1075,9 @@ router.delete('/voucher/:username', requireAdmin, async (req, res) => {
     });
   }
 
-  const connection = await pool.getConnection();
-
   try {
-    await connection.beginTransaction();
-    const removed = await deleteVoucherEverywhere(connection, username);
-    await connection.commit();
-
-    if (removed === 0) {
+    const { jumlah } = await deleteHotspotVouchers([username]);
+    if (jumlah === 0) {
       return res.status(404).json({
         success: false,
         message: 'Voucher tidak ditemukan',
@@ -1032,16 +1087,16 @@ router.delete('/voucher/:username', requireAdmin, async (req, res) => {
     return res.json({
       success: true,
       message: 'Voucher berhasil dihapus',
+      jumlah,
     });
   } catch (error) {
-    await connection.rollback();
     return res.status(500).json({
       success: false,
-      message: 'Gagal menghapus voucher',
+      message: error.message && error.message.startsWith('Penghapusan tidak tuntas')
+        ? error.message
+        : 'Gagal menghapus voucher',
       error: error.message,
     });
-  } finally {
-    connection.release();
   }
 });
 

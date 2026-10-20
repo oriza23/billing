@@ -737,7 +737,7 @@ function HotspotStok() {
       </div>
 
       <div className="flex flex-wrap gap-2" role="toolbar" aria-label="Aksi stok voucher">
-        <div className="relative z-30">
+        <div className="stok-menu relative z-30">
           <button
             type="button"
             className={`${actionBtn} bg-blue-600 hover:bg-blue-500`}

@@ -1,7 +1,10 @@
 const express = require('express');
 const pool = require('../../database');
+const requireRole = require('../middleware/requireRole');
+const { hashPassword } = require('../password');
 
 const router = express.Router();
+const requireAdmin = requireRole('admin');
 
 function readText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -10,9 +13,9 @@ function readText(value) {
 router.get('/', async (req, res) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT id, username, password, role FROM web_admins ORDER BY id ASC',
+      'SELECT id, username, role FROM web_admins ORDER BY id ASC',
     );
-    res.json(rows);
+    res.json(rows.map(({ id, username, role }) => ({ id, username, role })));
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -22,7 +25,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const username = readText(req.body?.username);
   const password = readText(req.body?.password);
   const role = readText(req.body?.role) || 'admin';
@@ -37,7 +40,7 @@ router.post('/', async (req, res) => {
   try {
     await pool.execute(
       'INSERT INTO web_admins (username, password, role) VALUES (?, ?, ?)',
-      [username, password, role],
+      [username, await hashPassword(password), role],
     );
 
     return res.json({
@@ -60,23 +63,28 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:username', async (req, res) => {
+router.put('/:username', requireAdmin, async (req, res) => {
   const username = readText(req.params.username);
   const password = readText(req.body?.password);
   const role = readText(req.body?.role) || 'admin';
 
-  if (!username || !password) {
+  if (!username) {
     return res.status(400).json({
       success: false,
-      message: 'Username dan password wajib diisi',
+      message: 'Username wajib diisi',
     });
   }
 
   try {
-    const [result] = await pool.execute(
-      'UPDATE web_admins SET password = ?, role = ? WHERE username = ?',
-      [password, role, username],
-    );
+    const [result] = password
+      ? await pool.execute(
+        'UPDATE web_admins SET password = ?, role = ? WHERE username = ?',
+        [await hashPassword(password), role, username],
+      )
+      : await pool.execute(
+        'UPDATE web_admins SET role = ? WHERE username = ?',
+        [role, username],
+      );
 
     if (result.affectedRows === 0) {
       return res.status(404).json({
@@ -98,7 +106,7 @@ router.put('/:username', async (req, res) => {
   }
 });
 
-router.delete('/:username', async (req, res) => {
+router.delete('/:username', requireAdmin, async (req, res) => {
   const username = readText(req.params.username);
 
   if (username === 'admin') {

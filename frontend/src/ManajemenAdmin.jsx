@@ -62,7 +62,7 @@ function ManajemenAdmin() {
     setEditMode(true)
     setSelectedUsername(item.username)
     setUsername(item.username)
-    setPassword(item.password)
+    setPassword('')
     setRole(item.role || 'admin')
     setFormError('')
   }
@@ -183,12 +183,13 @@ function ManajemenAdmin() {
           <label className="admin-field">
             <span>Password</span>
             <input
-              type="text"
+              type="password"
               name="password"
-              placeholder="Password admin"
+              placeholder={editMode ? 'Kosongkan jika tidak diganti' : 'Password admin'}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              required
+              autoComplete="new-password"
+              required={!editMode}
             />
           </label>
 
@@ -230,7 +231,6 @@ function ManajemenAdmin() {
                 <tr>
                   <th>No</th>
                   <th>Username</th>
-                  <th>Password</th>
                   <th>Role</th>
                   <th>Aksi</th>
                 </tr>
@@ -238,7 +238,7 @@ function ManajemenAdmin() {
               <tbody>
                 {admins.length === 0 ? (
                   <tr>
-                    <td colSpan="5" className="admin-empty">
+                    <td colSpan="4" className="admin-empty">
                       Belum ada data admin.
                     </td>
                   </tr>
@@ -250,7 +250,6 @@ function ManajemenAdmin() {
                     >
                       <td>{index + 1}</td>
                       <td>{item.username}</td>
-                      <td>{item.password}</td>
                       <td>
                         <span className="admin-role">{item.role}</span>
                       </td>

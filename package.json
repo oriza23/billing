@@ -4,7 +4,8 @@
   "description": "Backend Web Billing",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.js"
   },
   "license": "ISC",
   "dependencies": {

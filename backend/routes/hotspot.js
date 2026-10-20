@@ -1,8 +1,10 @@
 const crypto = require('crypto');
 const express = require('express');
 const pool = require('../../database');
+const requireRole = require('../middleware/requireRole');
 
 const router = express.Router();
+const requireAdmin = requireRole('admin');
 
 const MASA_AKTIF_SATUAN = ['JAM', 'HARI', 'BULAN'];
 const MASA_AKTIF_DETIK = {
@@ -13,6 +15,21 @@ const MASA_AKTIF_DETIK = {
 
 function masaAktifKeDetik(jumlah, satuan) {
   return jumlah * MASA_AKTIF_DETIK[satuan];
+}
+
+// Batas kumulatif yang dibaca sqlcounter. Jawaban Session-Timeout sebesar sisa
+// waktu dibuat modul itu, bukan baris radgroupreply.
+async function writeMasaAktif(executor, groupname, totalDetik) {
+  const [updated] = await executor.execute(
+    "UPDATE radgroupcheck SET op = ':=', value = ? WHERE groupname = ? AND attribute = 'Max-All-Session'",
+    [totalDetik, groupname],
+  );
+  if (updated.affectedRows === 0) {
+    await executor.execute(
+      "INSERT INTO radgroupcheck (groupname, attribute, op, value) VALUES (?, 'Max-All-Session', ':=', ?)",
+      [groupname, totalDetik],
+    );
+  }
 }
 
 function readText(value) {
@@ -70,7 +87,7 @@ router.get('/profil', async (req, res) => {
   }
 });
 
-router.post('/profil', async (req, res) => {
+router.post('/profil', requireAdmin, async (req, res) => {
   const namaProfile = readText(req.body?.nama_profile);
   const mikrotikGroup = readText(req.body?.mikrotik_group);
   const addressList = readText(req.body?.address_list);
@@ -121,10 +138,6 @@ router.post('/profil', async (req, res) => {
         "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Port-Limit', ':=', ?)",
         [mikrotikGroup, String(shared)],
       ),
-      pool.execute(
-        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Session-Timeout', ':=', ?)",
-        [mikrotikGroup, totalDetik],
-      ),
     ];
 
     if (rateLimit) {
@@ -142,6 +155,7 @@ router.post('/profil', async (req, res) => {
     }
 
     await Promise.all(radiusInserts);
+    await writeMasaAktif(pool, mikrotikGroup, totalDetik);
 
     return res.json({
       success: true,
@@ -152,6 +166,7 @@ router.post('/profil', async (req, res) => {
       await connection.rollback();
     } else {
       await pool.execute('DELETE FROM radgroupreply WHERE groupname = ?', [mikrotikGroup]);
+      await pool.execute('DELETE FROM radgroupcheck WHERE groupname = ?', [mikrotikGroup]);
       await pool.execute('DELETE FROM hotspot_profiles WHERE mikrotik_group = ?', [mikrotikGroup]);
     }
     if (error.code === 'ER_DUP_ENTRY') {
@@ -172,10 +187,11 @@ router.post('/profil', async (req, res) => {
 
 async function deleteProfileFromBothTables(executor, groupname) {
   await executor.execute('DELETE FROM radgroupreply WHERE groupname = ?', [groupname]);
+  await executor.execute('DELETE FROM radgroupcheck WHERE groupname = ?', [groupname]);
   await executor.execute('DELETE FROM hotspot_profiles WHERE mikrotik_group = ?', [groupname]);
 }
 
-router.post('/profil/delete-massal', async (req, res) => {
+router.post('/profil/delete-massal', requireAdmin, async (req, res) => {
   const groupnames = Array.isArray(req.body?.groupnames)
     ? [...new Set(
       req.body.groupnames
@@ -218,7 +234,7 @@ router.post('/profil/delete-massal', async (req, res) => {
   }
 });
 
-router.put('/profil/:groupname', async (req, res) => {
+router.put('/profil/:groupname', requireAdmin, async (req, res) => {
   const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
   const rateLimit = typeof req.body?.rate_limit === 'string' ? req.body.rate_limit.trim() : '';
   const masaAktif = readInteger(req.body?.masa_aktif);
@@ -248,11 +264,7 @@ router.put('/profil/:groupname', async (req, res) => {
       });
     }
 
-    await pool.execute(
-      "DELETE FROM radgroupreply WHERE groupname = ? AND attribute IN ('Max-All-Session', 'Session-Timeout')",
-      [groupname],
-    );
-
+    await writeMasaAktif(pool, groupname, totalDetik);
     await Promise.all([
       pool.execute(
         'UPDATE hotspot_profiles SET masa_aktif = ?, masa_aktif_satuan = ?, rate_limit = ? WHERE mikrotik_group = ?',
@@ -261,10 +273,6 @@ router.put('/profil/:groupname', async (req, res) => {
       pool.execute(
         "UPDATE radgroupreply SET value = ? WHERE groupname = ? AND attribute = 'Mikrotik-Rate-Limit'",
         [rateLimit, groupname],
-      ),
-      pool.execute(
-        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Session-Timeout', ':=', ?)",
-        [groupname, totalDetik],
       ),
     ]);
 
@@ -281,7 +289,7 @@ router.put('/profil/:groupname', async (req, res) => {
   }
 });
 
-router.delete('/profil/:groupname', async (req, res) => {
+router.delete('/profil/:groupname', requireAdmin, async (req, res) => {
   const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
 
   if (!groupname) {
@@ -592,8 +600,8 @@ const SOLD_BASE_SQL = `SELECT
   LEFT JOIN radacct a ON a.username = v.username
   LEFT JOIN hotspot_profiles hp
     ON hp.nama_profile = v.profile OR hp.mikrotik_group = v.profile
-  LEFT JOIN radgroupreply g
-    ON g.groupname = hp.mikrotik_group AND g.attribute = 'Session-Timeout'
+  LEFT JOIN radgroupcheck g
+    ON g.groupname = hp.mikrotik_group AND g.attribute = 'Max-All-Session'
   WHERE v.status = 'Yes' OR a.radacctid IS NOT NULL
   GROUP BY
     v.id, v.username, v.password, v.profile, v.router, v.server, v.mitra,
@@ -790,7 +798,7 @@ router.get('/voucher', async (req, res) => {
   }
 });
 
-router.post('/voucher/generate', async (req, res) => {
+router.post('/voucher/generate', requireAdmin, async (req, res) => {
   const jumlah = readInteger(req.body?.jumlah);
   const panjangDiminta = readInteger(req.body?.panjang);
   const mikrotikGroup = readText(req.body?.mikrotik_group);
@@ -801,7 +809,13 @@ router.post('/voucher/generate', async (req, res) => {
   const serverName = readText(req.body?.server);
   const outlet = readText(req.body?.outlet);
   const mitra = readText(req.body?.mitra);
-  const admin = readText(req.body?.admin) || 'System';
+  const admin = readText(req.user?.username);
+  if (!admin) {
+    return res.status(401).json({
+      success: false,
+      message: 'Token tidak berisi username',
+    });
+  }
   const charset = CHARSETS[kodeKombinasi];
 
   if (!Number.isInteger(jumlah) || jumlah < 1 || jumlah > MAX_VOUCHER_QTY) {
@@ -948,7 +962,7 @@ router.post('/voucher/generate', async (req, res) => {
   }
 });
 
-router.post('/voucher/delete-massal', async (req, res) => {
+router.post('/voucher/delete-massal', requireAdmin, async (req, res) => {
   const usernames = Array.isArray(req.body?.usernames)
     ? [...new Set(
       req.body.usernames
@@ -991,7 +1005,7 @@ router.post('/voucher/delete-massal', async (req, res) => {
   }
 });
 
-router.delete('/voucher/:username', async (req, res) => {
+router.delete('/voucher/:username', requireAdmin, async (req, res) => {
   const username = typeof req.params.username === 'string' ? req.params.username.trim() : '';
 
   if (!username) {
@@ -1151,7 +1165,7 @@ router.get('/online', async (req, res) => {
   }
 });
 
-router.post('/kick-user', async (req, res) => {
+router.post('/kick-user', requireAdmin, async (req, res) => {
   const usernames = readNameList(req.body?.usernames);
   const routerName = readRouterValue(req.body?.router);
 
@@ -1171,7 +1185,7 @@ router.post('/kick-user', async (req, res) => {
   });
 });
 
-router.post('/hapus-cookie', async (req, res) => {
+router.post('/hapus-cookie', requireAdmin, async (req, res) => {
   const usernames = readNameList(req.body?.usernames);
   const routerName = readRouterValue(req.body?.router);
 

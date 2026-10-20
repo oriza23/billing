@@ -23,6 +23,9 @@ const langgananProfilRouter = require('./backend/routes/langganan_profil');
 app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
+const langgananMaster = require('./backend/routes/langganan_master');
+app.use('/api/langganan/server', langgananMaster.serverRouter);
+app.use('/api/wilayah', require('./backend/routes/wilayah'));
 app.use('/api/langganan/online', require('./backend/routes/langganan_online'));
 const pelangganRouter = require('./backend/routes/pelanggan');
 app.use('/api/pelanggan', pelangganRouter);
@@ -70,6 +73,18 @@ async function ensureOutletsTable() {
   );
 }
 
+async function ensureDataWilayahTable() {
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS data_wilayah (id INT AUTO_INCREMENT PRIMARY KEY, nama_wilayah VARCHAR(100) UNIQUE NOT NULL)',
+  );
+  // Salin wilayah yang sudah pernah dipakai di data langganan (aman diulang, nama bersifat unik).
+  await pool.query(
+    `INSERT IGNORE INTO data_wilayah (nama_wilayah)
+     SELECT DISTINCT TRIM(wilayah) FROM langganan_pelanggan
+     WHERE wilayah IS NOT NULL AND TRIM(wilayah) <> '' AND CHAR_LENGTH(TRIM(wilayah)) <= 100`,
+  );
+}
+
 async function start() {
   await ensureAdminTable();
   await ensureHotspotProfilesTable();
@@ -79,6 +94,8 @@ async function start() {
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
+  await langgananMaster.ensureTables();
+  await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
   const timezone = await settingsRouter.loadTimezone();

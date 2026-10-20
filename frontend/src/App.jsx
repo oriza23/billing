@@ -15,6 +15,7 @@ import PppoePelanggan from './PppoePelanggan.jsx'
 import PppoeProfil from './PppoeProfil.jsx'
 import RouterMaster from './RouterMaster.jsx'
 import SistemPengaturan from './SistemPengaturan.jsx'
+import TambahLanggananPppoe from './TambahLanggananPppoe.jsx'
 
 // Halaman yang butuh login: tanpa token yang valid, paksa kembali ke halaman Login.
 function ProtectedRoute() {
@@ -42,6 +43,7 @@ function App() {
           <Route path="/langganan" element={<Dashboard />}>
             <Route path="profil" element={<LanggananProfil />} />
             <Route path="data" element={<LanggananData />} />
+            <Route path="tambah" element={<TambahLanggananPppoe />} />
             <Route path="online" element={<PppoeOnline />} />
           </Route>
           <Route path="/router" element={<Dashboard />}>

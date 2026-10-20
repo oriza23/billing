@@ -100,6 +100,88 @@ function readCustomer(body) {
   };
 }
 
+const PPN_RATE = 0.11;
+const MAX_ITEMS = 100;
+const KOORDINAT_PATTERN = /^-?\d{1,2}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?$/;
+
+function readMoney(value) {
+  if (value === '' || value == null) {
+    return 0;
+  }
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0 || amount > 9999999999999.99) {
+    return null;
+  }
+  return Math.round(amount * 100) / 100;
+}
+
+function readFlag(value) {
+  return value === true || value === 1 || value === '1' || value === 'true' || value === 'ya';
+}
+
+// Item invoice: null berarti ada item yang tidak valid.
+function readItems(value) {
+  if (value == null) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    return null;
+  }
+  const items = [];
+  for (const raw of value) {
+    const deskripsi = readText(raw?.deskripsi);
+    const qty = Number(raw?.qty);
+    const harga = readMoney(raw?.harga);
+    if (!deskripsi || deskripsi.length > 200 || !Number.isFinite(qty) || qty <= 0 || qty > 9999 || harga == null) {
+      return null;
+    }
+    items.push({
+      deskripsi,
+      qty: Math.round(qty * 100) / 100,
+      ditagihkan: readFlag(raw?.ditagihkan),
+      harga,
+    });
+  }
+  return items;
+}
+
+// Total dihitung ulang di server, nilai total dari klien tidak dipercaya.
+function calcTotals(items, ppn) {
+  const subTotal = Math.round(
+    items.reduce((sum, item) => sum + (item.ditagihkan ? item.qty * item.harga : 0), 0) * 100,
+  ) / 100;
+  const ppnNominal = ppn ? Math.round(subTotal * PPN_RATE) : 0;
+  return { subTotal, ppnNominal, total: subTotal + ppnNominal };
+}
+
+// Field tambahan dari halaman "Tambah Langganan PPPoE".
+function readExtras(body) {
+  const extras = {
+    id_pelanggan: readText(body?.id_pelanggan),
+    phone: readText(body?.phone),
+    koordinat: readText(body?.koordinat),
+    tgl_invoice_perdana: readDate(body?.tgl_invoice_perdana),
+    jatuh_tempo: readDate(body?.jatuh_tempo),
+    harga_prorata: readMoney(body?.harga_prorata),
+    komisi_reseller: readMoney(body?.komisi_reseller),
+    ppn: readFlag(body?.ppn),
+    kirim_wa: readFlag(body?.kirim_wa),
+  };
+  const items = readItems(body?.items);
+
+  let error = '';
+  if (extras.id_pelanggan.length > 20 || extras.phone.length > 20) {
+    error = 'ID pelanggan atau phone terlalu panjang';
+  } else if (extras.koordinat && (extras.koordinat.length > 60 || !KOORDINAT_PATTERN.test(extras.koordinat))) {
+    error = 'Titik kordinat tidak valid, gunakan format "latitude, longitude"';
+  } else if (extras.harga_prorata == null || extras.komisi_reseller == null) {
+    error = 'Harga prorata atau komisi reseller tidak valid';
+  } else if (items == null) {
+    error = 'Item invoice tidak valid';
+  }
+  return { extras, items: items || [], error };
+}
+
 function customerIsValid(customer) {
   return Boolean(customer.pelanggan && customer.username && customer.status);
 }
@@ -133,6 +215,19 @@ function mapCustomer(row) {
     kode_unik: row.kode_unik || '',
     note: row.note || '',
     status: row.status || 'Aktif',
+    id_pelanggan: row.id_pelanggan || '',
+    phone: row.phone || '',
+    koordinat: row.koordinat || '',
+    tgl_invoice_perdana: formatDate(row.tgl_invoice_perdana),
+    jatuh_tempo: formatDate(row.jatuh_tempo),
+    harga_prorata: Number(row.harga_prorata) || 0,
+    komisi_reseller: Number(row.komisi_reseller) || 0,
+    ppn: Boolean(row.ppn),
+    kirim_wa: Boolean(row.kirim_wa),
+    sub_total: Number(row.sub_total) || 0,
+    ppn_nominal: Number(row.ppn_nominal) || 0,
+    total: Number(row.total) || 0,
+    jumlah_item: Number(row.jumlah_item) || 0,
   };
 }
 
@@ -140,7 +235,10 @@ const SELECT_CUSTOMERS = `SELECT c.id, c.nolayanan, c.pelanggan, c.ktg, c.media_
   p.nama_profile AS nama_profil, p.harga AS harga_profil,
   c.jns_tagihan, c.siklus, c.tgl_aktif, c.tgl_isolir, c.username, c.password,
   c.ip_address, c.mac_address, c.router, c.server, c.acs, c.addr_list, c.wilayah,
-  c.alamat_pasang, c.tgl_pasang, c.mitra, c.kode_unik, c.note, c.status
+  c.alamat_pasang, c.tgl_pasang, c.mitra, c.kode_unik, c.note, c.status,
+  c.id_pelanggan, c.phone, c.koordinat, c.tgl_invoice_perdana, c.jatuh_tempo,
+  c.harga_prorata, c.komisi_reseller, c.ppn, c.kirim_wa, c.sub_total, c.ppn_nominal, c.total,
+  (SELECT COUNT(*) FROM langganan_invoice_items i WHERE i.langganan_id = c.id) AS jumlah_item
  FROM langganan_pelanggan c
  LEFT JOIN langganan_profiles p ON p.id = c.profil_id`;
 
@@ -182,6 +280,36 @@ async function ensureTable() {
   await pool.query(
     'ALTER TABLE langganan_pelanggan ADD INDEX IF NOT EXISTS idx_langganan_username (username)',
   );
+  // Kolom tambahan untuk halaman "Tambah Langganan PPPoE".
+  await pool.query(
+    `ALTER TABLE langganan_pelanggan
+      ADD COLUMN IF NOT EXISTS id_pelanggan VARCHAR(20) NULL,
+      ADD COLUMN IF NOT EXISTS phone VARCHAR(20) NULL,
+      ADD COLUMN IF NOT EXISTS koordinat VARCHAR(60) NULL,
+      ADD COLUMN IF NOT EXISTS tgl_invoice_perdana DATE NULL,
+      ADD COLUMN IF NOT EXISTS jatuh_tempo DATE NULL,
+      ADD COLUMN IF NOT EXISTS harga_prorata DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS komisi_reseller DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS ppn TINYINT(1) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS kirim_wa TINYINT(1) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS sub_total DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS ppn_nominal DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS total DECIMAL(15,2) NOT NULL DEFAULT 0`,
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS langganan_invoice_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      langganan_id INT NOT NULL,
+      deskripsi VARCHAR(200) NOT NULL,
+      qty DECIMAL(10,2) NOT NULL DEFAULT 1,
+      ditagihkan TINYINT(1) NOT NULL DEFAULT 1,
+      harga DECIMAL(15,2) NOT NULL DEFAULT 0,
+      total DECIMAL(15,2) NOT NULL DEFAULT 0,
+      CONSTRAINT fk_invoice_items_langganan
+        FOREIGN KEY (langganan_id) REFERENCES langganan_pelanggan(id)
+        ON DELETE CASCADE
+    )`,
+  );
 }
 
 router.ensureTable = ensureTable;
@@ -194,6 +322,40 @@ router.get('/', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Gagal mengambil data langganan',
+      error: error.message,
+    });
+  }
+});
+
+router.get('/:id/items', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({
+      success: false,
+      message: 'Data langganan tidak valid',
+    });
+  }
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, deskripsi, qty, ditagihkan, harga, total
+       FROM langganan_invoice_items
+       WHERE langganan_id = ?
+       ORDER BY id ASC`,
+      [id],
+    );
+    return res.json(rows.map((row) => ({
+      id: row.id,
+      deskripsi: row.deskripsi,
+      qty: Number(row.qty) || 0,
+      ditagihkan: Boolean(row.ditagihkan),
+      harga: Number(row.harga) || 0,
+      total: Number(row.total) || 0,
+    })));
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil item invoice',
       error: error.message,
     });
   }
@@ -263,13 +425,31 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Kode unik dibuat otomatis oleh backend; acs & mitra belum diinput dari form.
+  const { extras, items, error: extrasError } = readExtras(req.body);
+  if (extrasError) {
+    return res.status(400).json({ success: false, message: extrasError });
+  }
+  const totals = calcTotals(items, extras.ppn);
+
+  // Kode unik boleh diisi manual (10-999); bila kosong dibuat otomatis oleh backend.
+  const requestedKode = customer.kode_unik;
+  if (requestedKode) {
+    const kodeNumber = Number(requestedKode);
+    if (!/^\d+$/.test(requestedKode) || kodeNumber < KODE_UNIK_MIN || kodeNumber > KODE_UNIK_MAX) {
+      return res.status(400).json({
+        success: false,
+        message: `Kode unik harus berupa angka ${KODE_UNIK_MIN}-${KODE_UNIK_MAX}`,
+      });
+    }
+  }
+  // ACS belum diinput dari form.
   customer.acs = '';
-  customer.mitra = '';
   customer.kode_unik = '';
+  customer.mitra = customer.mitra.slice(0, 100);
 
   let conn;
   let locked = false;
+  let inTransaction = false;
   try {
     conn = await pool.getConnection();
     // Serialisasi proses simpan agar pengecekan unik tidak bentrok antar request bersamaan.
@@ -295,7 +475,23 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const kodeUnik = await generateKodeUnik(conn);
+    let kodeUnik;
+    if (requestedKode) {
+      const [used] = await conn.execute(
+        `SELECT kode_unik FROM langganan_pelanggan
+         WHERE kode_unik = ? AND status IN ('Aktif', 'Isolir') LIMIT 1`,
+        [requestedKode],
+      );
+      if (used.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'Kode unik sudah dipakai langganan lain',
+        });
+      }
+      kodeUnik = String(Number(requestedKode));
+    } else {
+      kodeUnik = await generateKodeUnik(conn);
+    }
     if (!kodeUnik) {
       return res.status(409).json({
         success: false,
@@ -304,21 +500,68 @@ router.post('/', async (req, res) => {
     }
     customer.kode_unik = kodeUnik;
 
+    // Data langganan dan item invoice disimpan bersamaan, gagal salah satu = batal semua.
+    await conn.beginTransaction();
+    inTransaction = true;
+
+    const columns = [
+      'nolayanan', 'pelanggan', 'ktg', 'media_tipe', 'profil_id', 'jns_tagihan', 'siklus', 'tgl_aktif',
+      'tgl_isolir', 'username', 'password', 'ip_address', 'mac_address', 'router', 'server', 'acs',
+      'addr_list', 'wilayah', 'alamat_pasang', 'tgl_pasang', 'mitra', 'kode_unik', 'note', 'status',
+      'id_pelanggan', 'phone', 'koordinat', 'tgl_invoice_perdana', 'jatuh_tempo', 'harga_prorata',
+      'komisi_reseller', 'ppn', 'kirim_wa', 'sub_total', 'ppn_nominal', 'total',
+    ];
+    const values = [
+      ...sqlValues(customer),
+      extras.id_pelanggan || null,
+      extras.phone || null,
+      extras.koordinat || null,
+      extras.tgl_invoice_perdana,
+      extras.jatuh_tempo,
+      extras.harga_prorata,
+      extras.komisi_reseller,
+      extras.ppn ? 1 : 0,
+      extras.kirim_wa ? 1 : 0,
+      totals.subTotal,
+      totals.ppnNominal,
+      totals.total,
+    ];
     const [result] = await conn.execute(
-      `INSERT INTO langganan_pelanggan
-        (nolayanan, pelanggan, ktg, media_tipe, profil_id, jns_tagihan, siklus, tgl_aktif, tgl_isolir,
-         username, password, ip_address, mac_address, router, server, acs, addr_list, wilayah,
-         alamat_pasang, tgl_pasang, mitra, kode_unik, note, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      sqlValues(customer),
+      `INSERT INTO langganan_pelanggan (${columns.join(', ')})
+       VALUES (${columns.map(() => '?').join(', ')})`,
+      values,
     );
+
+    for (const item of items) {
+      await conn.execute(
+        `INSERT INTO langganan_invoice_items (langganan_id, deskripsi, qty, ditagihkan, harga, total)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          result.insertId,
+          item.deskripsi,
+          item.qty,
+          item.ditagihkan ? 1 : 0,
+          item.harga,
+          item.ditagihkan ? Math.round(item.qty * item.harga * 100) / 100 : 0,
+        ],
+      );
+    }
+    await conn.commit();
+    inTransaction = false;
+
     return res.json({
       success: true,
       message: 'Data langganan berhasil disimpan',
       id: result.insertId,
       kode_unik: kodeUnik,
+      sub_total: totals.subTotal,
+      ppn_nominal: totals.ppnNominal,
+      total: totals.total,
     });
   } catch (error) {
+    if (inTransaction) {
+      await conn.rollback().catch(() => {});
+    }
     if (error.code === 'ER_NO_REFERENCED_ROW_2') {
       return res.status(400).json({
         success: false,

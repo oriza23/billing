@@ -7,6 +7,23 @@
   --font-sans: system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
+@keyframes kategori-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-kategori-in {
+    animation: kategori-in 220ms ease-out;
+  }
+}
+
 html {
   color-scheme: light;
 }

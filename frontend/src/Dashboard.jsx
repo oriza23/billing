@@ -8,7 +8,8 @@ import ThemeToggle from './ThemeToggle.jsx'
 
 const langgananMenu = [
   { to: '/langganan/profil', label: 'Profil Langganan' },
-  { to: '/langganan/data', label: 'Data Langganan' },
+  // Form tambah dibuka dari tombol TAMBAH di Data Langganan, jadi menu ini tetap aktif di sana.
+  { to: '/langganan/data', label: 'Data Langganan', alsoActive: ['/langganan/tambah'] },
   { to: '/langganan/online', label: 'Langganan Online' },
 ]
 
@@ -50,6 +51,8 @@ export function DashboardHome() {
 }
 
 function MenuGroup({ label, items, open, onToggle }) {
+  const { pathname } = useLocation()
+
   return (
     <div>
       <button
@@ -67,7 +70,13 @@ function MenuGroup({ label, items, open, onToggle }) {
       {open && (
         <div className="mt-0.5 mb-2 grid gap-1 pl-3">
           {items.map((item) => (
-            <NavLink key={item.to} to={item.to} className={navLinkClass}>
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) => navLinkClass({
+                isActive: isActive || Boolean(item.alsoActive?.some((path) => pathname.startsWith(path))),
+              })}
+            >
               {item.label}
             </NavLink>
           ))}

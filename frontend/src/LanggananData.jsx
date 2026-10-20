@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import {
@@ -26,42 +27,6 @@ import './LanggananData.css'
 
 const API = '/api/langganan/data'
 const PROFIL_API = '/api/langganan/profil'
-
-function todayKey() {
-  const date = new Date()
-  const pad = (part) => String(part).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-}
-
-function emptyForm() {
-  const today = todayKey()
-  return {
-    nolayanan: Date.now().toString().slice(-8),
-    pelanggan: '',
-    ktg: 'PPP',
-    media_tipe: 'Fiber Optic',
-    profil_id: '',
-    jns_tagihan: 'PRABAYAR',
-    siklus: 'BULAN',
-    tgl_aktif: today,
-    tgl_isolir: '',
-    username: '',
-    password: '',
-    ip_address: '',
-    mac_address: '',
-    router: '',
-    server: '',
-    acs: '',
-    addr_list: '',
-    wilayah: '',
-    alamat_pasang: '',
-    tgl_pasang: today,
-    mitra: '',
-    kode_unik: '',
-    note: '',
-    status: 'Aktif',
-  }
-}
 
 function formFromRow(item) {
   return {
@@ -126,6 +91,17 @@ function tampil(value) {
   return text || '-'
 }
 
+function rupiahOrDash(value) {
+  return Number(value) > 0 ? formatRupiah(value) : '-'
+}
+
+function mapHref(koordinat) {
+  const text = String(koordinat || '').trim()
+  return /^-?\d{1,2}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?$/.test(text)
+    ? `https://www.google.com/maps?q=${encodeURIComponent(text.replace(/\s+/g, ''))}`
+    : ''
+}
+
 function ipHref(ip) {
   return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(String(ip || '')) ? `http://${ip}` : ''
 }
@@ -144,6 +120,7 @@ const infoButtons = [
 ]
 
 function LanggananData() {
+  const navigate = useNavigate()
   const [rows, setRows] = useState([])
   const [profiles, setProfiles] = useState([])
   const [loading, setLoading] = useState(true)
@@ -155,9 +132,14 @@ function LanggananData() {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
-  const [form, setForm] = useState(emptyForm)
+  const [form, setForm] = useState(() => formFromRow({}))
   const [saving, setSaving] = useState(false)
   const [isPelangganOpen, setIsPelangganOpen] = useState(false)
+  const [itemsRow, setItemsRow] = useState(null)
+  const [itemsData, setItemsData] = useState([])
+  const [itemsLoading, setItemsLoading] = useState(false)
+  const [itemsError, setItemsError] = useState('')
+  const itemsRequest = useRef(0)
 
   async function loadData() {
     const [customerResponse, profileResponse] = await Promise.all([
@@ -225,6 +207,8 @@ function LanggananData() {
     item.alamat_pasang,
     item.mitra,
     item.kode_unik,
+    item.id_pelanggan,
+    item.phone,
   ].some((value) => String(value || '').toLowerCase().includes(keyword)))
 
   const totalData = filteredRows.length
@@ -267,11 +251,10 @@ function LanggananData() {
     setSelectedIds((current) => [...new Set([...current, ...visibleIds])])
   }
 
+  // Pendaftaran langganan baru memakai halaman form lengkap, bukan modal.
   function openCreate() {
-    setEditingId(null)
-    setForm(emptyForm())
-    setIsModalOpen(true)
     setIsMenuOpen(false)
+    navigate('/langganan/tambah')
   }
 
   function openEdit(item) {
@@ -283,7 +266,35 @@ function LanggananData() {
 
   function resetForm() {
     setEditingId(null)
-    setForm(emptyForm())
+    setForm(formFromRow({}))
+  }
+
+  async function openItems(row) {
+    itemsRequest.current += 1
+    const requestId = itemsRequest.current
+    setItemsRow(row)
+    setItemsData([])
+    setItemsError('')
+    setItemsLoading(true)
+    try {
+      const response = await api.get(`${API}/${encodeURIComponent(row.id)}/items`)
+      if (itemsRequest.current === requestId) {
+        setItemsData(Array.isArray(response.data) ? response.data : [])
+      }
+    } catch {
+      if (itemsRequest.current === requestId) {
+        setItemsError('Gagal memuat item invoice.')
+      }
+    } finally {
+      if (itemsRequest.current === requestId) {
+        setItemsLoading(false)
+      }
+    }
+  }
+
+  function closeItems() {
+    itemsRequest.current += 1
+    setItemsRow(null)
   }
 
   function closeModal() {
@@ -306,6 +317,9 @@ function LanggananData() {
 
   async function handleSave(event) {
     event.preventDefault()
+    if (!editingId) {
+      return
+    }
     if (!form.pelanggan.trim() || !form.username.trim()) {
       Swal.fire('Data belum lengkap', 'Nama pelanggan dan username wajib diisi.', 'warning')
       return
@@ -318,11 +332,7 @@ function LanggananData() {
     })
     try {
       const payload = payloadFromForm()
-      if (editingId) {
-        await api.put(`${API}/${encodeURIComponent(editingId)}`, payload)
-      } else {
-        await api.post(API, payload)
-      }
+      await api.put(`${API}/${encodeURIComponent(editingId)}`, payload)
       await loadData()
       setIsModalOpen(false)
       resetForm()
@@ -330,12 +340,12 @@ function LanggananData() {
       Swal.fire({
         icon: 'success',
         title: 'Berhasil',
-        text: editingId ? 'Data langganan berhasil diperbarui.' : 'Data langganan berhasil disimpan.',
+        text: 'Data langganan berhasil diperbarui.',
         timer: 1500,
         showConfirmButton: false,
       })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal disimpan.', 'error')
+      Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal diperbarui.', 'error')
     } finally {
       setSaving(false)
     }
@@ -544,13 +554,24 @@ function LanggananData() {
                   <th>TGL PASANG</th>
                   <th>MITRA</th>
                   <th>KODE UNIK</th>
+                  <th>ID PELANGGAN</th>
+                  <th>PHONE</th>
+                  <th>KORDINAT</th>
+                  <th>INV PERDANA</th>
+                  <th>JATUH TEMPO</th>
+                  <th>PRORATA</th>
+                  <th>KOMISI</th>
+                  <th>PPN</th>
+                  <th>TOTAL</th>
+                  <th>WA</th>
+                  <th>INVOICE</th>
                   <th>NOTE</th>
                 </tr>
               </thead>
               <tbody>
                 {currentItems.length === 0 ? (
                   <tr>
-                    <td colSpan="25" className="stok-empty">
+                    <td colSpan="36" className="stok-empty">
                       {searchTerm ? 'Pelanggan tidak ditemukan.' : 'Belum ada data langganan.'}
                     </td>
                   </tr>
@@ -609,6 +630,34 @@ function LanggananData() {
                     <td>{formatTanggal(item.tgl_pasang)}</td>
                     <td>{tampil(item.mitra)}</td>
                     <td>{tampil(item.kode_unik)}</td>
+                    <td>{tampil(item.id_pelanggan)}</td>
+                    <td>{tampil(item.phone)}</td>
+                    <td>
+                      {mapHref(item.koordinat) ? (
+                        <a className="data-ip" href={mapHref(item.koordinat)} target="_blank" rel="noreferrer">
+                          {item.koordinat}
+                          <ExternalLink size={14} />
+                        </a>
+                      ) : tampil(item.koordinat)}
+                    </td>
+                    <td>{formatTanggal(item.tgl_invoice_perdana)}</td>
+                    <td>{formatTanggal(item.jatuh_tempo)}</td>
+                    <td>{rupiahOrDash(item.harga_prorata)}</td>
+                    <td>{rupiahOrDash(item.komisi_reseller)}</td>
+                    <td>{item.ppn ? 'Ya' : 'Tidak'}</td>
+                    <td>{rupiahOrDash(item.total)}</td>
+                    <td>{item.kirim_wa ? 'Ya' : 'Tidak'}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="data-note"
+                        aria-label={`Lihat item invoice ${item.pelanggan}`}
+                        title={`${item.jumlah_item} item invoice`}
+                        onClick={() => openItems(item)}
+                      >
+                        <Receipt size={15} />
+                      </button>
+                    </td>
                     <td>
                       <button type="button" className="data-note" aria-label={`Edit ${item.pelanggan}`} onClick={() => openEdit(item)}>
                         <Pencil size={15} />
@@ -648,7 +697,7 @@ function LanggananData() {
             <header className="data-modal-head">
               <div>
                 <p>Langganan</p>
-                <h2>{editingId ? 'Edit Data Langganan' : 'Tambah Data Langganan'}</h2>
+                <h2>Edit Data Langganan</h2>
               </div>
               <button type="button" className="data-close" onClick={closeModal} aria-label="Tutup">
                 <X size={18} />
@@ -714,6 +763,87 @@ function LanggananData() {
               <button type="submit" className="data-btn data-btn-blue" disabled={saving}>Simpan</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {itemsRow && (
+        <div className="data-backdrop" onMouseDown={closeItems}>
+          <div
+            className="data-modal"
+            style={{ width: 'min(760px, 100%)' }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Item invoice"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="data-modal-head">
+              <div>
+                <p>Item Invoice</p>
+                <h2>{itemsRow.pelanggan}</h2>
+              </div>
+              <button type="button" className="data-close" onClick={closeItems} aria-label="Tutup">
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="px-5 pt-2 pb-4">
+              {itemsLoading && <p className="m-0 py-6 text-center text-sm text-gray-500 dark:text-gray-400">Memuat item invoice...</p>}
+              {itemsError && <p className="m-0 py-6 text-center text-sm text-rose-600 dark:text-rose-400">{itemsError}</p>}
+              {!itemsLoading && !itemsError && (
+                <>
+                  <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+                    <table className="w-full min-w-120 border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-teal-600 text-xs tracking-wider text-white uppercase dark:bg-teal-700">
+                          <th className="px-3 py-2.5 text-left font-bold">Deskripsi</th>
+                          <th className="px-3 py-2.5 text-right font-bold">Qty</th>
+                          <th className="px-3 py-2.5 text-left font-bold">Ditagihkan</th>
+                          <th className="px-3 py-2.5 text-right font-bold">Harga</th>
+                          <th className="px-3 py-2.5 text-right font-bold">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {itemsData.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-3 py-8 text-center text-gray-500 dark:text-gray-400">
+                              Belum ada item invoice untuk langganan ini.
+                            </td>
+                          </tr>
+                        ) : itemsData.map((entry) => (
+                          <tr key={entry.id} className="border-t border-gray-100 text-gray-800 dark:border-gray-700 dark:text-gray-100">
+                            <td className="px-3 py-2.5">{entry.deskripsi}</td>
+                            <td className="px-3 py-2.5 text-right">{entry.qty.toLocaleString('id-ID')}</td>
+                            <td className="px-3 py-2.5">{entry.ditagihkan ? 'Ya' : 'Tidak'}</td>
+                            <td className="px-3 py-2.5 text-right whitespace-nowrap">{formatRupiah(entry.harga)}</td>
+                            <td className="px-3 py-2.5 text-right font-semibold whitespace-nowrap">{formatRupiah(entry.total)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <dl className="mt-4 ml-auto grid w-full max-w-xs gap-1.5 text-sm text-gray-800 dark:text-gray-100">
+                    <div className="flex justify-between gap-4">
+                      <dt className="font-semibold text-gray-600 uppercase dark:text-gray-400">Sub total</dt>
+                      <dd className="m-0 font-semibold">{formatRupiah(itemsRow.sub_total)}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="font-semibold text-gray-600 uppercase dark:text-gray-400">PPN 11%</dt>
+                      <dd className="m-0 font-semibold">{formatRupiah(itemsRow.ppn_nominal)}</dd>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between gap-4 border-t border-gray-200 pt-2 dark:border-gray-700">
+                      <dt className="font-bold text-gray-800 uppercase dark:text-gray-200">Total</dt>
+                      <dd className="m-0 text-xl font-bold text-blue-700 dark:text-blue-400">{formatRupiah(itemsRow.total)}</dd>
+                    </div>
+                  </dl>
+                </>
+              )}
+            </div>
+
+            <div className="data-modal-actions">
+              <button type="button" className="data-btn data-btn-gray" onClick={closeItems}>Tutup</button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -4,6 +4,7 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const acs = require('../acs');
+const { LIVE_PROJECTION, summarizeDevice } = require('../acs_summary');
 
 const router = express.Router();
 const requireAdmin = requireRole('admin');
@@ -127,47 +128,8 @@ router.delete('/server/:id', requireAdmin, async (req, res) => {
 });
 
 // ---- Daftar ONU langsung dari GenieACS (jembatan NBI) ----------------------
-// Meneruskan JSON dari http://{ip_domain}:{port}/devices ke frontend.
-// Projection membatasi field agar balasan tidak membawa seluruh parameter TR-069
-// setiap ONU (bisa puluhan MB); parameter yang lebih dalam menyusul nanti.
-// Path IP dipilih spesifik (bukan seluruh subtree WANDevice) supaya balasan tetap kecil.
-// Projection NBI tidak mendukung wildcard, jadi instance 1-4 ditulis eksplisit.
-const INSTANCES = [1, 2, 3, 4];
-const LIVE_PROJECTION = [
-  '_id', '_lastInform', '_registered', '_tags', '_deviceId', '_ip', '_connectionRequestURL',
-  'InternetGatewayDevice.ManagementServer.ConnectionRequestURL',
-  'Device.ManagementServer.ConnectionRequestURL',
-  ...INSTANCES.flatMap((wan) => INSTANCES.map(
-    (ppp) => `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.${wan}.WANPPPConnection.${ppp}.ExternalIPAddress`,
-  )),
-  ...INSTANCES.map((iface) => `Device.IP.Interface.${iface}.IPv4Address.1.IPAddress`),
-  // Username PPPoE
-  ...INSTANCES.flatMap((wan) => INSTANCES.map(
-    (ppp) => `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.${wan}.WANPPPConnection.${ppp}.Username`,
-  )),
-  ...INSTANCES.map((ppp) => `Device.PPP.Interface.${ppp}.Username`),
-  // SSID, jumlah host, RX/suhu optik, suhu, uptime
-  'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID',
-  'Device.WiFi.SSID.1.SSID',
-  'InternetGatewayDevice.LANDevice.1.Hosts.HostNumberOfEntries',
-  'Device.Hosts.HostNumberOfEntries',
-  'InternetGatewayDevice.WANDevice.1.WANPONInterfaceConfig.RXPower',
-  'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.RXPower',
-  'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.TransceiverTemperature',
-  'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.RXPower',
-  'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.TransceiverTemperature',
-  'Device.Optical.Interface.1.OpticalSignalLevel',
-  'Device.Optical.Interface.1.TransceiverTemperature',
-  'InternetGatewayDevice.DeviceInfo.TemperatureStatus.TemperatureSensor.1.Value',
-  'InternetGatewayDevice.DeviceInfo.UpTime',
-  'Device.DeviceInfo.UpTime',
-  // Deteksi PON (GPON/EPON)
-  'InternetGatewayDevice.DeviceInfo.ModelName',
-  'InternetGatewayDevice.DeviceInfo.Description',
-  'InternetGatewayDevice.WANDevice.1.WANCommonInterfaceConfig.WANAccessType',
-  'Device.DeviceInfo.ModelName',
-  'Device.DeviceInfo.Description',
-].join(',');
+// Mengambil http://{ip_domain}:{port}/devices, lalu merangkum tiap perangkat menjadi objek
+// bersih (ekstraksi path TR-069 + konversi satuan ada di backend/acs_summary.js).
 const LIVE_TIMEOUT_MS = 5000;
 
 router.get('/devices', async (req, res) => {
@@ -191,7 +153,13 @@ router.get('/devices', async (req, res) => {
       params: { projection: LIVE_PROJECTION },
       timeout: LIVE_TIMEOUT_MS,
     });
-    return res.json(response.data);
+    if (!Array.isArray(response.data)) {
+      throw new Error('Format balasan NBI tidak dikenali');
+    }
+    const cleanedData = response.data
+      .filter((item) => item && item._id)
+      .map(summarizeDevice);
+    return res.json(cleanedData);
   } catch (error) {
     console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
     return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });

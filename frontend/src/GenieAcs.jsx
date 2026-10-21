@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Flag, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import {
@@ -14,7 +14,6 @@ import {
 } from './api/acs.js'
 import ServerPagination from './ServerPagination.jsx'
 
-const SERVER_STORAGE_KEY = 'acs_server_id'
 const LIMIT_OPTIONS = [10, 50, 100]
 const FILTER_OPTIONS = [
   { value: 'all', label: 'Semua ONU' },
@@ -109,11 +108,6 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'medium' })
 }
 
-function readStoredServerId() {
-  const stored = Number(localStorage.getItem(SERVER_STORAGE_KEY))
-  return Number.isInteger(stored) && stored > 0 ? stored : null
-}
-
 function ServerModal({ servers, onClose, onChanged }) {
   const [form, setForm] = useState(EMPTY_SERVER_FORM)
   const [saving, setSaving] = useState(false)
@@ -137,13 +131,13 @@ function ServerModal({ servers, onClose, onChanged }) {
     event.preventDefault()
     setSaving(true)
     try {
-      const result = await createAcsServer({
+      await createAcsServer({
         nama_server: form.nama_server.trim(),
         ip_domain: form.ip_domain.trim(),
         port: form.port === '' ? undefined : Number(form.port),
       })
       setForm(EMPTY_SERVER_FORM)
-      await onChanged(result.id)
+      await onChanged()
       Swal.fire({ icon: 'success', title: 'Berhasil!', text: 'Server ACS disimpan', timer: 1500, showConfirmButton: false })
     } catch (error) {
       Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(error, 'Gagal menyimpan server ACS.') })
@@ -167,7 +161,7 @@ function ServerModal({ servers, onClose, onChanged }) {
     setDeletingId(server.id)
     try {
       await deleteAcsServer(server.id)
-      await onChanged(null, server.id)
+      await onChanged(server.id)
     } catch (error) {
       Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(error, 'Gagal menghapus server ACS.') })
     } finally {
@@ -283,79 +277,6 @@ function ServerModal({ servers, onClose, onChanged }) {
   )
 }
 
-const IPV4_PATTERN = /(\d{1,3}(?:\.\d{1,3}){3})/
-const IPV4_EXACT = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/
-
-// Nilai dipakai sebagai href, jadi hanya IPv4 valid yang lolos (bukan 0.0.0.0 / loopback).
-function cleanIp(value) {
-  const ip = typeof value === 'string' ? value.trim() : ''
-  return IPV4_EXACT.test(ip) && ip !== '0.0.0.0' && !ip.startsWith('127.') ? ip : null
-}
-
-// Anak (instance) sebuah node parameter: "1", "2", ... (kunci berawalan "_" adalah metadata).
-function instancesOf(node) {
-  return node && typeof node === 'object'
-    ? Object.keys(node).filter((key) => !key.startsWith('_')).map((key) => node[key])
-    : []
-}
-
-// IP TR069: _ip di root, atau IP dalam _connectionRequestURL / ManagementServer.ConnectionRequestURL.
-function extractIpTr069(doc) {
-  const rawUrl = doc._connectionRequestURL
-    ?? doc.InternetGatewayDevice?.ManagementServer?.ConnectionRequestURL?._value
-    ?? doc.Device?.ManagementServer?.ConnectionRequestURL?._value
-  const fromUrl = typeof rawUrl === 'string' ? rawUrl.match(IPV4_PATTERN)?.[1] : null
-  return cleanIp(typeof doc._ip === 'string' ? doc._ip : doc._ip?._value) ?? cleanIp(fromUrl) ?? '-'
-}
-
-// IP PPPoE: WANPPPConnection.*.ExternalIPAddress (TR-098), lalu Device.IP.Interface.*.IPv4Address.*.IPAddress (TR-181).
-function extractIpPppoe(doc) {
-  const wan = doc.InternetGatewayDevice?.WANDevice?.[1]?.WANConnectionDevice
-  const tr098 = instancesOf(wan).flatMap((connection) => instancesOf(connection?.WANPPPConnection))
-    .map((ppp) => cleanIp(ppp?.ExternalIPAddress?._value))
-  const tr181 = instancesOf(doc.Device?.IP?.Interface)
-    .flatMap((iface) => instancesOf(iface?.IPv4Address))
-    .map((address) => cleanIp(address?.IPAddress?._value))
-  return [...tr098, ...tr181].find(Boolean) ?? '-'
-}
-
-// Username PPPoE: WANPPPConnection.*.Username (TR-098), lalu Device.PPP.Interface.*.Username (TR-181).
-// Instance pertama yang terisi dipakai; kosong/tidak ada -> '-'.
-function extractUsername(doc) {
-  const tr098 = instancesOf(doc.InternetGatewayDevice?.WANDevice?.[1]?.WANConnectionDevice)
-    .flatMap((connection) => instancesOf(connection?.WANPPPConnection))
-    .map((ppp) => ppp?.Username?._value)
-  const tr181 = instancesOf(doc.Device?.PPP?.Interface).map((ppp) => ppp?.Username?._value)
-  const found = [...tr098, ...tr181]
-    .map((value) => (typeof value === 'string' ? value.trim() : ''))
-    .find(Boolean)
-  return found ?? '-'
-}
-
-// Klasifikasi PON dari teks model ONU. EPON dicek lebih dulu, lalu GPON; selain itu '-'.
-// ProductClass sering hanya berisi kode model (mis. "HG8245H"), jadi parameter lain
-// yang relevan dipakai sebagai cadangan: ModelName, Description, dan WANAccessType.
-function detectPon(doc) {
-  const sources = [
-    doc._deviceId?._ProductClass,
-    doc.InternetGatewayDevice?.DeviceInfo?.ModelName?._value,
-    doc.Device?.DeviceInfo?.ModelName?._value,
-    doc.InternetGatewayDevice?.DeviceInfo?.Description?._value,
-    doc.Device?.DeviceInfo?.Description?._value,
-    doc.InternetGatewayDevice?.WANDevice?.[1]?.WANCommonInterfaceConfig?.WANAccessType?._value,
-  ]
-  for (const source of sources) {
-    const text = typeof source === 'string' ? source.toUpperCase() : ''
-    if (text.includes('EPON')) {
-      return 'EPON'
-    }
-    if (text.includes('GPON')) {
-      return 'GPON'
-    }
-  }
-  return '-'
-}
-
 // Detik -> "2d 5h 30m". Hari/jam dihilangkan bila 0; tidak valid -> '-'.
 function formatUptime(seconds) {
   const total = Number(seconds)
@@ -368,67 +289,9 @@ function formatUptime(seconds) {
   return [days > 0 && `${days}d`, (days > 0 || hours > 0) && `${hours}h`, `${minutes}m`].filter(Boolean).join(' ')
 }
 
-// Nilai parameter pertama yang ada (bukan undefined/null/kosong).
-function firstValue(...values) {
-  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '')
-}
-
-function extractSsid(doc) {
-  const value = firstValue(
-    doc.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration?.[1]?.SSID?._value,
-    doc.Device?.WiFi?.SSID?.[1]?.SSID?._value,
-  )
-  return value === undefined ? '-' : String(value).trim()
-}
-
-// Jumlah host di LAN (HostNumberOfEntries). Catatan: standar TR-069 menghitung semua host
-// yang pernah tercatat, bukan hanya yang sedang aktif. Nilai 0 tetap ditampilkan.
-function extractClients(doc) {
-  const value = firstValue(
-    doc.InternetGatewayDevice?.LANDevice?.[1]?.Hosts?.HostNumberOfEntries?._value,
-    doc.Device?.Hosts?.HostNumberOfEntries?._value,
-  )
-  return value === undefined ? '-' : String(value).trim()
-}
-
-// RX ONU dalam dBm. TR-181 OpticalSignalLevel berunit 0.001 dBm (dibagi 1000);
-// path TR-098 (standar maupun Huawei/ZTE) dipakai apa adanya.
-function extractRx(doc) {
-  const wan = doc.InternetGatewayDevice?.WANDevice?.[1]
-  const direct = firstValue(
-    wan?.WANPONInterfaceConfig?.RXPower?._value,
-    wan?.X_GponInterafceConfig?.RXPower?._value,
-    wan?.['X_ZTE-COM_WANPONInterfaceConfig']?.RXPower?._value,
-  )
-  const optical = firstValue(doc.Device?.Optical?.Interface?.[1]?.OpticalSignalLevel?._value)
-  let power = NaN
-  if (direct !== undefined) {
-    power = Number(direct)
-  } else if (optical !== undefined) {
-    power = Number(optical) / 1000
-  }
-  return Number.isFinite(power) ? `${Number(power.toFixed(2))} dBm` : '-'
-}
-
-// Suhu: sensor standar TR-098, lalu parameter transceiver umum (Huawei, ZTE, TR-181 Optical).
-function extractTemp(doc) {
-  const wan = doc.InternetGatewayDevice?.WANDevice?.[1]
-  const value = firstValue(
-    doc.InternetGatewayDevice?.DeviceInfo?.TemperatureStatus?.TemperatureSensor?.[1]?.Value?._value,
-    wan?.X_GponInterafceConfig?.TransceiverTemperature?._value,
-    wan?.['X_ZTE-COM_WANPONInterfaceConfig']?.TransceiverTemperature?._value,
-    doc.Device?.Optical?.Interface?.[1]?.TransceiverTemperature?._value,
-  )
-  const temperature = Number(value)
-  return value !== undefined && Number.isFinite(temperature) ? `${temperature} °C` : '-'
-}
-
-function extractUptime(doc) {
-  return firstValue(
-    doc.InternetGatewayDevice?.DeviceInfo?.UpTime?._value,
-    doc.Device?.DeviceInfo?.UpTime?._value,
-  )
-}
+// Rentang redaman fiber yang wajar (dBm). Di luar ini tetap ditampilkan apa adanya, dengan penanda.
+const RX_NORMAL_MIN = -40
+const RX_NORMAL_MAX = -10
 
 function IpLink({ ip }) {
   if (!ip || ip === '-') {
@@ -446,10 +309,10 @@ function IpLink({ ip }) {
   )
 }
 
-// Baris tabel dari satu dokumen perangkat GenieACS (NBI). Kolom yang butuh parameter
-// TR-069 lebih dalam (RX ONU, dst) belum diisi dan tampil sebagai '-'.
-function toRow(doc, now) {
-  const lastInform = doc._lastInform ? new Date(doc._lastInform).getTime() : null
+// Data ONU dari backend sudah bersih dan terstandarisasi (sn, ip_pppoe, rx_onu, ...).
+// Di sini hanya ditambah status online (dari last_inform) dan kunci urut.
+function toRow(item, now) {
+  const lastInform = item.last_inform ? new Date(item.last_inform).getTime() : null
   let status = 'off24plus'
   if (lastInform !== null && !Number.isNaN(lastInform)) {
     const age = now - lastInform
@@ -459,38 +322,18 @@ function toRow(doc, now) {
       status = 'off24'
     }
   }
-  return {
-    id: String(doc._id),
-    ssid: extractSsid(doc),
-    clients: extractClients(doc),
-    rx: extractRx(doc),
-    temp: extractTemp(doc),
-    uptime: formatUptime(extractUptime(doc)),
-    username: extractUsername(doc),
-    pon: detectPon(doc),
-    ipPppoe: extractIpPppoe(doc),
-    ipTr069: extractIpTr069(doc),
-    sn: doc._deviceId?._SerialNumber,
-    manufacturer: doc._deviceId?._Manufacturer,
-    tipe: doc._deviceId?._ProductClass,
-    lastInform: doc._lastInform,
-    registered: doc._registered,
-    tags: Array.isArray(doc._tags) ? doc._tags : [],
-    status,
-    sortKey: lastInform ?? 0,
-  }
+  return { ...item, tags: Array.isArray(item.tags) ? item.tags : [], status, sortKey: lastInform ?? 0 }
 }
 
-function matchesSearch(row, term) {
-  return [row.username, row.pon, row.ssid, row.sn, row.manufacturer, row.tipe, row.id, row.ipPppoe, row.ipTr069, row.tags.join(' ')]
+function matchesSearch(item, term) {
+  return [item.username, item.pon, item.ssid, item.sn, item.manufaktur, item.tipe, item.id, item.ip_pppoe, item.ip_tr069, item.tags.join(' ')]
     .some((value) => String(value ?? '').toLowerCase().includes(term))
 }
 
 function GenieAcs() {
   const [servers, setServers] = useState([])
-  const [serverId, setServerId] = useState(null)
-  // Pilihan server terakhir dibaca sekali saat mount, sebelum daftar server dimuat.
-  const storedServerId = useRef(readStoredServerId())
+  // Server wajib dipilih manual: kosong ('') = belum dipilih, data tidak dimuat.
+  const [selectedServer, setSelectedServer] = useState('')
   const [serverModalOpen, setServerModalOpen] = useState(false)
   const [dataOnu, setDataOnu] = useState([])
   const [fetchedAt, setFetchedAt] = useState(0)
@@ -504,17 +347,54 @@ function GenieAcs() {
   const [busy, setBusy] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
 
-  const hasServer = serverId !== null
+  const hasServer = selectedServer !== ''
+
+  // RX ONU (dBm, sudah dikonversi backend): angka + dot warna + teks status. Kosong -> '-'.
+  function renderRx(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+      return '-'
+    }
+    const rx = Number(value)
+    let label = 'Buruk'
+    let warnaDot = 'bg-red-500'
+    if (rx >= -20) {
+      label = 'Bagus'
+      warnaDot = 'bg-green-500'
+    } else if (rx >= -25) {
+      label = 'Sedang'
+      warnaDot = 'bg-yellow-500'
+    }
+    // Di luar rentang wajar tetap ditampilkan apa adanya, hanya diberi tanda *.
+    const abnormal = rx > RX_NORMAL_MAX || rx < RX_NORMAL_MIN
+    return (
+      <div
+        className="flex items-center gap-1.5 whitespace-nowrap"
+        title={abnormal ? `Di luar rentang wajar fiber (${RX_NORMAL_MIN} s/d ${RX_NORMAL_MAX} dBm)` : undefined}
+      >
+        <span>{rx.toFixed(2)}{abnormal && '*'}</span>
+        <span className={`w-2.5 h-2.5 rounded-full ${warnaDot}`} />
+        <span>{label}</span>
+      </div>
+    )
+  }
+
+  // TEMP (°C, sudah dikonversi backend). Kosong -> '-'.
+  function renderTemp(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+      return '-'
+    }
+    return `${Number(value).toFixed(1)} °C`
+  }
 
   const rows = useMemo(() => {
-    if (serverId === null) {
+    if (!selectedServer) {
       return []
     }
     return dataOnu
-      .filter((doc) => doc && doc._id)
-      .map((doc) => toRow(doc, fetchedAt))
+      .filter((item) => item && item.id)
+      .map((item) => toRow(item, fetchedAt))
       .sort((first, second) => second.sortKey - first.sortKey)
-  }, [dataOnu, fetchedAt, serverId])
+  }, [dataOnu, fetchedAt, selectedServer])
 
   // Statistik untuk seluruh ONU di server terpilih (tidak ikut filter/pencarian).
   const stats = useMemo(() => {
@@ -535,19 +415,17 @@ function GenieAcs() {
   const pageRows = filteredRows.slice((currentPage - 1) * limit, currentPage * limit)
   const allSelected = pageRows.length > 0 && pageRows.every((row) => selected.has(row.id))
 
-  const loadServers = useCallback(async (preferId = null, removedId = null) => {
+  // Memuat daftar server untuk dropdown. Pilihan saat ini dipertahankan bila masih ada;
+  // tidak pernah memilih server otomatis.
+  const loadServers = useCallback(async (removedId = null) => {
     const list = await getAcsServers()
     const items = Array.isArray(list) ? list : []
     setServers(items)
-    setServerId((current) => {
-      let next = preferId ?? current ?? storedServerId.current
-      if (removedId !== null && next === removedId) {
-        next = null
+    setSelectedServer((current) => {
+      if (removedId !== null && current === String(removedId)) {
+        return ''
       }
-      if (!items.some((server) => server.id === next)) {
-        next = items[0]?.id ?? null
-      }
-      return next
+      return items.some((server) => String(server.id) === current) ? current : ''
     })
   }, [])
 
@@ -557,17 +435,10 @@ function GenieAcs() {
     })
   }, [loadServers])
 
+  // Tarik data ONU dari GenieACS setiap server berubah (atau reload dipicu).
   useEffect(() => {
-    if (serverId === null) {
-      localStorage.removeItem(SERVER_STORAGE_KEY)
-    } else {
-      localStorage.setItem(SERVER_STORAGE_KEY, String(serverId))
-    }
-  }, [serverId])
-
-  // Tarik data ONU dari GenieACS setiap server berubah (atau reload dipicu). Tidak jalan bila belum ada server.
-  useEffect(() => {
-    if (serverId === null) {
+    // Guard: jangan fetch bila server belum dipilih.
+    if (!selectedServer) {
       return undefined
     }
     const controller = new AbortController()
@@ -576,7 +447,7 @@ function GenieAcs() {
       setIsLoading(true)
       setError('')
       try {
-        const data = await getAcsDevices(serverId, { signal: controller.signal })
+        const data = await getAcsDevices(selectedServer, { signal: controller.signal })
         if (controller.signal.aborted) {
           return
         }
@@ -597,7 +468,7 @@ function GenieAcs() {
 
     load()
     return () => controller.abort()
-  }, [serverId, reloadKey])
+  }, [selectedServer, reloadKey])
 
   const reload = () => setReloadKey((key) => key + 1)
 
@@ -608,7 +479,7 @@ function GenieAcs() {
 
   function handleServerChange(event) {
     const value = event.target.value
-    setServerId(value ? Number(value) : null)
+    setSelectedServer(value)
     setDataOnu([])
     setError('')
     resetView()
@@ -648,7 +519,7 @@ function GenieAcs() {
     }
     setBusy('sync')
     try {
-      const result = await syncAcs(serverId)
+      const result = await syncAcs(selectedServer)
       await Swal.fire({ icon: 'success', title: 'Sinkron selesai', text: result.message, timer: 2500, showConfirmButton: false })
       resetView()
       reload()
@@ -684,7 +555,7 @@ function GenieAcs() {
 
     setBusy(action.key)
     try {
-      const result = await action.run(serverId, ids)
+      const result = await action.run(selectedServer, ids)
       let icon = 'warning'
       if (result.success) {
         icon = 'success'
@@ -705,8 +576,13 @@ function GenieAcs() {
     }
   }
 
-  async function handleServersChanged(preferId, removedId) {
-    await loadServers(preferId, removedId)
+  async function handleServersChanged(removedId = null) {
+    await loadServers(removedId)
+    if (removedId !== null && String(removedId) === selectedServer) {
+      // Server yang sedang dipilih dihapus: bersihkan data dan error miliknya.
+      setDataOnu([])
+      setError('')
+    }
     resetView()
   }
 
@@ -769,12 +645,12 @@ function GenieAcs() {
           <select
             className={inputBase}
             aria-label="Pilih server"
-            value={serverId ?? ''}
+            value={selectedServer}
             onChange={handleServerChange}
           >
-            <option value="">PILIH SERVER</option>
+            <option value="" disabled hidden>--- Pilih Server ACS ---</option>
             {servers.map((server) => (
-              <option key={server.id} value={server.id}>{server.nama_server} ({server.ip_domain}:{server.port})</option>
+              <option key={server.id} value={String(server.id)}>{server.nama_server}</option>
             ))}
           </select>
           <select
@@ -841,29 +717,29 @@ function GenieAcs() {
               {isLoading || pageRows.length === 0 ? (
                 <tr>
                   <td colSpan={COLUMNS.length + 1} className="px-4 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
-                    {isLoading && 'Loading data dari server...'}
-                    {!isLoading && error && <span className="font-semibold text-red-600 dark:text-red-400">{error}</span>}
-                    {!isLoading && !error && !hasServer && 'Pilih atau tambahkan server ACS terlebih dahulu (tombol SERVER).'}
+                    {hasServer && isLoading && 'Loading data dari server...'}
+                    {!(hasServer && isLoading) && error && <span className="font-semibold text-red-600 dark:text-red-400">{error}</span>}
+                    {!error && !hasServer && 'Silakan pilih Server ACS terlebih dahulu untuk menampilkan data perangkat.'}
                     {!isLoading && !error && hasServer && rows.length === 0 && 'Server GenieACS ini belum memiliki perangkat.'}
                     {!isLoading && !error && hasServer && rows.length > 0 && 'Tidak ada ONU yang cocok dengan filter/pencarian.'}
                   </td>
                 </tr>
               ) : (
-                pageRows.map((row) => {
-                  const flag = FLAG_STYLE[row.status] || FLAG_STYLE.off24plus
-                  const isSelected = selected.has(row.id)
+                pageRows.map((item) => {
+                  const flag = FLAG_STYLE[item.status] || FLAG_STYLE.off24plus
+                  const isSelected = selected.has(item.id)
                   return (
                     <tr
-                      key={row.id}
+                      key={item.id}
                       className={`border-b border-gray-100 last:border-b-0 dark:border-gray-700 ${isSelected ? 'bg-blue-50 dark:bg-blue-950/40' : 'hover:bg-gray-50 dark:hover:bg-gray-700/40'}`}
                     >
                       <td className={tdClass}>
                         <input
                           type="checkbox"
                           className="h-4 w-4 cursor-pointer accent-blue-600"
-                          aria-label={`Pilih ${row.sn || row.id}`}
+                          aria-label={`Pilih ${item.sn || item.id}`}
                           checked={isSelected}
-                          onChange={() => toggleOne(row.id)}
+                          onChange={() => toggleOne(item.id)}
                         />
                       </td>
                       <td className={tdClass}>
@@ -871,27 +747,27 @@ function GenieAcs() {
                           <Flag size={16} className={flag.className} fill="currentColor" aria-label={flag.title} />
                         </span>
                       </td>
-                      <td className={`${tdClass} font-semibold`}>{row.username}</td>
-                      <td className={tdClass}><IpLink ip={row.ipPppoe} /></td>
-                      <td className={tdClass}><IpLink ip={row.ipTr069} /></td>
-                      <td className={tdClass}>{row.sn || '-'}</td>
-                      <td className={tdClass}>{row.pon}</td>
-                      <td className={tdClass}>{row.manufacturer || '-'}</td>
-                      <td className={tdClass}>{row.tipe || '-'}</td>
-                      <td className={tdClass}>{row.ssid}</td>
-                      <td className={tdClass}>{row.clients}</td>
-                      <td className={tdClass}>{row.rx}</td>
-                      <td className={tdClass}>{row.temp}</td>
-                      <td className={tdClass}>{row.uptime}</td>
-                      <td className={tdClass}>{formatDate(row.lastInform)}</td>
-                      <td className={tdClass}>{formatDate(row.registered)}</td>
-                      <td className={`${tdClass} max-w-64 truncate font-mono text-xs`} title={row.id}>
-                        {row.id}
+                      <td className={`${tdClass} font-semibold`}>{item.username ?? '-'}</td>
+                      <td className={tdClass}><IpLink ip={item.ip_pppoe} /></td>
+                      <td className={tdClass}><IpLink ip={item.ip_tr069} /></td>
+                      <td className={tdClass}>{item.sn || '-'}</td>
+                      <td className={tdClass}>{item.pon ?? '-'}</td>
+                      <td className={tdClass}>{item.manufaktur || '-'}</td>
+                      <td className={tdClass}>{item.tipe || '-'}</td>
+                      <td className={tdClass}>{item.ssid ?? '-'}</td>
+                      <td className={tdClass}>{item.user ?? '-'}</td>
+                      <td className={tdClass}>{renderRx(item.rx_onu)}</td>
+                      <td className={tdClass}>{renderTemp(item.temp)}</td>
+                      <td className={tdClass}>{formatUptime(item.uptime)}</td>
+                      <td className={tdClass}>{formatDate(item.last_inform)}</td>
+                      <td className={tdClass}>{formatDate(item.registered)}</td>
+                      <td className={`${tdClass} max-w-64 truncate font-mono text-xs`} title={item.id}>
+                        {item.id}
                       </td>
                       <td className={tdClass}>
-                        {row.tags.length > 0 ? (
+                        {item.tags.length > 0 ? (
                           <div className="flex gap-1">
-                            {row.tags.map((tag) => (
+                            {item.tags.map((tag) => (
                               <span
                                 key={tag}
                                 className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-700 dark:bg-sky-900/50 dark:text-sky-200"

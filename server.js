@@ -6,6 +6,7 @@ const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
 const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
 const { startIsolirEnforcement } = require('./backend/langganan_isolir');
 const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
+const { ensureTables: ensureAcsTables } = require('./backend/acs');
 
 const app = express();
 const PORT = 5000;
@@ -34,6 +35,7 @@ app.use('/api/pelanggan', pelangganRouter);
 const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
+app.use('/api/acs', require('./backend/routes/acs'));
 
 async function ensureAdminTable() {
   await ensureBootstrapAdmin(pool);
@@ -90,6 +92,7 @@ async function start() {
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
   await ensureRouterServers();
+  await ensureAcsTables();
   await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();

@@ -2,18 +2,60 @@ const express = require('express');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const pool = require('../../database');
+const { MAX_GROUP_NAME, writeProfileReply } = require('../radius_group');
 
 const execAsync = promisify(exec);
 
 const router = express.Router();
 
+// Profil PPPoE lama (group RADIUS). Aturan limit sama dengan profil Langganan dan Hotspot:
+//   - group wajib dan harus sama persis dengan nama PPP Profile di MikroTik
+//     (dikirim sebagai Mikrotik-Group);
+//   - limit kecepatan opsional: bila diisi dikirim sebagai Mikrotik-Rate-Limit,
+//     bila kosong baris limit dihapus dan MikroTik memakai limit profilnya sendiri.
+// Group milik profil Hotspot/Langganan dikelola di halamannya masing-masing.
+const MANAGED_GROUP_SQL = `(
+  EXISTS (SELECT 1 FROM langganan_profiles p WHERE p.group_name COLLATE utf8mb4_unicode_ci = g.groupname COLLATE utf8mb4_unicode_ci)
+  OR EXISTS (SELECT 1 FROM hotspot_profiles h WHERE h.mikrotik_group COLLATE utf8mb4_unicode_ci = g.groupname COLLATE utf8mb4_unicode_ci)
+)`;
+
+function readGroupname(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function groupIsManaged(executor, groupname) {
+  const [rows] = await executor.execute(
+    `SELECT 1 FROM (SELECT ? AS groupname) g WHERE ${MANAGED_GROUP_SQL}`,
+    [groupname],
+  );
+  return rows.length > 0;
+}
+
+async function groupExists(executor, groupname) {
+  const [rows] = await executor.execute(
+    "SELECT 1 FROM radgroupreply WHERE groupname = ? AND attribute IN ('Mikrotik-Group', 'Mikrotik-Rate-Limit') LIMIT 1",
+    [groupname],
+  );
+  return rows.length > 0;
+}
+
+const MANAGED_MESSAGE = 'Group ini dikelola di halaman Profil Hotspot atau Profil Langganan';
+
 router.get('/profil', async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      "SELECT groupname, value AS rate_limit FROM radgroupreply WHERE attribute = 'Mikrotik-Rate-Limit'",
+    const [rows] = await pool.query(
+      `SELECT g.groupname, r.value AS rate_limit
+       FROM (
+         SELECT DISTINCT groupname FROM radgroupreply
+         WHERE attribute IN ('Mikrotik-Group', 'Mikrotik-Rate-Limit')
+       ) g
+       LEFT JOIN radgroupreply r
+         ON r.groupname = g.groupname AND r.attribute = 'Mikrotik-Rate-Limit'
+       WHERE NOT ${MANAGED_GROUP_SQL}
+       ORDER BY g.groupname`,
     );
 
-    res.json(rows);
+    res.json(rows.map((row) => ({ groupname: row.groupname, rate_limit: row.rate_limit || '' })));
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -24,74 +66,94 @@ router.get('/profil', async (req, res) => {
 });
 
 router.post('/profil', async (req, res) => {
-  const groupname = typeof req.body?.groupname === 'string' ? req.body.groupname.trim() : '';
+  const groupname = readGroupname(req.body?.groupname);
   const rateLimit = typeof req.body?.rate_limit === 'string' ? req.body.rate_limit.trim() : '';
 
-  if (!groupname || !rateLimit) {
+  if (!groupname || groupname.length > MAX_GROUP_NAME || rateLimit.length > 253) {
     return res.status(400).json({
       success: false,
-      message: 'Nama profil dan limit kecepatan wajib diisi',
+      message: 'Nama profil wajib diisi (maksimal 64 karakter)',
     });
   }
 
+  const connection = await pool.getConnection();
+
   try {
-    await pool.execute(
-      "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Mikrotik-Rate-Limit', ':=', ?)",
-      [groupname, rateLimit],
-    );
+    await connection.beginTransaction();
+    if (await groupIsManaged(connection, groupname)) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: MANAGED_MESSAGE });
+    }
+    if (await groupExists(connection, groupname)) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: 'Profil sudah ada' });
+    }
+    await writeProfileReply(connection, groupname, rateLimit);
+    await connection.commit();
 
     return res.json({
       success: true,
       message: 'Profil berhasil disimpan',
     });
   } catch (error) {
+    await connection.rollback().catch(() => {});
     return res.status(500).json({
       success: false,
       message: 'Gagal menyimpan profil',
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 });
 
 router.put('/profil/:groupname', async (req, res) => {
-  const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
+  const groupname = readGroupname(req.params.groupname);
   const rateLimit = typeof req.body?.rate_limit === 'string' ? req.body.rate_limit.trim() : '';
 
-  if (!groupname || !rateLimit) {
+  if (!groupname || rateLimit.length > 253) {
     return res.status(400).json({
       success: false,
-      message: 'Nama profil dan limit kecepatan wajib diisi',
+      message: 'Nama profil wajib diisi',
     });
   }
 
-  try {
-    const [result] = await pool.execute(
-      "UPDATE radgroupreply SET value = ? WHERE groupname = ? AND attribute = 'Mikrotik-Rate-Limit'",
-      [rateLimit, groupname],
-    );
+  const connection = await pool.getConnection();
 
-    if (result.affectedRows === 0) {
+  try {
+    await connection.beginTransaction();
+    if (await groupIsManaged(connection, groupname)) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: MANAGED_MESSAGE });
+    }
+    if (!(await groupExists(connection, groupname))) {
+      await connection.rollback();
       return res.status(404).json({
         success: false,
         message: 'Profil tidak ditemukan',
       });
     }
+    await writeProfileReply(connection, groupname, rateLimit);
+    await connection.commit();
 
     return res.json({
       success: true,
       message: 'Profil berhasil diperbarui',
     });
   } catch (error) {
+    await connection.rollback().catch(() => {});
     return res.status(500).json({
       success: false,
       message: 'Gagal memperbarui profil',
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 });
 
 router.delete('/profil/:groupname', async (req, res) => {
-  const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
+  const groupname = readGroupname(req.params.groupname);
 
   if (!groupname) {
     return res.status(400).json({
@@ -101,6 +163,9 @@ router.delete('/profil/:groupname', async (req, res) => {
   }
 
   try {
+    if (await groupIsManaged(pool, groupname)) {
+      return res.status(409).json({ success: false, message: MANAGED_MESSAGE });
+    }
     await pool.execute('DELETE FROM radgroupreply WHERE groupname = ?', [groupname]);
 
     return res.json({

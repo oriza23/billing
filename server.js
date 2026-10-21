@@ -4,6 +4,9 @@ const pool = require('./database');
 const requireAuth = require('./backend/middleware/auth');
 const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
 const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
+const { startIsolirEnforcement } = require('./backend/langganan_isolir');
+const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
+const { ensureTables: ensureAcsTables } = require('./backend/acs');
 
 const app = express();
 const PORT = 5000;
@@ -25,8 +28,6 @@ const langgananProfilRouter = require('./backend/routes/langganan_profil');
 app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
-const langgananMaster = require('./backend/routes/langganan_master');
-app.use('/api/langganan/server', langgananMaster.serverRouter);
 app.use('/api/wilayah', require('./backend/routes/wilayah'));
 app.use('/api/langganan/online', require('./backend/routes/langganan_online'));
 const pelangganRouter = require('./backend/routes/pelanggan');
@@ -34,6 +35,7 @@ app.use('/api/pelanggan', pelangganRouter);
 const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
+app.use('/api/acs', require('./backend/routes/acs'));
 
 async function ensureAdminTable() {
   await ensureBootstrapAdmin(pool);
@@ -52,6 +54,8 @@ async function ensureHotspotVouchersTable() {
   await pool.query(
     'ALTER TABLE hotspot_vouchers ADD COLUMN IF NOT EXISTS kode_batch VARCHAR(50)',
   );
+  // Nama server MikroTik bisa sampai 100 karakter.
+  await pool.query('ALTER TABLE hotspot_vouchers MODIFY server VARCHAR(100)');
 }
 
 async function ensureRoutersTable() {
@@ -87,7 +91,8 @@ async function start() {
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
-  await langgananMaster.ensureTables();
+  await ensureRouterServers();
+  await ensureAcsTables();
   await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
@@ -97,8 +102,20 @@ async function start() {
   if (osTimezone !== timezone) {
     console.warn(`Peringatan: zona waktu OS (${osTimezone || 'tidak diketahui'}) berbeda dengan pengaturan web (${timezone}). Simpan ulang di menu Sistem > Pengaturan untuk menyamakan.`);
   }
-  startExpiredVoucherEnforcement();
-  app.listen(PORT, () => {
+  // Express 5 mengirim error bind (mis. EADDRINUSE) ke callback listen. Tanpa pengecekan ini,
+  // server kedua tetap mencetak "berjalan" padahal port dipakai proses lama (kode lama + cron ganda).
+  app.listen(PORT, (error) => {
+    if (error) {
+      console.error(
+        error.code === 'EADDRINUSE'
+          ? `Port ${PORT} sudah dipakai proses lain. Hentikan proses lama dulu: fuser -k ${PORT}/tcp`
+          : `Gagal membuka port ${PORT}: ${error.message}`,
+      );
+      process.exit(1);
+    }
+    // Penjadwal hanya dijalankan setelah port benar-benar terbuka, supaya tidak ada cron ganda.
+    startExpiredVoucherEnforcement();
+    startIsolirEnforcement();
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });
 }

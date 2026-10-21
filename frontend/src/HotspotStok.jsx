@@ -45,6 +45,10 @@ const fieldClass = 'grid min-w-0 gap-1.5 text-xs font-semibold tracking-wide tex
 const controlClass = 'box-border h-10 w-full min-w-0 rounded-lg border border-gray-300 bg-gray-50 px-3 text-sm font-medium text-gray-900 outline-none transition-colors duration-300 focus:border-blue-800 focus:bg-white focus:ring-2 focus:ring-blue-800/20 read-only:bg-gray-100 read-only:text-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:focus:bg-gray-900 dark:read-only:bg-gray-950 dark:read-only:text-gray-400'
 const modalShell = 'max-h-[calc(100vh-3rem)] w-full overflow-auto rounded-2xl bg-white text-gray-900 shadow-2xl transition-colors duration-300 dark:bg-gray-800 dark:text-gray-100'
 const modalBtn = 'inline-flex h-10 cursor-pointer items-center justify-center rounded-lg border-0 px-4 text-sm font-bold text-white transition-colors duration-300 disabled:cursor-wait disabled:opacity-70'
+const ALL_SERVER = 'ALL SERVER'
+const requiredMark = <span className="text-red-600" aria-hidden="true">*</span>
+const VOUCHER_JENIS = ['username=password', 'username+password']
+const VOUCHER_KODE = ['huruf-kecil', 'huruf-besar', 'huruf-campuran', 'angka-huruf']
 const thClass = 'bg-sky-900 px-4 py-3 text-left text-xs font-bold tracking-wide text-sky-50 uppercase whitespace-nowrap'
 const tdClass = 'border-b border-gray-100 px-4 py-3 text-left text-sm whitespace-nowrap text-gray-800 dark:border-gray-700 dark:text-gray-100'
 
@@ -116,7 +120,9 @@ function HotspotStok() {
   const [daftarRouter, setDaftarRouter] = useState([])
   const [daftarOutletAktif, setDaftarOutletAktif] = useState([])
   const [selectedOutlet, setSelectedOutlet] = useState('')
-  const [selectedRouter, setSelectedRouter] = useState('ALL ROUTER')
+  const [selectedRouter, setSelectedRouter] = useState('')
+  const [selectedServer, setSelectedServer] = useState('')
+  const [daftarServer, setDaftarServer] = useState([])
   const [vouchers, setVouchers] = useState([])
   const [totalData, setTotalData] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
@@ -130,8 +136,10 @@ function HotspotStok() {
   const [jumlah, setJumlah] = useState(10)
   const [prefix, setPrefix] = useState('')
   const [panjang, setPanjang] = useState(6)
-  const [jenisVoucher, setJenisVoucher] = useState('username=password')
-  const [kodeKombinasi, setKodeKombinasi] = useState('huruf-kecil')
+  const [jenisVoucher, setJenisVoucher] = useState('')
+  const [kodeKombinasi, setKodeKombinasi] = useState('')
+  // Garis merah baru tampil setelah admin menekan Generate dengan isian bermasalah.
+  const [voucherSubmitted, setVoucherSubmitted] = useState(false)
   const [saving, setSaving] = useState(false)
   // Kunci sinkron anti klik ganda (state React baru update setelah render).
   const generatingRef = useRef(false)
@@ -226,7 +234,6 @@ function HotspotStok() {
         const profiles = Array.isArray(profilResponse.data) ? profilResponse.data : []
         const outlets = Array.isArray(outletResponse.data) ? outletResponse.data : []
         setDaftarProfil(profiles)
-        setMikrotikGroup((current) => current || profiles[0]?.mikrotik_group || '')
         setDaftarOutletAktif(outlets.filter((item) => item.status === 'Aktif'))
         setError('')
       } catch {
@@ -255,6 +262,17 @@ function HotspotStok() {
       } catch {
         if (!ignore) {
           setDaftarRouter([])
+        }
+      }
+      // Server Hotspot yang diinput admin di menu Router.
+      try {
+        const response = await api.get('/api/routers/servers', { params: { jenis: 'hotspot' } })
+        if (!ignore) {
+          setDaftarServer(Array.isArray(response.data) ? response.data : [])
+        }
+      } catch {
+        if (!ignore) {
+          setDaftarServer([])
         }
       }
     }
@@ -458,27 +476,23 @@ function HotspotStok() {
       return
     }
 
-    const adminName = localStorage.getItem('admin_user') || 'System'
+    // Isian kosong atau tidak valid: tandai garis merah, tanpa request dan tanpa loading.
+    setVoucherSubmitted(true)
+    if (Object.values(voucherErrors).some(Boolean)) {
+      return
+    }
+
     const payload = {
       router: selectedRouter,
-      server: 'ALL SERVER',
+      server: selectedServer,
       jenis_voucher: jenisVoucher,
       kode_kombinasi: kodeKombinasi,
       prefix: prefix.trim(),
-      outlet: selectedOutlet.trim() || 'PUSAT',
+      outlet: selectedOutlet,
       mikrotik_group: mikrotikGroup,
-      admin: adminName,
       mitra: '',
       jumlah: Number(jumlah),
       panjang: Number(panjang),
-    }
-
-    if (!payload.mikrotik_group) {
-      Swal.fire({
-        icon: 'warning',
-        title: 'Pilih profile',
-      })
-      return
     }
 
     generatingRef.current = true
@@ -498,9 +512,13 @@ function HotspotStok() {
 
     try {
       await api.post('/api/hotspot/voucher/generate', payload)
-    } catch {
+    } catch (requestError) {
       Swal.close()
-      Swal.fire('Gagal!', 'Terjadi kesalahan saat generate voucher. Silakan coba lagi.', 'error')
+      Swal.fire(
+        'Gagal!',
+        requestError.response?.data?.message || 'Terjadi kesalahan saat generate voucher. Silakan coba lagi.',
+        'error',
+      )
       generatingRef.current = false
       setSaving(false)
       return
@@ -521,6 +539,39 @@ function HotspotStok() {
   }
 
   const selectedProfile = daftarProfil.find((item) => item.mikrotik_group === mikrotikGroup)
+  // Pilihan server: ALL SERVER, lalu server Hotspot milik router terpilih
+  // (ALL ROUTER atau router kosong menampilkan server semua router).
+  const serverOptions = [
+    ALL_SERVER,
+    ...new Set(
+      daftarServer
+        .filter((item) => !selectedRouter || selectedRouter === 'ALL ROUTER' || item.nama_router === selectedRouter)
+        .map((item) => item.nama),
+    ),
+  ]
+  // true = field bermasalah. Dihitung ulang setiap render, jadi garis merah
+  // hilang begitu isi field menjadi valid.
+  const voucherErrors = {
+    router: selectedRouter === ''
+      || (selectedRouter !== 'ALL ROUTER' && !daftarRouter.some((item) => item.nama_router === selectedRouter)),
+    server: !serverOptions.includes(selectedServer),
+    jenis: !VOUCHER_JENIS.includes(jenisVoucher),
+    kode: !VOUCHER_KODE.includes(kodeKombinasi),
+    // Prefix opsional: kosong boleh, bila diisi harus 1-3 huruf atau angka.
+    prefix: prefix.trim() !== '' && !/^[A-Za-z0-9]{1,3}$/.test(prefix.trim()),
+    outlet: selectedOutlet === ''
+      || !daftarOutletAktif.some((item) => item.nama_outlet === selectedOutlet),
+    profile: !selectedProfile,
+    jumlah: !/^\d+$/.test(String(jumlah).trim()) || Number(jumlah) < 1 || Number(jumlah) > 5000,
+    panjang: !/^\d+$/.test(String(panjang).trim()) || Number(panjang) < 6 || Number(panjang) > 32,
+  }
+  function invalidProps(field) {
+    const invalid = voucherSubmitted && voucherErrors[field]
+    return {
+      'aria-invalid': invalid ? 'true' : undefined,
+      className: invalid ? 'border-red-500! focus:border-red-500! focus:ring-red-500/25!' : undefined,
+    }
+  }
   const hargaJual = Number(selectedProfile?.harga_jual) || 0
   const komisi = Number(selectedProfile?.komisi_reseller) || 0
   const hargaPokok = Number.isFinite(Number(selectedProfile?.hpp))
@@ -581,14 +632,16 @@ function HotspotStok() {
   // Kembalikan form Buat Voucher ke nilai awal (prefix dan outlet dikosongkan,
   // sisanya kembali ke pilihan bawaan).
   function resetVoucherForm() {
-    setSelectedRouter('ALL ROUTER')
-    setJenisVoucher('username=password')
-    setKodeKombinasi('huruf-kecil')
+    setSelectedRouter('')
+    setSelectedServer('')
+    setJenisVoucher('')
+    setKodeKombinasi('')
     setPrefix('')
     setSelectedOutlet('')
-    setMikrotikGroup(daftarProfil[0]?.mikrotik_group || '')
+    setMikrotikGroup('')
     setJumlah(10)
     setPanjang(6)
+    setVoucherSubmitted(false)
   }
 
   function closeVoucherModal() {
@@ -737,7 +790,7 @@ function HotspotStok() {
       </div>
 
       <div className="flex flex-wrap gap-2" role="toolbar" aria-label="Aksi stok voucher">
-        <div className="relative z-30">
+        <div className="stok-menu relative z-30">
           <button
             type="button"
             className={`${actionBtn} bg-blue-600 hover:bg-blue-500`}
@@ -958,14 +1011,23 @@ function HotspotStok() {
           >
             <header className="px-6 pt-6">
               <h2 id="stok-modal-title" className="m-0 text-xl font-bold tracking-wide text-gray-900 dark:text-gray-100">Buat Voucher</h2>
-              <p className="mt-1.5 mb-0 text-[13px] text-gray-500 dark:text-gray-400">Kode dibuat dari prefix dan huruf serta angka acak.</p>
+              <p className="mt-1.5 mb-0 text-[13px] text-gray-500 dark:text-gray-400">Kode dibuat dari prefix (opsional) dan huruf serta angka acak.</p>
             </header>
-            <form className="grid gap-4 px-6 pt-4 pb-6 [&_input]:box-border [&_input]:h-10 [&_input]:w-full [&_input]:rounded-lg [&_input]:border [&_input]:border-gray-300 [&_input]:bg-gray-50 [&_input]:px-3 [&_input]:text-sm [&_input]:font-medium [&_input]:text-gray-900 [&_input]:outline-none [&_input]:transition-colors [&_input]:duration-300 [&_input]:read-only:bg-gray-100 [&_input]:read-only:text-gray-500 [&_input]:focus:border-blue-800 [&_input]:focus:bg-white [&_input]:focus:ring-2 [&_input]:focus:ring-blue-800/20 dark:[&_input]:border-gray-600 dark:[&_input]:bg-gray-900 dark:[&_input]:text-gray-100 dark:[&_input]:focus:bg-gray-900 dark:[&_input]:read-only:bg-gray-950 [&_select]:box-border [&_select]:h-10 [&_select]:w-full [&_select]:rounded-lg [&_select]:border [&_select]:border-gray-300 [&_select]:bg-gray-50 [&_select]:px-3 [&_select]:text-sm [&_select]:font-medium [&_select]:text-gray-900 [&_select]:outline-none [&_select]:focus:border-blue-800 [&_select]:focus:bg-white [&_select]:focus:ring-2 [&_select]:focus:ring-blue-800/20 dark:[&_select]:border-gray-600 dark:[&_select]:bg-gray-900 dark:[&_select]:text-gray-100 dark:[&_select]:focus:bg-gray-900" onSubmit={handleGenerate}>
+            <form className="grid gap-4 px-6 pt-4 pb-6 [&_input]:box-border [&_input]:h-10 [&_input]:w-full [&_input]:rounded-lg [&_input]:border [&_input]:border-gray-300 [&_input]:bg-gray-50 [&_input]:px-3 [&_input]:text-sm [&_input]:font-medium [&_input]:text-gray-900 [&_input]:outline-none [&_input]:transition-colors [&_input]:duration-300 [&_input]:read-only:bg-gray-100 [&_input]:read-only:text-gray-500 [&_input]:focus:border-blue-800 [&_input]:focus:bg-white [&_input]:focus:ring-2 [&_input]:focus:ring-blue-800/20 dark:[&_input]:border-gray-600 dark:[&_input]:bg-gray-900 dark:[&_input]:text-gray-100 dark:[&_input]:focus:bg-gray-900 dark:[&_input]:read-only:bg-gray-950 [&_select]:box-border [&_select]:h-10 [&_select]:w-full [&_select]:rounded-lg [&_select]:border [&_select]:border-gray-300 [&_select]:bg-gray-50 [&_select]:px-3 [&_select]:text-sm [&_select]:font-medium [&_select]:text-gray-900 [&_select]:outline-none [&_select]:focus:border-blue-800 [&_select]:focus:bg-white [&_select]:focus:ring-2 [&_select]:focus:ring-blue-800/20 dark:[&_select]:border-gray-600 dark:[&_select]:bg-gray-900 dark:[&_select]:text-gray-100 dark:[&_select]:focus:bg-gray-900" onSubmit={handleGenerate} noValidate>
               <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-3">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:col-span-2">
                   <label className={fieldClass}>
-                    <span>Router</span>
-                    <select value={selectedRouter} onChange={(event) => setSelectedRouter(event.target.value)}>
+                    <span>Router {requiredMark}</span>
+                    <select
+                      {...invalidProps('router')}
+                      value={selectedRouter}
+                      onChange={(event) => {
+                        // Server milik router tertentu, jadi pilihan server dikosongkan saat router berganti.
+                        setSelectedRouter(event.target.value)
+                        setSelectedServer('')
+                      }}
+                    >
+                      <option value="">-Pilih-</option>
                       <option value="ALL ROUTER">ALL ROUTER</option>
                       {daftarRouter.map((item) => (
                         <option key={item.id || item.nama_router} value={item.nama_router}>
@@ -975,19 +1037,26 @@ function HotspotStok() {
                     </select>
                   </label>
                   <label className={fieldClass}>
-                    <span>Server</span>
-                    <input type="text" value="ALL SERVER" readOnly />
+                    <span>Server {requiredMark}</span>
+                    <select {...invalidProps('server')} value={selectedServer} onChange={(event) => setSelectedServer(event.target.value)}>
+                      <option value="">-Pilih-</option>
+                      {serverOptions.map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
                   </label>
                   <label className={fieldClass}>
-                    <span>Jenis Voucher</span>
-                    <select value={jenisVoucher} onChange={(event) => setJenisVoucher(event.target.value)}>
+                    <span>Jenis Voucher {requiredMark}</span>
+                    <select {...invalidProps('jenis')} value={jenisVoucher} onChange={(event) => setJenisVoucher(event.target.value)}>
+                      <option value="">-Pilih-</option>
                       <option value="username=password">username=password</option>
                       <option value="username+password">username+password</option>
                     </select>
                   </label>
                   <label className={fieldClass}>
-                    <span>Kode Kombinasi</span>
-                    <select value={kodeKombinasi} onChange={(event) => setKodeKombinasi(event.target.value)}>
+                    <span>Kode Kombinasi {requiredMark}</span>
+                    <select {...invalidProps('kode')} value={kodeKombinasi} onChange={(event) => setKodeKombinasi(event.target.value)}>
+                      <option value="">-Pilih-</option>
                       <option value="huruf-kecil">Huruf Kecil</option>
                       <option value="huruf-besar">Huruf Besar</option>
                       <option value="huruf-campuran">Huruf Besar &amp; Kecil</option>
@@ -997,16 +1066,18 @@ function HotspotStok() {
                   <label className={fieldClass}>
                     <span>Prefix</span>
                     <input
+                      {...invalidProps('prefix')}
                       type="text"
                       maxLength="3"
+                      placeholder="Opsional, 1-3 huruf atau angka"
                       value={prefix}
                       onChange={(event) => setPrefix(event.target.value)}
                     />
                   </label>
                   <label className={fieldClass}>
-                    <span>Outlet</span>
-                    <select value={selectedOutlet} onChange={(event) => setSelectedOutlet(event.target.value)}>
-                      <option value="">-Pilih Outlet-</option>
+                    <span>Outlet {requiredMark}</span>
+                    <select {...invalidProps('outlet')} value={selectedOutlet} onChange={(event) => setSelectedOutlet(event.target.value)}>
+                      <option value="">-Pilih-</option>
                       {daftarOutletAktif.map((outlet) => (
                         <option key={outlet.id || outlet.nama_outlet} value={outlet.nama_outlet}>
                           {outlet.nama_outlet}
@@ -1015,13 +1086,13 @@ function HotspotStok() {
                     </select>
                   </label>
                   <label className={fieldClass}>
-                    <span>Profile</span>
+                    <span>Profile {requiredMark}</span>
                     <select
+                      {...invalidProps('profile')}
                       value={mikrotikGroup}
                       onChange={(event) => setMikrotikGroup(event.target.value)}
-                      required
                     >
-                      <option value="">Pilih profile</option>
+                      <option value="">-Pilih-</option>
                       {daftarProfil.map((item) => (
                         <option key={item.id || item.mikrotik_group} value={item.mikrotik_group}>
                           {item.nama_profile}
@@ -1030,25 +1101,25 @@ function HotspotStok() {
                     </select>
                   </label>
                   <label className={fieldClass}>
-                    <span>Jumlah</span>
+                    <span>Jumlah {requiredMark}</span>
                     <input
+                      {...invalidProps('jumlah')}
                       type="number"
                       min="1"
                       max="5000"
                       value={jumlah}
                       onChange={(event) => setJumlah(event.target.value)}
-                      required
                     />
                   </label>
                   <label className={fieldClass}>
-                    <span>Panjang Karakter</span>
+                    <span>Panjang Karakter {requiredMark}</span>
                     <input
+                      {...invalidProps('panjang')}
                       type="number"
                       min="6"
                       max="32"
                       value={panjang}
                       onChange={(event) => setPanjang(event.target.value)}
-                      required
                     />
                   </label>
                 </div>

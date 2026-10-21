@@ -173,6 +173,9 @@ function Dashboard() {
             open={openMenus.hotspot}
             onToggle={() => toggleMenu('hotspot')}
           />
+          <NavLink to="/acs" className={navLinkClass}>
+            GenieACS
+          </NavLink>
           <NavLink to="/router" className={navLinkClass}>
             Router
           </NavLink>

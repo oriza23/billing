@@ -1,0 +1,434 @@
+// Merangkum dokumen perangkat GenieACS (NBI) menjadi objek ONU yang bersih dan standar.
+// Seluruh ekstraksi path TR-069 dan konversi satuan dilakukan di sini, bukan di frontend.
+
+// ---- Projection NBI ---------------------------------------------------------
+// Hanya path yang dipakai ringkasan di bawah (balasan tetap kecil). Projection NBI tidak
+// mendukung wildcard, jadi instance 1-4 ditulis eksplisit.
+const INSTANCES = [1, 2, 3, 4];
+const IGD = 'InternetGatewayDevice';
+// Urutan = prioritas: path pertama yang berisi nilai dipakai. Satu daftar ini dipakai untuk
+// projection NBI sekaligus untuk pembacaan nilai, jadi keduanya tidak bisa tidak sinkron.
+// Nama berhubung tanda minus (X_CT-COM_...) aman: path hanya dipecah pada titik.
+const RX_PATHS = [
+  // Standar TR-098 / TR-181
+  `${IGD}.WANDevice.1.WANPONInterfaceConfig.RXPower`,
+  'Device.Optical.Interface.1.OpticalSignalLevel',
+  // FiberHome
+  `${IGD}.WANDevice.1.X_FH_GponInterfaceConfig.RXPower`,
+  `${IGD}.WANDevice.1.WANDSLInterfaceConfig.X_FH_RxPower`,
+  // CT-COM
+  `${IGD}.WANDevice.1.X_CTCOM_WANDrop.RxPower`,
+  `${IGD}.WANDevice.1.WANPONInterfaceConfig.X_CTCOM_RxPower`,
+  // CMCC (GPON dan EPON)
+  `${IGD}.WANDevice.1.X_CMCC_GponInterfaceConfig.RXPower`,
+  `${IGD}.WANDevice.1.X_CMCC_EponInterfaceConfig.RXPower`,
+  // CT-COM (GPON dan EPON)
+  `${IGD}.WANDevice.1.X_CT-COM_GponInterfaceConfig.RXPower`,
+  `${IGD}.WANDevice.1.X_CT-COM_EponInterfaceConfig.RXPower`,
+  // Cadangan: CT-COM DeviceInfo, Huawei, ZTE
+  `${IGD}.DeviceInfo.X_CTCOM_Optical.RxPower`,
+  `${IGD}.WANDevice.1.X_GponInterafceConfig.RXPower`,
+  `${IGD}.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.RXPower`,
+];
+
+const TEMP_PATHS = [
+  // Standar TR-098 / TR-181
+  `${IGD}.DeviceInfo.TemperatureStatus.TemperatureSensor.1.Value`,
+  'Device.DeviceInfo.TemperatureStatus.TemperatureSensor.1.Value',
+  // FiberHome / CT-COM (DeviceInfo)
+  `${IGD}.DeviceInfo.X_FH_Temperature`,
+  `${IGD}.DeviceInfo.X_CTCOM_Temperature`,
+  // FiberHome
+  `${IGD}.WANDevice.1.X_FH_GponInterfaceConfig.TransceiverTemperature`,
+  // CMCC (GPON dan EPON)
+  `${IGD}.WANDevice.1.X_CMCC_GponInterfaceConfig.TransceiverTemperature`,
+  `${IGD}.WANDevice.1.X_CMCC_EponInterfaceConfig.TransceiverTemperature`,
+  // CT-COM (GPON dan EPON)
+  `${IGD}.WANDevice.1.X_CT-COM_GponInterfaceConfig.TransceiverTemperature`,
+  `${IGD}.WANDevice.1.X_CT-COM_EponInterfaceConfig.TransceiverTemperature`,
+  // Cadangan: Huawei, ZTE, TR-181 Optical
+  `${IGD}.WANDevice.1.X_GponInterafceConfig.TransceiverTemperature`,
+  `${IGD}.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.TransceiverTemperature`,
+  'Device.Optical.Interface.1.TransceiverTemperature',
+];
+
+const LIVE_PROJECTION = [
+  '_id', '_lastInform', '_registered', '_tags', '_deviceId', '_ip', '_connectionRequestURL',
+  `${IGD}.ManagementServer.ConnectionRequestURL`,
+  'Device.ManagementServer.ConnectionRequestURL',
+  // IP PPPoE
+  ...INSTANCES.flatMap((wan) => INSTANCES.map(
+    (ppp) => `${IGD}.WANDevice.1.WANConnectionDevice.${wan}.WANPPPConnection.${ppp}.ExternalIPAddress`,
+  )),
+  ...INSTANCES.map((iface) => `Device.IP.Interface.${iface}.IPv4Address.1.IPAddress`),
+  // Username PPPoE
+  ...INSTANCES.flatMap((wan) => INSTANCES.map(
+    (ppp) => `${IGD}.WANDevice.1.WANConnectionDevice.${wan}.WANPPPConnection.${ppp}.Username`,
+  )),
+  ...INSTANCES.map((ppp) => `Device.PPP.Interface.${ppp}.Username`),
+  // SSID, jumlah host, uptime
+  `${IGD}.LANDevice.1.WLANConfiguration.1.SSID`,
+  'Device.WiFi.SSID.1.SSID',
+  `${IGD}.LANDevice.1.Hosts.HostNumberOfEntries`,
+  'Device.Hosts.HostNumberOfEntries',
+  `${IGD}.LANDevice.1.WLANConfiguration.1.TotalAssociations`,
+  `${IGD}.DeviceInfo.UpTime`,
+  'Device.DeviceInfo.UpTime',
+  // RX dan suhu optik
+  ...RX_PATHS,
+  ...TEMP_PATHS,
+  // Deteksi PON (GPON/EPON)
+  `${IGD}.DeviceInfo.ModelName`,
+  `${IGD}.DeviceInfo.Description`,
+  `${IGD}.WANDevice.1.WANCommonInterfaceConfig.WANAccessType`,
+  'Device.DeviceInfo.ModelName',
+  'Device.DeviceInfo.Description',
+].filter((path, index, all) => all.indexOf(path) === index).join(',');
+
+// ---- Helper pembaca path ----------------------------------------------------
+function isNode(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isEmpty(value) {
+  return value === undefined || value === null || String(value).trim() === '';
+}
+
+// Nilai (_value) pada path berpemisah titik, mis. "InternetGatewayDevice.DeviceInfo.UpTime".
+// Aman terhadap node yang tidak ada (setara optional chaining ?.) dan mengembalikan undefined.
+function readPath(doc, path) {
+  let node = doc;
+  for (const key of path.split('.')) {
+    node = isNode(node) ? node[key] : undefined;
+    if (node === undefined) {
+      return undefined;
+    }
+  }
+  return isNode(node) ? node._value : undefined;
+}
+
+// Nilai pertama yang tidak kosong dari beberapa path (setara "||" tetapi nilai 0 tetap dianggap ada).
+function firstOf(doc, paths) {
+  for (const path of paths) {
+    const value = readPath(doc, path);
+    if (!isEmpty(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+// Semua nilai pada path yang memakai "*" sebagai pengganti satu level instance.
+function readAll(doc, path) {
+  let nodes = [doc];
+  for (const key of path.split('.')) {
+    nodes = nodes.flatMap((node) => {
+      if (!isNode(node)) {
+        return [];
+      }
+      if (key === '*') {
+        return Object.keys(node).filter((name) => !name.startsWith('_')).map((name) => node[name]);
+      }
+      return node[key] === undefined ? [] : [node[key]];
+    });
+  }
+  return nodes.map((node) => (isNode(node) ? node._value : undefined)).filter((value) => !isEmpty(value));
+}
+
+function toNumber(value) {
+  if (isEmpty(value)) {
+    return null;
+  }
+  const number = parseFloat(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function round(value, digits) {
+  return value === null ? null : Number(value.toFixed(digits));
+}
+
+function toText(value) {
+  return isEmpty(value) ? null : String(value).trim();
+}
+
+const IPV4_PATTERN = /(\d{1,3}(?:\.\d{1,3}){3})/;
+const IPV4_EXACT = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+
+// Dipakai frontend sebagai href: hanya IPv4 valid, bukan 0.0.0.0 / loopback.
+function cleanIp(value) {
+  const ip = typeof value === 'string' ? value.trim() : '';
+  return IPV4_EXACT.test(ip) && ip !== '0.0.0.0' && !ip.startsWith('127.') ? ip : null;
+}
+
+// ---- Ekstraksi per kolom ----------------------------------------------------
+function extractIpTr069(doc) {
+  const url = doc._connectionRequestURL ?? firstOf(doc, [
+    `${IGD}.ManagementServer.ConnectionRequestURL`,
+    'Device.ManagementServer.ConnectionRequestURL',
+  ]);
+  const fromUrl = typeof url === 'string' ? url.match(IPV4_PATTERN)?.[1] : null;
+  return cleanIp(typeof doc._ip === 'string' ? doc._ip : doc._ip?._value) ?? cleanIp(fromUrl);
+}
+
+function extractIpPppoe(doc) {
+  const candidates = [
+    ...readAll(doc, `${IGD}.WANDevice.1.WANConnectionDevice.*.WANPPPConnection.*.ExternalIPAddress`),
+    ...readAll(doc, 'Device.IP.Interface.*.IPv4Address.*.IPAddress'),
+  ];
+  return candidates.map(cleanIp).find(Boolean) ?? null;
+}
+
+function extractUsername(doc) {
+  const candidates = [
+    ...readAll(doc, `${IGD}.WANDevice.1.WANConnectionDevice.*.WANPPPConnection.*.Username`),
+    ...readAll(doc, 'Device.PPP.Interface.*.Username'),
+  ];
+  return candidates.map(toText).find(Boolean) ?? null;
+}
+
+// EPON dicek lebih dulu, lalu GPON. ProductClass sering hanya kode model, jadi
+// ModelName, Description, dan WANAccessType dipakai sebagai cadangan.
+function detectPon(doc) {
+  const sources = [
+    doc._deviceId?._ProductClass,
+    readPath(doc, `${IGD}.DeviceInfo.ModelName`),
+    readPath(doc, 'Device.DeviceInfo.ModelName'),
+    readPath(doc, `${IGD}.DeviceInfo.Description`),
+    readPath(doc, 'Device.DeviceInfo.Description'),
+    readPath(doc, `${IGD}.WANDevice.1.WANCommonInterfaceConfig.WANAccessType`),
+  ];
+  for (const source of sources) {
+    const text = typeof source === 'string' ? source.toUpperCase() : '';
+    if (text.includes('EPON')) {
+      return 'EPON';
+    }
+    if (text.includes('GPON')) {
+      return 'GPON';
+    }
+  }
+  return null;
+}
+
+// RX ONU (dBm). Positif = daya linear ZTE dalam 0.1 uW: 10 * log10(val / 10000).
+// Lebih kecil dari -100 = Huawei tanpa koma (-1750): dibagi 100. Selain itu apa adanya.
+function extractRxOnu(doc) {
+  let value = toNumber(firstOf(doc, RX_PATHS));
+  if (value === null) {
+    return null;
+  }
+  if (value > 0) {
+    value = 10 * Math.log10(value / 10000);
+  } else if (value < -100) {
+    value /= 100;
+  }
+  return round(value, 2);
+}
+
+// Suhu (°C). Nilai > 1000 bukan °C: umumnya 1/256 °C (13030 -> 50.9). Bila hasil bagi 256
+// tidak masuk akal (> 150 °C) dianggap milli-°C dan dibagi 1000 (45000 -> 45).
+function extractTemp(doc) {
+  let value = toNumber(firstOf(doc, TEMP_PATHS));
+  if (value === null) {
+    return null;
+  }
+  if (value > 1000) {
+    value /= 256;
+    if (value > 150) {
+      value = (value * 256) / 1000;
+    }
+  }
+  return round(value, 2);
+}
+
+// ---- Ringkasan satu perangkat -----------------------------------------------
+function summarizeDevice(item) {
+  const tags = Array.isArray(item._tags) ? item._tags.map(String) : [];
+  return {
+    id: String(item._id),
+    sn: toText(item._deviceId?._SerialNumber),
+    manufaktur: toText(item._deviceId?._Manufacturer),
+    tipe: toText(item._deviceId?._ProductClass),
+    pon: detectPon(item),
+    username: extractUsername(item),
+    last_inform: item._lastInform ?? null,
+    registered: item._registered ?? null,
+    tags,
+    ip_tr069: extractIpTr069(item),
+    ip_pppoe: extractIpPppoe(item),
+    ssid: toText(firstOf(item, [
+      `${IGD}.LANDevice.1.WLANConfiguration.1.SSID`,
+      'Device.WiFi.SSID.1.SSID',
+    ])),
+    user: toNumber(firstOf(item, [
+      `${IGD}.LANDevice.1.Hosts.HostNumberOfEntries`,
+      'Device.Hosts.HostNumberOfEntries',
+      // Cadangan: jumlah klien WiFi yang terhubung (hanya WiFi, bukan seluruh host LAN).
+      `${IGD}.LANDevice.1.WLANConfiguration.1.TotalAssociations`,
+    ])),
+    uptime: toNumber(firstOf(item, [`${IGD}.DeviceInfo.UpTime`, 'Device.DeviceInfo.UpTime'])),
+    rx_onu: extractRxOnu(item),
+    temp: extractTemp(item),
+  };
+}
+
+// ---- Daftar klien terhubung (Hosts.Host) -------------------------------------
+// Tidak ikut di LIVE_PROJECTION: subtree Host berisi puluhan parameter per klien, dan daftar
+// ONU mengambil semua perangkat sekaligus. Diambil per perangkat saat modal detail dibuka.
+const HOSTS_PROJECTION = `${IGD}.LANDevice.1.Hosts.Host,Device.Hosts.Host`;
+const MAC_PATTERN = /^([0-9A-F]{2}[:-]){5}[0-9A-F]{2}$/i;
+const MAX_HOSTS = 200;
+
+function hostIsActive(value) {
+  if (value === true || value === 1) {
+    return true;
+  }
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return text === 'true' || text === '1';
+}
+
+// Host yang ditampilkan: Active = true, atau (bila Active tidak dilaporkan) punya MAC valid.
+// Active = false berarti klien sudah putus (TR-069 menyimpan riwayat host), jadi tidak ikut.
+function shouldKeepHost(host) {
+  if (host.active === true) {
+    return true;
+  }
+  if (host.active === false) {
+    return false;
+  }
+  return MAC_PATTERN.test(host.mac);
+}
+
+function extractHosts(item) {
+  const hostNode = item?.InternetGatewayDevice?.LANDevice?.[1]?.Hosts?.Host ?? item?.Device?.Hosts?.Host;
+  if (!isNode(hostNode)) {
+    return [];
+  }
+  const connectedHosts = [];
+  // Key angka saja ('1', '2', ...); key berawalan "_" adalah metadata GenieACS.
+  for (const key of Object.keys(hostNode).filter((name) => /^\d+$/.test(name))) {
+    const hostData = hostNode[key];
+    if (!isNode(hostData)) {
+      continue;
+    }
+    const layer2 = hostData?.Layer2Interface?._value;
+    const rawActive = hostData?.Active?._value;
+    connectedHosts.push({
+      hostname: toText(hostData?.HostName?._value) || 'N/A',
+      ip: toText(hostData?.IPAddress?._value) || '-',
+      mac: toText(hostData?.MACAddress?._value) || '-',
+      type: toText(hostData?.InterfaceType?._value)
+        || (typeof layer2 === 'string' && layer2.includes('WLAN') ? '802.11' : 'Ethernet'),
+      active: isEmpty(rawActive) ? undefined : hostIsActive(rawActive),
+    });
+  }
+  return connectedHosts.filter(shouldKeepHost).slice(0, MAX_HOSTS);
+}
+
+// ---- Daftar WiFi (WLAN) --------------------------------------------------------
+// Seperti host: tidak ikut LIVE_PROJECTION karena subtree WLANConfiguration berisi puluhan
+// parameter per SSID. Diambil per perangkat saat tab WLAN dibuka.
+const WLANS_PROJECTION = `${IGD}.LANDevice.1.WLANConfiguration,Device.WiFi.SSID,Device.WiFi.AccessPoint,Device.WiFi.Radio`;
+const MAX_WLANS = 16;
+const DEFAULT_BAND = '20MHz/40MHz';
+
+function numericKeys(node) {
+  return isNode(node) ? Object.keys(node).filter((name) => /^\d+$/.test(name)) : [];
+}
+
+// 2.4 GHz untuk index 1-4 dan 5 GHz untuk 5-8 (asumsi umum). Bila channel dilaporkan, channel
+// yang menentukan: 1-14 = 2.4 GHz, >= 32 = 5 GHz (channel 0 / auto tidak dipakai).
+function frequencyOf(key, channel) {
+  if (channel !== null && channel >= 32) {
+    return '5 GHz';
+  }
+  if (channel !== null && channel >= 1 && channel <= 14) {
+    return '2.4 GHz';
+  }
+  return parseInt(key, 10) > 4 ? '5 GHz' : '2.4 GHz';
+}
+
+// BeaconType "Basic" berarti tanpa WPA: lihat BasicEncryptionModes ("None" = terbuka).
+function securityTr098(wlanData) {
+  const beacon = toText(wlanData?.BeaconType?._value);
+  if (beacon && beacon !== 'Basic') {
+    return beacon;
+  }
+  const basic = toText(wlanData?.BasicEncryptionModes?._value);
+  if (basic && basic !== 'None') {
+    return basic;
+  }
+  return 'Open System';
+}
+
+function wlansTr098(wlanObj) {
+  const wlans = [];
+  for (const key of numericKeys(wlanObj)) {
+    const wlanData = wlanObj[key];
+    if (isNode(wlanData) && wlanData.SSID) {
+      const channel = toNumber(wlanData?.Channel?._value);
+      wlans.push({
+        id: key,
+        ssid: toText(wlanData?.SSID?._value) || 'N/A',
+        password: toText(wlanData?.PreSharedKey?.[1]?.PreSharedKey?._value)
+          || toText(wlanData?.KeyPassphrase?._value)
+          || toText(wlanData?.PreSharedKey?.[1]?.KeyPassphrase?._value)
+          || '-',
+        security: securityTr098(wlanData),
+        freq: frequencyOf(key, channel),
+        band: toText(wlanData?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
+        connected: toNumber(wlanData?.TotalAssociations?._value) ?? 0,
+        status: hostIsActive(wlanData?.Enable?._value),
+      });
+    }
+  }
+  return wlans;
+}
+
+// TR-181: SSID.{i} (nama, enable), AccessPoint.{j} (sandi, keamanan, klien; dirujuk lewat
+// SSIDReference, cadangannya index sama), Radio.{k} (pita frekuensi; dirujuk lewat LowerLayers).
+function wlansTr181(wifi) {
+  const wlans = [];
+  const accessPoints = numericKeys(wifi?.AccessPoint).map((name) => wifi.AccessPoint[name]);
+  for (const key of numericKeys(wifi?.SSID)) {
+    const ssidData = wifi.SSID[key];
+    if (isNode(ssidData) && ssidData.SSID) {
+      const accessPoint = accessPoints.find((entry) => String(entry?.SSIDReference?._value ?? '').endsWith(`WiFi.SSID.${key}`))
+        ?? wifi?.AccessPoint?.[key];
+      const radioIndex = String(ssidData?.LowerLayers?._value ?? '').match(/Radio\.(\d+)/)?.[1];
+      const radio = radioIndex ? wifi?.Radio?.[radioIndex] : undefined;
+      const radioBand = toText(radio?.OperatingFrequencyBand?._value);
+      const mode = toText(accessPoint?.Security?.ModeEnabled?._value);
+      wlans.push({
+        id: key,
+        ssid: toText(ssidData?.SSID?._value) || 'N/A',
+        password: toText(accessPoint?.Security?.KeyPassphrase?._value)
+          || toText(accessPoint?.Security?.PreSharedKey?._value)
+          || '-',
+        security: mode && mode !== 'None' ? mode : 'Open System',
+        freq: radioBand ? radioBand.replace(/GHz/i, ' GHz').replace(/\s+/g, ' ').trim() : frequencyOf(key, null),
+        band: toText(radio?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
+        connected: toNumber(accessPoint?.AssociatedDeviceNumberOfEntries?._value) ?? 0,
+        status: hostIsActive(ssidData?.Enable?._value),
+      });
+    }
+  }
+  return wlans;
+}
+
+function extractWlans(item) {
+  const tr098 = wlansTr098(item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration);
+  const wlans = tr098.length > 0 ? tr098 : wlansTr181(item?.Device?.WiFi);
+  return wlans.slice(0, MAX_WLANS);
+}
+
+module.exports = {
+  LIVE_PROJECTION,
+  HOSTS_PROJECTION,
+  WLANS_PROJECTION,
+  extractHosts,
+  extractWlans,
+  RX_PATHS,
+  TEMP_PATHS,
+  readPath,
+  summarizeDevice,
+};

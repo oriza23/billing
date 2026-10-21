@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { hasValidToken } from './api/auth.js'
 import Dashboard, { DashboardHome } from './Dashboard.jsx'
+import GenieAcs from './GenieAcs.jsx'
 import HotspotOnline from './HotspotOnline.jsx'
 import HotspotProfil from './HotspotProfil.jsx'
 import HotspotStok from './HotspotStok.jsx'
@@ -45,6 +46,9 @@ function App() {
             <Route path="data" element={<LanggananData />} />
             <Route path="tambah" element={<TambahLanggananPppoe />} />
             <Route path="online" element={<PppoeOnline />} />
+          </Route>
+          <Route path="/acs" element={<Dashboard />}>
+            <Route index element={<GenieAcs />} />
           </Route>
           <Route path="/router" element={<Dashboard />}>
             <Route index element={<RouterMaster />} />

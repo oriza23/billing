@@ -208,9 +208,15 @@ function LanggananProfil() {
       Swal.fire('Data belum lengkap', 'Nama profile wajib diisi.', 'warning')
       return
     }
+    if (!form.group_name.trim()) {
+      Swal.fire('Data belum lengkap', 'Group wajib diisi dan harus sama persis dengan nama profil di MikroTik.', 'warning')
+      return
+    }
     const payload = {
       ...form,
       nama_profile: form.nama_profile.trim(),
+      group_name: form.group_name.trim(),
+      rate_limit: form.rate_limit.trim(),
       shared: Number(form.shared),
       hpp: form.hpp === '' ? 0 : form.hpp,
       komisi: form.komisi === '' ? 0 : form.komisi,
@@ -573,19 +579,21 @@ function LanggananProfil() {
                 </select>
               </label>
               <label>
-                Group
+                Group <span style={{ color: '#dc2626' }} aria-hidden="true">*</span>
                 <input
                   value={form.group_name}
                   onChange={(event) => updateForm('group_name', event.target.value)}
-                  placeholder="Nama group RADIUS"
+                  placeholder="Sama persis dengan PPP Profile di MikroTik"
+                  maxLength={64}
+                  required
                 />
               </label>
               <label>
-                Rate Limit
+                Rate Limit (opsional)
                 <input
                   value={form.rate_limit}
                   onChange={(event) => updateForm('rate_limit', event.target.value)}
-                  placeholder="10M/10M"
+                  placeholder="Kosong = ikut limit di MikroTik, atau 10M/10M"
                 />
               </label>
               <label>

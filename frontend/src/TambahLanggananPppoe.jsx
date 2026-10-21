@@ -35,7 +35,7 @@ const REFERENCE_SOURCES = [
   { key: 'routers', url: '/api/routers', label: 'router' },
   { key: 'outlets', url: '/api/outlets', label: 'mitra reseller' },
   { key: 'wilayah', url: '/api/wilayah', label: 'wilayah' },
-  { key: 'servers', url: '/api/langganan/server', label: 'server' },
+  { key: 'servers', url: '/api/routers/servers', label: 'server' },
 ]
 
 const KATEGORI_OPTIONS = ['PPP', 'Hotspot', 'Static', 'DHCP']
@@ -303,20 +303,6 @@ function KoordinatMap({ position, onMove }) {
   )
 }
 
-function AddButton({ label, onClick }) {
-  return (
-    <button
-      type="button"
-      className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-lg border border-gray-300 bg-white text-blue-600 transition-colors duration-300 hover:bg-blue-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-400 dark:hover:bg-gray-700"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-    >
-      <Plus size={18} strokeWidth={2.5} />
-    </button>
-  )
-}
-
 function ToggleSwitch({ id, checked, onChange, label }) {
   return (
     <div className="flex items-center gap-3">
@@ -395,6 +381,19 @@ function TambahLanggananPppoe() {
     hint: row.pemilik || '',
   })), [reference.outlets])
 
+  // Server berasal dari menu Router: ALL SERVER, lalu server milik router terpilih
+  // (ALL ROUTER menampilkan server dari semua router).
+  // Kategori Hotspot memakai server Hotspot, kategori lain memakai server PPPoE.
+  const serverJenis = form.kategori_layanan === 'Hotspot' ? 'hotspot' : 'pppoe'
+  const serverOptions = useMemo(() => [
+    'ALL SERVER',
+    ...new Set(
+      reference.servers
+        .filter((row) => row.jenis === serverJenis && (form.router === 'ALL ROUTER' || row.nama_router === form.router))
+        .map((row) => row.nama),
+    ),
+  ], [reference.servers, serverJenis, form.router])
+
   const subTotal = items.reduce((sum, item) => sum + itemTotal(item), 0)
   const ppnNominal = form.ppn === 'ya' ? Math.round(subTotal * PPN_RATE) : 0
   const grandTotal = subTotal + ppnNominal
@@ -448,44 +447,6 @@ function TambahLanggananPppoe() {
       })
     } catch (requestError) {
       Swal.fire('Gagal', requestError.response?.data?.message || 'Wilayah gagal disimpan.', 'error')
-    }
-  }
-
-  // Tambah server baru langsung dari form: simpan, muat ulang isi dropdown, lalu otomatis dipilih.
-  async function addMaster({ endpoint, payloadKey, nameKey, referenceKey, formKey, title, placeholder }) {
-    const { value, isConfirmed } = await Swal.fire({
-      title,
-      input: 'text',
-      inputPlaceholder: placeholder,
-      inputAttributes: { maxlength: 100 },
-      showCancelButton: true,
-      confirmButtonText: 'Simpan',
-      cancelButtonText: 'Batal',
-      inputValidator: (text) => (text.trim() ? undefined : 'Nama wajib diisi'),
-    })
-    if (!isConfirmed) {
-      return
-    }
-    try {
-      const { data: created } = await api.post(endpoint, { [payloadKey]: value.trim() })
-      let rows = null
-      try {
-        const refreshed = await api.get(endpoint)
-        rows = Array.isArray(refreshed.data) ? refreshed.data : null
-      } catch {
-        // Gagal memuat ulang tidak membatalkan data yang sudah tersimpan; tambahkan manual ke daftar.
-      }
-      setReference((current) => ({
-        ...current,
-        [referenceKey]: rows ?? (
-          current[referenceKey].some((row) => row.id === created.id)
-            ? current[referenceKey]
-            : [...current[referenceKey], { id: created.id, [nameKey]: created[nameKey] }]
-        ),
-      }))
-      update(formKey, created[nameKey])
-    } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data gagal disimpan.', 'error')
     }
   }
 
@@ -791,22 +752,26 @@ function TambahLanggananPppoe() {
               />
             </Field>
             <Field label="Router" htmlFor="router" required>
-              <select id="router" className={inputClass} required {...bind('router')}>
+              <select
+                id="router"
+                className={inputClass}
+                required
+                value={form.router}
+                onChange={(event) => {
+                  // Server milik router tertentu, jadi pilihan server dikosongkan saat router berganti.
+                  setForm((current) => ({ ...current, router: event.target.value, server: '' }))
+                }}
+              >
                 <option value="">Pilih router</option>
+                <option value="ALL ROUTER">ALL ROUTER</option>
                 {reference.routers.map((row) => <option key={row.id} value={row.nama_router}>{row.nama_router}</option>)}
               </select>
             </Field>
             <Field label="Server" htmlFor="server" required>
-              <div className="flex gap-2">
-                <select id="server" className={inputClass} required {...bind('server')}>
-                  <option value="">Pilih server</option>
-                  {reference.servers.map((row) => <option key={row.id} value={row.nama}>{row.nama}</option>)}
-                </select>
-                <AddButton
-                  label="Tambah server baru"
-                  onClick={() => addMaster({ endpoint: '/api/langganan/server', payloadKey: 'nama', nameKey: 'nama', referenceKey: 'servers', formKey: 'server', title: 'Tambah server', placeholder: 'Nama server' })}
-                />
-              </div>
+              <select id="server" className={inputClass} required {...bind('server')}>
+                <option value="">Pilih server</option>
+                {serverOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
             </Field>
             <Field label="Address list" htmlFor="address-list" className="md:col-span-2">
               <input id="address-list" type="text" className={inputClass} placeholder="Nama address list di router" {...bind('address_list')} />
@@ -817,7 +782,11 @@ function TambahLanggananPppoe() {
                 className={inputClass}
                 required
                 value={form.kategori_layanan}
-                onChange={(event) => update('kategori_layanan', event.target.value)}
+                onChange={(event) => setForm((current) => ({
+                  ...current,
+                  kategori_layanan: event.target.value,
+                  server: '',
+                }))}
               >
                 <option value="">Pilih kategori layanan</option>
                 {KATEGORI_OPTIONS.map((name) => <option key={name} value={name}>{name}</option>)}

@@ -108,8 +108,11 @@ function PppoeProfil() {
       resetForm()
       await fetchProfil()
       notifySuccess()
-    } catch {
-      setFormError(editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan profil.')
+    } catch (requestError) {
+      setFormError(
+        requestError.response?.data?.message
+        || (editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan profil.'),
+      )
     } finally {
       setSaving(false)
     }
@@ -140,8 +143,8 @@ function PppoeProfil() {
       }
       await fetchProfil()
       notifySuccess()
-    } catch {
-      setFormError('Gagal menghapus profil.')
+    } catch (requestError) {
+      setFormError(requestError.response?.data?.message || 'Gagal menghapus profil.')
     } finally {
       setDeletingGroup('')
     }
@@ -166,7 +169,8 @@ function PppoeProfil() {
             <input
               type="text"
               name="groupname"
-              placeholder="Nama profil"
+              maxLength={64}
+              placeholder="Sama persis dengan PPP Profile di MikroTik"
               value={groupname}
               onChange={(event) => setGroupname(event.target.value)}
               disabled={editMode}
@@ -175,14 +179,13 @@ function PppoeProfil() {
           </label>
 
           <label className="profil-field">
-            <span>Limit Kecepatan</span>
+            <span>Limit Kecepatan (opsional)</span>
             <input
               type="text"
               name="rate_limit"
-              placeholder="10M/10M"
+              placeholder="Kosong = ikut limit di MikroTik, atau 10M/10M"
               value={rateLimit}
               onChange={(event) => setRateLimit(event.target.value)}
-              required
             />
           </label>
         </div>
@@ -232,7 +235,9 @@ function PppoeProfil() {
                       <td>{index + 1}</td>
                       <td>{item.groupname}</td>
                       <td>
-                        <span className="profil-rate">{item.rate_limit}</span>
+                        {item.rate_limit
+                          ? <span className="profil-rate">{item.rate_limit}</span>
+                          : <span className="profil-rate-mikrotik">Ikut MikroTik</span>}
                       </td>
                       <td>
                         <div className="profil-actions">

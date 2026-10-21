@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
-import { Check, Funnel, List, Menu, Plus, Search, Trash, Wifi, X } from 'lucide-react'
+import { Check, Funnel, List, Menu, Pencil, Plus, Search, Trash, Wifi, X } from 'lucide-react'
 import './HotspotProfil.css'
 
 const columns = [
@@ -54,6 +54,7 @@ function HotspotProfil() {
   const [currentPage, setCurrentPage] = useState(1)
   const [searchTerm, setSearchTerm] = useState('')
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [editingGroup, setEditingGroup] = useState('')
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState(emptyForm)
 
@@ -116,7 +117,50 @@ function HotspotProfil() {
   }
 
   function openModal() {
+    setEditingGroup('')
     setForm(emptyForm)
+    setIsModalOpen(true)
+  }
+
+  function openEditSelected() {
+    if (selectedProfiles.length === 0) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Pilih minimal satu data',
+      })
+      return
+    }
+    if (selectedProfiles.length > 1) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Pilih satu profil saja',
+      })
+      return
+    }
+
+    const groupname = selectedProfiles[0]
+    const item = profil.find((row) => row.mikrotik_group === groupname)
+    if (!item) {
+      Swal.fire({
+        icon: 'error',
+        title: 'Profil tidak ditemukan',
+      })
+      return
+    }
+
+    setEditingGroup(groupname)
+    setForm({
+      nama_profile: item.nama_profile || '',
+      mikrotik_group: item.mikrotik_group || '',
+      address_list: item.address_list || '',
+      rate_limit: item.rate_limit || '',
+      shared: item.shared ?? 1,
+      masa_aktif: item.masa_aktif ?? '',
+      masa_aktif_satuan: item.masa_aktif_satuan || 'HARI',
+      harga_jual: item.harga_jual ?? '',
+      komisi_reseller: item.komisi_reseller ?? '',
+    })
+    setIsMenuOpen(false)
     setIsModalOpen(true)
   }
 
@@ -125,6 +169,7 @@ function HotspotProfil() {
       return
     }
     setIsModalOpen(false)
+    setEditingGroup('')
     setForm(emptyForm)
   }
 
@@ -196,8 +241,13 @@ function HotspotProfil() {
 
     setSaving(true)
     try {
-      await api.post('/api/hotspot/profil', payload)
+      if (editingGroup) {
+        await api.put(`/api/hotspot/profil/${encodeURIComponent(editingGroup)}`, payload)
+      } else {
+        await api.post('/api/hotspot/profil', payload)
+      }
       setIsModalOpen(false)
+      setEditingGroup('')
       setForm(emptyForm)
       const rows = await fetchProfil()
       setProfil(rows)
@@ -288,6 +338,10 @@ function HotspotProfil() {
               <button type="button" role="menuitem" onClick={showStatusLater}>
                 <X size={16} strokeWidth={2.2} />
                 <span>Set Tidak Aktif</span>
+              </button>
+              <button type="button" role="menuitem" onClick={openEditSelected}>
+                <Pencil size={16} strokeWidth={2.2} />
+                <span>Edit Terpilih</span>
               </button>
               <button type="button" role="menuitem" className="is-danger" onClick={handleDeleteSelected}>
                 <Trash size={16} strokeWidth={2.2} />
@@ -447,8 +501,8 @@ function HotspotProfil() {
             onMouseDown={(event) => event.stopPropagation()}
           >
             <header className="hprofil-modal-head">
-              <h2 id="hprofil-modal-title">Tambah Profil</h2>
-              <p>Group ini akan dipakai sebagai nama profil di MikroTik.</p>
+              <h2 id="hprofil-modal-title">{editingGroup ? 'Edit Profil' : 'Tambah Profil'}</h2>
+              <p>{editingGroup ? 'Perubahan disimpan ke profil yang tercentang.' : 'Group ini akan dipakai sebagai nama profil di MikroTik.'}</p>
             </header>
             <form className="hprofil-form" onSubmit={handleSaveProfile}>
               <label className="hprofil-field">
@@ -464,9 +518,11 @@ function HotspotProfil() {
                 <span>Mikrotik group</span>
                 <input
                   type="text"
+                  placeholder="Sama persis dengan User Profile di MikroTik"
                   value={form.mikrotik_group}
                   onChange={(event) => updateForm('mikrotik_group', event.target.value)}
                   required
+                  readOnly={Boolean(editingGroup)}
                 />
               </label>
               <label className="hprofil-field">
@@ -479,12 +535,12 @@ function HotspotProfil() {
                 />
               </label>
               <label className="hprofil-field">
-                <span>Mikrotik rate limit</span>
+                <span>Mikrotik rate limit (opsional)</span>
                 <input
                   type="text"
                   value={form.rate_limit}
                   onChange={(event) => updateForm('rate_limit', event.target.value)}
-                  placeholder="1M/1M"
+                  placeholder="Kosong = ikut limit di MikroTik, atau 1M/1M"
                 />
               </label>
               <label className="hprofil-field">

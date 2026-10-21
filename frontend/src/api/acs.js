@@ -37,3 +37,18 @@ export const getAcsDeviceHosts = (serverId, deviceId, config = {}) =>
 // Berisi sandi WiFi, jadi hanya bisa diakses admin. Diambil saat tab WLAN dibuka.
 export const getAcsDeviceWlans = (serverId, deviceId, config = {}) =>
   api.get(`${BASE}/devices/wlans`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)
+
+// Push perubahan WLAN ke ONU (setParameterValues lewat GenieACS). Hanya admin.
+// payload: { server_id, deviceId (_id GenieACS), wlanId, ssid, password, status (boolean) }
+// -> { success, applied, changed, message }
+export const updateAcsWlan = (payload) => api.post(`${BASE}/update-wlan`, payload).then((res) => res.data)
+
+// Konfigurasi LAN (IP gateway, DHCP server, DNS) satu perangkat ->
+// { lanConfig: { ip, subnet, mac, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns: [3] } }. Diambil saat tab LAN dibuka.
+export const getAcsDeviceLan = (serverId, deviceId, config = {}) =>
+  api.get(`${BASE}/devices/lan`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)
+
+// Push perubahan LAN (IP gateway, DHCP, DNS) ke ONU lewat GenieACS. Hanya admin.
+// payload: { server_id, deviceId (_id GenieACS), ip, subnet, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns1, dns2, dns3 }
+// -> { success, applied, changed, message }
+export const updateAcsLan = (payload) => api.post(`${BASE}/update-lan`, payload).then((res) => res.data)

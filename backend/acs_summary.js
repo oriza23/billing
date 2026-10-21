@@ -421,10 +421,64 @@ function extractWlans(item) {
   return wlans.slice(0, MAX_WLANS);
 }
 
+// ---- Konfigurasi LAN (IP gateway, DHCP server, DNS) -----------------------------
+// Seperti host/WLAN: diambil per perangkat saat tab LAN dibuka, tidak ikut LIVE_PROJECTION.
+const LAN_PROJECTION = [
+  `${IGD}.LANDevice.1.LANHostConfigManagement`,
+  `${IGD}.LANDevice.1.LANEthernetInterfaceConfig.1.MACAddress`,
+  'Device.IP.Interface.1',
+  'Device.DHCPv4.Server',
+  'Device.Ethernet.Interface.1.MACAddress',
+].join(',');
+
+const LAN_BASE = `${IGD}.LANDevice.1.LANHostConfigManagement`;
+
+// Teks tidak kosong atau '-'.
+function textOrDash(value) {
+  return toText(value) || '-';
+}
+
+// DNSServers berformat "8.8.8.8,8.8.4.4": dipecah, dipangkas, dan selalu 3 elemen ('-' bila kosong).
+function parseDns(value) {
+  const servers = String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean).slice(0, 3);
+  while (servers.length < 3) {
+    servers.push('-');
+  }
+  return servers;
+}
+
+// Utama TR-098 (LANHostConfigManagement). Cadangan TR-181: Device.IP.Interface.1 dan
+// Device.DHCPv4.Server.Pool.1 (diasumsikan interface 1 = LAN).
+function extractLanConfig(item) {
+  const pool = 'Device.DHCPv4.Server.Pool.1';
+  const dhcpEnable = firstOf(item, [`${LAN_BASE}.DHCPServerEnable`, 'Device.DHCPv4.Server.Enable', `${pool}.Enable`]);
+  return {
+    ip: textOrDash(firstOf(item, [
+      `${LAN_BASE}.IPInterface.1.IPInterfaceIPAddress`,
+      'Device.IP.Interface.1.IPv4Address.1.IPAddress',
+    ])),
+    subnet: textOrDash(firstOf(item, [
+      `${LAN_BASE}.IPInterface.1.IPInterfaceSubnetMask`,
+      'Device.IP.Interface.1.IPv4Address.1.SubnetMask',
+    ])),
+    mac: textOrDash(firstOf(item, [
+      `${IGD}.LANDevice.1.LANEthernetInterfaceConfig.1.MACAddress`,
+      'Device.Ethernet.Interface.1.MACAddress',
+    ])),
+    dhcpEnabled: hostIsActive(dhcpEnable),
+    dhcpMin: textOrDash(firstOf(item, [`${LAN_BASE}.MinAddress`, `${pool}.MinAddress`])),
+    dhcpMax: textOrDash(firstOf(item, [`${LAN_BASE}.MaxAddress`, `${pool}.MaxAddress`])),
+    leaseTime: textOrDash(firstOf(item, [`${LAN_BASE}.DHCPLeaseTime`, `${pool}.LeaseTime`])),
+    dns: parseDns(firstOf(item, [`${LAN_BASE}.DNSServers`, `${pool}.DNSServers`])),
+  };
+}
+
 module.exports = {
   LIVE_PROJECTION,
   HOSTS_PROJECTION,
   WLANS_PROJECTION,
+  LAN_PROJECTION,
+  extractLanConfig,
   extractHosts,
   extractWlans,
   RX_PATHS,

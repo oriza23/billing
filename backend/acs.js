@@ -356,10 +356,17 @@ async function sendTask(server, deviceInput, action) {
   if (action === 'summon' && !device.data_model) {
     device.data_model = await detectDataModel(server, device.device_id);
   }
-  const path = `/devices/${encodeURIComponent(device.device_id)}/tasks?timeout=3000&connection_request`;
-  let status;
+  const { status } = await postTask(server, device.device_id, taskBody(action, device));
+  return status === 202 ? 'Diantrikan, ONU belum merespons' : 'Terkirim';
+}
+
+// POST /devices/{id}/tasks?timeout=3000&connection_request. Status 200 = tugas selesai dikerjakan ONU,
+// 202 = diantrikan (ONU belum merespons). Mengembalikan { status, data }.
+async function postTask(server, deviceId, body) {
+  const path = `/devices/${encodeURIComponent(deviceId)}/tasks?timeout=3000&connection_request`;
+  let result;
   try {
-    ({ status } = await nbiRequest(server, 'POST', path, { body: taskBody(action, device), timeout: TASK_TIMEOUT_MS }));
+    result = await nbiRequest(server, 'POST', path, { body, timeout: TASK_TIMEOUT_MS });
   } catch (error) {
     if (error.code === 'TIMEOUT') {
       // Permintaan sudah terkirim; GenieACS biasanya sudah mengantrikan tugasnya sebelum menunggu ONU.
@@ -371,10 +378,61 @@ async function sendTask(server, deviceInput, action) {
     }
     throw error;
   }
-  if (status === 404) {
+  if (result.status === 404) {
     throw new NbiError('Perangkat tidak ditemukan di GenieACS (coba SINKRON)', 404);
   }
-  return status === 202 ? 'Diantrikan, ONU belum merespons' : 'Terkirim';
+  return result;
+}
+
+// Konfigurasi WLAN saat ini dari ACS: { model, wlanNode }. model = 'InternetGatewayDevice' (TR-098)
+// atau 'Device' (TR-181); wlanNode = node LANDevice.1.WLANConfiguration.{wlanId} (hanya TR-098).
+// null bila perangkat tidak ada di ACS.
+async function readWlanTarget(server, deviceId, wlanId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: deviceId }),
+    projection: `InternetGatewayDevice.LANDevice.1.WLANConfiguration.${wlanId},Device.DeviceInfo`,
+  });
+  const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
+  const doc = Array.isArray(data) ? data[0] : null;
+  if (!doc) {
+    return null;
+  }
+  const wlanNode = doc.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration?.[wlanId];
+  return {
+    model: wlanNode ? 'InternetGatewayDevice' : (isParamNode(doc.Device) ? 'Device' : 'InternetGatewayDevice'),
+    wlanNode: isParamNode(wlanNode) ? wlanNode : undefined,
+  };
+}
+
+// Konfigurasi LAN saat ini dari ACS: { model, lanNode } (lanNode = LANDevice.1.LANHostConfigManagement,
+// hanya TR-098). null bila perangkat tidak ada di ACS.
+async function readLanTarget(server, deviceId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: deviceId }),
+    projection: `InternetGatewayDevice.LANDevice.1.LANHostConfigManagement,Device.DeviceInfo`,
+  });
+  const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
+  const doc = Array.isArray(data) ? data[0] : null;
+  if (!doc) {
+    return null;
+  }
+  const lanNode = doc.InternetGatewayDevice?.LANDevice?.[1]?.LANHostConfigManagement;
+  return {
+    model: lanNode ? 'InternetGatewayDevice' : (isParamNode(doc.Device) ? 'Device' : 'InternetGatewayDevice'),
+    lanNode: isParamNode(lanNode) ? lanNode : undefined,
+  };
+}
+
+// Mengirim task setParameterValues. parameterValues = [[path, nilai, tipe], ...].
+// Hasil: { applied: true } bila ONU sudah menerapkan, { applied: false } bila hanya diantrikan.
+async function sendSetParameterValues(server, deviceId, parameterValues) {
+  const { status, data } = await postTask(server, deviceId, { name: 'setParameterValues', parameterValues });
+  // Bila ONU menolak nilainya (fault TR-069), GenieACS melaporkannya pada task.
+  if (isParamNode(data) && data.fault) {
+    const detail = [data.fault.code, data.fault.message].filter(Boolean).join(': ');
+    throw new NbiError(`ONU menolak perubahan${detail ? ` (${detail})` : ''}`, undefined, 'FAULT');
+  }
+  return { applied: status !== 202 };
 }
 
 async function deleteRemoteDevice(server, device) {
@@ -396,5 +454,8 @@ module.exports = {
   mapDevice,
   statusCutoffs,
   sendTask,
+  readWlanTarget,
+  readLanTarget,
+  sendSetParameterValues,
   deleteRemoteDevice,
 };

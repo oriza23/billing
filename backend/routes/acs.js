@@ -4,8 +4,11 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const acs = require('../acs');
+const { parseWlanUpdate, planWlanUpdate } = require('../acs_wlan');
+const { parseLanUpdate, planLanUpdate } = require('../acs_lan');
 const {
-  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, extractHosts, extractWlans, summarizeDevice,
+  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, LAN_PROJECTION, extractHosts, extractWlans,
+  extractLanConfig, summarizeDevice,
 } = require('../acs_summary');
 
 const router = express.Router();
@@ -220,12 +223,122 @@ deviceDetailRoute('/devices/hosts', {
   label: 'host',
 });
 
+// Konfigurasi LAN (IP gateway, DHCP, DNS) -> { lanConfig: {...} }
+deviceDetailRoute('/devices/lan', {
+  projection: LAN_PROJECTION,
+  build: (item) => ({ lanConfig: extractLanConfig(item) }),
+  label: 'LAN',
+});
+
 // Daftar WiFi -> { wlans: [...] }. Memuat sandi WiFi pelanggan, jadi hanya untuk admin.
 deviceDetailRoute('/devices/wlans', {
   projection: WLANS_PROJECTION,
   build: (item) => ({ wlans: extractWlans(item) }),
   label: 'WLAN',
   middlewares: [requireAdmin],
+});
+
+// ---- Update WLAN: push perubahan SSID / password / status ke ONU (setParameterValues) ----
+// Body: { server_id, deviceId (_id GenieACS), wlanId, ssid, password, status }.
+// Hanya admin. Hanya parameter yang berbeda dari konfigurasi saat ini yang dikirim.
+router.post('/update-wlan', requireAdmin, async (req, res) => {
+  const parsed = parseWlanUpdate(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const {
+    deviceId, wlanId, ssid, password, status,
+  } = parsed.value;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+
+    const target = await acs.readWlanTarget(server, deviceId, wlanId);
+    if (!target) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    if (target.model === 'Device') {
+      return fail(res, 400, 'ONU ini memakai data model TR-181; update WLAN baru mendukung TR-098 (InternetGatewayDevice)');
+    }
+    if (!target.wlanNode) {
+      return fail(res, 404, `WLAN ${wlanId} tidak ditemukan pada perangkat (coba Summon lalu muat ulang)`);
+    }
+
+    const { parameterValues, changed } = planWlanUpdate({
+      wlanId, wlanNode: target.wlanNode, ssid, password, status,
+    });
+    if (parameterValues.length === 0) {
+      return res.json({ success: true, message: 'Tidak ada perubahan untuk dikirim', changed });
+    }
+
+    const { applied } = await acs.sendSetParameterValues(server, deviceId, parameterValues);
+    // Catatan audit tanpa nilai password.
+    console.log(`[ACS update-wlan] ${req.user?.username || '-'} ${server.host}:${server.port} ${deviceId} WLAN ${wlanId}: ${changed.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      changed,
+      message: applied
+        ? 'Perubahan WLAN diterapkan ke ONU'
+        : 'Perubahan WLAN masuk antrean GenieACS dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS update-wlan] ${deviceId} WLAN ${wlanId}: ${error.message}`);
+    const status502 = error instanceof acs.NbiError;
+    return fail(res, status502 ? 502 : 500, status502 ? error.message : 'Gagal mengirim perubahan WLAN');
+  }
+});
+
+// ---- Update LAN: push IP gateway / DHCP / DNS ke ONU (setParameterValues) -------------
+// Body: { server_id, deviceId (_id GenieACS), ip, subnet, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns1, dns2, dns3 }.
+// Hanya admin. Hanya parameter yang berbeda dari konfigurasi saat ini yang dikirim.
+router.post('/update-lan', requireAdmin, async (req, res) => {
+  const parsed = parseLanUpdate(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const { value } = parsed;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+
+    const target = await acs.readLanTarget(server, value.deviceId);
+    if (!target) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    if (target.model === 'Device') {
+      return fail(res, 400, 'ONU ini memakai data model TR-181; update LAN baru mendukung TR-098 (InternetGatewayDevice)');
+    }
+    if (!target.lanNode?.IPInterface?.[1]?.IPInterfaceIPAddress) {
+      return fail(res, 404, 'Konfigurasi LAN tidak ditemukan pada perangkat (coba Summon lalu muat ulang)');
+    }
+
+    const { parameterValues, changed } = planLanUpdate({ lanNode: target.lanNode, values: value });
+    if (parameterValues.length === 0) {
+      return res.json({ success: true, message: 'Tidak ada perubahan untuk dikirim', changed });
+    }
+
+    const { applied } = await acs.sendSetParameterValues(server, value.deviceId, parameterValues);
+    console.log(`[ACS update-lan] ${req.user?.username || '-'} ${server.host}:${server.port} ${value.deviceId}: ${changed.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      changed,
+      message: applied
+        ? 'Perubahan LAN diterapkan ke ONU'
+        : 'Perubahan LAN masuk antrean GenieACS dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS update-lan] ${value.deviceId}: ${error.message}`);
+    const isNbiError = error instanceof acs.NbiError;
+    return fail(res, isNbiError ? 502 : 500, isNbiError ? error.message : 'Gagal mengirim perubahan LAN');
+  }
 });
 
 // ---- Daftar ONU hasil SINKRON (tersimpan di DB web) + statistik ---------------

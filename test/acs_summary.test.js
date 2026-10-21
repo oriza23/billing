@@ -391,3 +391,52 @@ test('extractWlans: data kosong -> array kosong; projection WLAN terpisah dari d
   assert.ok(WLANS_PROJECTION.includes('WLANConfiguration'));
   assert.ok(!LIVE_PROJECTION.split(',').some((path) => path.endsWith('WLANConfiguration')));
 });
+
+const { extractLanConfig, LAN_PROJECTION } = require('../backend/acs_summary');
+
+test('extractLanConfig: TR-098 LANHostConfigManagement lengkap', () => {
+  const item = { InternetGatewayDevice: { LANDevice: { 1: {
+    LANEthernetInterfaceConfig: { 1: wlanNode({ MACAddress: 'AA:BB:CC:00:11:22' }) },
+    LANHostConfigManagement: {
+      IPInterface: { 1: wlanNode({ IPInterfaceIPAddress: '192.168.1.1', IPInterfaceSubnetMask: '255.255.255.0' }) },
+      DHCPServerEnable: { _value: true },
+      MinAddress: { _value: '192.168.1.2' },
+      MaxAddress: { _value: '192.168.1.254' },
+      DHCPLeaseTime: { _value: 86400 },
+      DNSServers: { _value: '8.8.8.8, 1.1.1.1' },
+    },
+  } } } };
+  assert.deepEqual(extractLanConfig(item), {
+    ip: '192.168.1.1', subnet: '255.255.255.0', mac: 'AA:BB:CC:00:11:22', dhcpEnabled: true,
+    dhcpMin: '192.168.1.2', dhcpMax: '192.168.1.254', leaseTime: '86400', dns: ['8.8.8.8', '1.1.1.1', '-'],
+  });
+});
+
+test('extractLanConfig: nilai DHCP berbagai bentuk, 3 DNS, dan data kosong', () => {
+  const cfg = (extra) => extractLanConfig({ InternetGatewayDevice: { LANDevice: { 1: { LANHostConfigManagement: extra } } } });
+  assert.equal(cfg({ DHCPServerEnable: { _value: '1' } }).dhcpEnabled, true);
+  assert.equal(cfg({ DHCPServerEnable: { _value: 'true' } }).dhcpEnabled, true);
+  assert.equal(cfg({ DHCPServerEnable: { _value: '0' } }).dhcpEnabled, false);
+  assert.equal(cfg({ DHCPServerEnable: { _value: false } }).dhcpEnabled, false);
+  assert.deepEqual(cfg({ DNSServers: { _value: '1.1.1.1,8.8.8.8,9.9.9.9,4.4.4.4' } }).dns, ['1.1.1.1', '8.8.8.8', '9.9.9.9']);
+  assert.deepEqual(cfg({ DNSServers: { _value: ',  ,' } }).dns, ['-', '-', '-']);
+  assert.deepEqual(extractLanConfig({}), {
+    ip: '-', subnet: '-', mac: '-', dhcpEnabled: false, dhcpMin: '-', dhcpMax: '-', leaseTime: '-', dns: ['-', '-', '-'],
+  });
+  assert.deepEqual(extractLanConfig(null).dns, ['-', '-', '-']);
+});
+
+test('extractLanConfig: cadangan TR-181 dan projection LAN terpisah dari daftar ONU', () => {
+  const cfg = extractLanConfig({ Device: {
+    IP: { Interface: { 1: { IPv4Address: { 1: wlanNode({ IPAddress: '10.0.0.1', SubnetMask: '255.255.0.0' }) } } } },
+    DHCPv4: { Server: { Enable: { _value: true }, Pool: { 1: wlanNode({ MinAddress: '10.0.0.10', MaxAddress: '10.0.0.99', LeaseTime: 3600, DNSServers: '10.0.0.1' }) } } },
+  } });
+  assert.equal(cfg.ip, '10.0.0.1');
+  assert.equal(cfg.subnet, '255.255.0.0');
+  assert.equal(cfg.dhcpEnabled, true);
+  assert.equal(cfg.dhcpMin, '10.0.0.10');
+  assert.equal(cfg.leaseTime, '3600');
+  assert.deepEqual(cfg.dns, ['10.0.0.1', '-', '-']);
+  assert.ok(LAN_PROJECTION.includes('LANHostConfigManagement'));
+  assert.ok(!LIVE_PROJECTION.includes('LANHostConfigManagement'));
+});

@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, Flag, X } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { Eye, EyeOff, Flag, Globe, Network, Pencil, Server, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import {
   createAcsServer,
   deleteAcsDevices,
   deleteAcsServer,
   getAcsDeviceHosts,
+  getAcsDeviceLan,
   getAcsDeviceWlans,
   getAcsDevices,
   getAcsServers,
@@ -13,6 +14,8 @@ import {
   resetAcsDevices,
   summonAcsDevices,
   syncAcs,
+  updateAcsLan,
+  updateAcsWlan,
 } from './api/acs.js'
 import ServerPagination from './ServerPagination.jsx'
 
@@ -364,6 +367,404 @@ function WlanPassword({ value }) {
   )
 }
 
+const WLAN_SECURITY_OPTIONS = ['WPA/WPA2-PSK', 'WPA2-PSK', 'WPA-PSK', 'Open System']
+const EMPTY_WLAN_FORM = { ssid: '', security: '', password: '', status: true }
+
+// Nilai keamanan dari ACS (BeaconType TR-098 / ModeEnabled TR-181) -> label yang ramah di form.
+function securityLabel(raw) {
+  const value = String(raw ?? '').trim()
+  const known = {
+    '11i': 'WPA2-PSK',
+    WPA: 'WPA-PSK',
+    WPAand11i: 'WPA/WPA2-PSK',
+    'WPA2-Personal': 'WPA2-PSK',
+    'WPA-Personal': 'WPA-PSK',
+    'WPA-WPA2-Personal': 'WPA/WPA2-PSK',
+    None: 'Open System',
+  }
+  return known[value] ?? (value || 'Open System')
+}
+
+function wlanFormFrom(wlan) {
+  return {
+    ssid: wlan.ssid === 'N/A' ? '' : wlan.ssid,
+    security: securityLabel(wlan.security),
+    password: !wlan.password || wlan.password === '-' ? '' : wlan.password,
+    status: Boolean(wlan.status),
+  }
+}
+
+const formInput =
+  'h-10 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-slate-600 dark:bg-slate-900 dark:text-gray-100 dark:disabled:bg-slate-700'
+
+function FormField({ label, hint, children }) {
+  return (
+    <div className="grid gap-1.5 sm:grid-cols-[8rem_1fr] sm:gap-4">
+      <span className="pt-2 text-[13px] font-bold text-gray-700 dark:text-gray-200">{label}</span>
+      <div>
+        {children}
+        {hint && <p className="m-0 mt-1 text-xs text-gray-500 dark:text-gray-400">{hint}</p>}
+      </div>
+    </div>
+  )
+}
+
+// Pop-up edit WLAN (berlapis di atas modal detail). Saat ini belum mengirim perubahan ke ONU.
+function EditWlanModal({ wlan, form, updating, onChange, onClose, onSubmit }) {
+  const [showPassword, setShowPassword] = useState(false)
+
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const isOpen = form.security === 'Open System'
+  const securityOptions = WLAN_SECURITY_OPTIONS.includes(form.security) || !form.security
+    ? WLAN_SECURITY_OPTIONS
+    : [...WLAN_SECURITY_OPTIONS, form.security]
+
+  return (
+    <div
+      className="fixed inset-0 z-70 flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+    >
+      <form
+        className="w-full max-w-md rounded-lg bg-white shadow-xl dark:bg-slate-800"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="acs-wlan-edit-title"
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSubmit()
+        }}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-slate-700">
+          <div>
+            <h2 id="acs-wlan-edit-title" className="m-0 text-base font-bold tracking-wide text-gray-900 dark:text-gray-100">
+              UPDATE WLAN
+            </h2>
+            <p className="m-0 mt-0.5 text-xs text-gray-500 dark:text-gray-400">WLAN {wlan.id} · {wlan.freq}</p>
+          </div>
+          <button
+            type="button"
+            className="grid h-8 w-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
+            aria-label="Tutup"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="grid gap-5 px-6 py-5">
+          <FormField label="SSID" hint="Min 1 max 32 Characters">
+            <input
+              className={formInput}
+              type="text"
+              minLength={1}
+              maxLength={32}
+              required
+              disabled={updating}
+              value={form.ssid}
+              onChange={(event) => onChange('ssid', event.target.value)}
+            />
+          </FormField>
+
+          <FormField label="Security Mode" hint="Perubahan mode keamanan belum didukung">
+            <select
+              className={formInput}
+              disabled
+              value={form.security}
+              onChange={(event) => onChange('security', event.target.value)}
+            >
+              {securityOptions.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </FormField>
+
+          <FormField label="Password" hint={isOpen ? 'Tidak diperlukan untuk Open System' : 'Min 8 max 20 Characters'}>
+            <div className="relative">
+              <input
+                className={`${formInput} pr-10`}
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={20}
+                required={!isOpen}
+                disabled={isOpen || updating}
+                value={isOpen ? '' : form.password}
+                onChange={(event) => onChange('password', event.target.value)}
+              />
+              <button
+                type="button"
+                className="absolute top-1/2 right-1.5 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded border-0 bg-transparent text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed dark:text-gray-300 dark:hover:bg-slate-700"
+                aria-label={showPassword ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
+                disabled={isOpen}
+                onClick={() => setShowPassword((current) => !current)}
+              >
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </FormField>
+
+          <FormField label="Status">
+            <select
+              className={formInput}
+              disabled={updating}
+              value={String(form.status)}
+              onChange={(event) => onChange('status', event.target.value === 'true')}
+            >
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </FormField>
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4 dark:border-slate-700">
+          <button
+            type="button"
+            className="h-10 cursor-pointer rounded-lg border-0 bg-gray-500 px-5 text-[13px] font-bold text-white transition-colors hover:bg-gray-600"
+            onClick={onClose}
+          >
+            Close
+          </button>
+          <button
+            type="submit"
+            className="h-10 cursor-pointer rounded-lg border-0 bg-blue-600 px-5 text-[13px] font-bold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={updating}
+          >
+            {updating ? 'Updating...' : 'Update'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+// Kartu pada tab LAN: header (ikon + judul) dan isi.
+function LanCard({ icon: Icon, iconClass, title, className = '', children }) {
+  return (
+    <div className={`rounded-lg border border-gray-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800 ${className}`}>
+      <div className="mb-4 flex items-center gap-2 border-b border-gray-100 pb-3 dark:border-slate-700">
+        <Icon size={18} className={iconClass} />
+        <h3 className="m-0 text-sm font-bold text-gray-900 dark:text-gray-100">{title}</h3>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function LanRow({ label, children }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2 text-sm">
+      <span className="text-gray-500 dark:text-gray-400">{label}</span>
+      <span className="min-w-0 truncate text-right font-semibold text-gray-900 dark:text-gray-100">{children}</span>
+    </div>
+  )
+}
+
+const EMPTY_LAN_FORM = {
+  ip: '', subnet: '', dhcpEnabled: false, dhcpMin: '', dhcpMax: '', leaseTime: '', dns1: '', dns2: '', dns3: '',
+}
+
+// Pola IPv4 untuk validasi isian form (0-255 per segmen).
+const IPV4_FORM_PATTERN = '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+const IPV4_FORM_HINT = 'Format IPv4, contoh 192.168.1.1'
+
+// Backend memakai '-' untuk nilai yang tidak ada; di form itu harus menjadi isian kosong.
+function blankIfDash(value) {
+  return !value || value === '-' ? '' : String(value)
+}
+
+function lanFormFrom(lanConfig) {
+  return {
+    ip: blankIfDash(lanConfig?.ip),
+    subnet: blankIfDash(lanConfig?.subnet),
+    dhcpEnabled: Boolean(lanConfig?.dhcpEnabled),
+    dhcpMin: blankIfDash(lanConfig?.dhcpMin),
+    dhcpMax: blankIfDash(lanConfig?.dhcpMax),
+    leaseTime: blankIfDash(lanConfig?.leaseTime),
+    dns1: blankIfDash(lanConfig?.dns?.[0]),
+    dns2: blankIfDash(lanConfig?.dns?.[1]),
+    dns3: blankIfDash(lanConfig?.dns?.[2]),
+  }
+}
+
+function LanFormRow({ label, children }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-1/3 shrink-0 text-[13px] font-semibold text-gray-700 dark:text-gray-200">{label}</span>
+      <div className="w-2/3">{children}</div>
+    </div>
+  )
+}
+
+function LanSectionTitle({ number, circleClass, children }) {
+  return (
+    <div className="mb-4 flex items-center gap-2.5">
+      <span className={`grid h-6 w-6 place-items-center rounded-full text-xs font-bold text-white ${circleClass}`}>{number}</span>
+      <h3 className="m-0 text-sm font-bold text-gray-900 dark:text-gray-100">{children}</h3>
+    </div>
+  )
+}
+
+// Pop-up edit LAN (berlapis di atas modal detail). Saat ini belum mengirim perubahan ke ONU.
+function EditLanModal({ form, updating, onChange, onClose, onSubmit }) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const dhcpOff = !form.dhcpEnabled
+  // Input alamat IPv4 (opsional kecuali required); disabled bila bagian DHCP dimatikan.
+  const ipInput = (field, { required = false, disabled = false } = {}) => (
+    <input
+      className={formInput}
+      type="text"
+      inputMode="decimal"
+      placeholder="0.0.0.0"
+      pattern={IPV4_FORM_PATTERN}
+      title={IPV4_FORM_HINT}
+      required={required}
+      disabled={disabled || updating}
+      value={form[field]}
+      onChange={(event) => onChange(field, event.target.value.trim())}
+    />
+  )
+
+  return (
+    <div
+      className="fixed inset-0 z-70 flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+    >
+      <form
+        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white shadow-xl dark:bg-slate-800"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="acs-lan-edit-title"
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSubmit()
+        }}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-6 py-4 dark:border-slate-700">
+          <div>
+            <h2 id="acs-lan-edit-title" className="m-0 text-base font-bold text-gray-900 dark:text-gray-100">
+              Pengaturan Jaringan LAN
+            </h2>
+            <p className="m-0 mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Ubah konfigurasi IP dan layanan DHCP perangkat
+            </p>
+          </div>
+          <button
+            type="button"
+            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
+            aria-label="Tutup"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="px-6 py-5">
+          <LanSectionTitle number="1" circleClass="bg-blue-600">Konfigurasi IP Dasar</LanSectionTitle>
+
+          <div className="grid gap-3.5">
+            <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2.5 dark:bg-slate-900/40">
+              <span className="text-[13px] font-bold tracking-wide text-gray-700 dark:text-gray-200">DHCP SERVER</span>
+              <div className="flex items-center gap-2.5">
+                <span className="text-xs text-gray-500 dark:text-gray-400">Aktifkan</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={form.dhcpEnabled}
+                  aria-label="Aktifkan DHCP Server"
+                  disabled={updating}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-0 transition-colors ${form.dhcpEnabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-slate-600'}`}
+                  onClick={() => onChange('dhcpEnabled', !form.dhcpEnabled)}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${form.dhcpEnabled ? 'translate-x-5.5' : 'translate-x-0.5'}`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <LanFormRow label="IP Gateway">{ipInput('ip', { required: true })}</LanFormRow>
+            <LanFormRow label="Subnet Mask">{ipInput('subnet', { required: true })}</LanFormRow>
+
+            <div className={dhcpOff ? 'grid gap-3.5 opacity-50' : 'grid gap-3.5'}>
+              <LanFormRow label="DHCP Start IP">{ipInput('dhcpMin', { required: !dhcpOff, disabled: dhcpOff })}</LanFormRow>
+              <LanFormRow label="DHCP End IP">{ipInput('dhcpMax', { required: !dhcpOff, disabled: dhcpOff })}</LanFormRow>
+              <LanFormRow label="Lease Time">
+                <div className="flex items-center gap-2">
+                  <input
+                    className={formInput}
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="86400"
+                    pattern="[0-9]+"
+                    title="Angka dalam detik"
+                    disabled={dhcpOff || updating}
+                    required={!dhcpOff}
+                    value={form.leaseTime}
+                    onChange={(event) => onChange('leaseTime', event.target.value.trim())}
+                  />
+                  <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">sec</span>
+                </div>
+              </LanFormRow>
+            </div>
+          </div>
+
+          <hr className="my-5 border-0 border-t border-gray-200 dark:border-slate-700" />
+
+          <LanSectionTitle number="2" circleClass="bg-green-600">Domain Name Server (DNS)</LanSectionTitle>
+          <div className="grid gap-3.5">
+            <LanFormRow label="DNS Server 1">{ipInput('dns1')}</LanFormRow>
+            <LanFormRow label="DNS Server 2">{ipInput('dns2')}</LanFormRow>
+            <LanFormRow label="DNS Server 3">{ipInput('dns3')}</LanFormRow>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4 dark:border-slate-700">
+          <button
+            type="button"
+            className="cursor-pointer rounded border-0 bg-transparent px-5 py-2 text-sm font-semibold text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
+            onClick={onClose}
+          >
+            Batal
+          </button>
+          <button
+            type="submit"
+            className="cursor-pointer rounded border-0 bg-blue-600 px-6 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={updating}
+          >
+            {updating ? 'Menyimpan...' : 'Simpan'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 function DetailRow({ label, children }) {
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-gray-100 py-2 last:border-b-0 dark:border-slate-700">
@@ -385,21 +786,23 @@ function DetailIndicator({ label, children }) {
 // Modal detail satu ONU. Data diambil dari baris yang diklik (sudah bersih dari backend).
 // Info pelanggan / host LAN belum punya sumber data, jadi memakai placeholder.
 function DeviceDetailModal({
-  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, renderRx, renderTemp,
+  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, lanLoading, lanError, onEditWlan, onEditLan, editOpen, renderRx, renderTemp,
 }) {
   useEffect(() => {
     function onKeyDown(event) {
-      if (event.key === 'Escape') {
+      // Saat pop-up edit WLAN terbuka, Esc hanya menutup pop-up itu.
+      if (event.key === 'Escape' && !editOpen) {
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
+  }, [onClose, editOpen])
 
   const badge = STATUS_BADGE[device.status] || STATUS_BADGE.off24plus
   const hasHosts = Boolean(device?.connected_hosts && device.connected_hosts.length > 0)
   const hasWlans = Boolean(device?.wlans && device.wlans.length > 0)
+  const lan = device?.lanConfig
 
   return (
     <div
@@ -530,10 +933,14 @@ function DeviceDetailModal({
                     <tbody>
                       {hasWlans ? (
                         device.wlans.map((wlan) => (
-                          <tr key={wlan.id} className="border-b border-gray-100 last:border-b-0 dark:border-slate-700">
+                          <tr
+                            key={wlan.id}
+                            className="cursor-pointer border-b border-gray-100 last:border-b-0 hover:bg-gray-100 dark:border-slate-700 dark:hover:bg-slate-700"
+                            onClick={() => onEditWlan(wlan)}
+                          >
                             <td className={tdClass}>{wlan.id}</td>
                             <td className={`${tdClass} font-semibold`}>{wlan.ssid}</td>
-                            <td className={tdClass}><WlanPassword value={wlan.password} /></td>
+                            <td className={tdClass} onClick={(event) => event.stopPropagation()}><WlanPassword value={wlan.password} /></td>
                             <td className={tdClass}>{wlan.security}</td>
                             <td className={tdClass}>{wlan.freq}</td>
                             <td className={tdClass}>{wlan.band}</td>
@@ -558,6 +965,64 @@ function DeviceDetailModal({
                       )}
                     </tbody>
                   </table>
+                </div>
+              ) : activeTab === 'LAN' ? (
+                <div>
+                  <div className="mb-4 flex justify-end">
+                    <button
+                      type="button"
+                      className="inline-flex cursor-pointer items-center gap-1.5 rounded border-0 bg-emerald-500 px-3 py-1 text-sm font-semibold text-white transition-colors hover:bg-emerald-600"
+                      onClick={onEditLan}
+                    >
+                      <Pencil size={14} /> Edit LAN
+                    </button>
+                  </div>
+
+                  {lan ? (
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <LanCard icon={Server} iconClass="text-blue-600 dark:text-blue-400" title="IP GATEWAY">
+                        <LanRow label="IP Gateway">{lan.ip || '-'}</LanRow>
+                        <LanRow label="Subnet Mask">{lan.subnet || '-'}</LanRow>
+                        <LanRow label="MAC Address"><span className="font-mono text-xs">{lan.mac || '-'}</span></LanRow>
+                      </LanCard>
+
+                      <LanCard icon={Network} iconClass="text-green-600 dark:text-green-400" title="DHCP SERVER">
+                        <LanRow label="DHCP Status">
+                          {lan.dhcpEnabled ? (
+                            <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-bold text-green-700 dark:bg-green-900/40 dark:text-green-300">ENABLED</span>
+                          ) : (
+                            <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-bold text-red-700 dark:bg-red-900/40 dark:text-red-300">DISABLED</span>
+                          )}
+                        </LanRow>
+                        <LanRow label="Rentang IP">
+                          {!lan.dhcpMin || lan.dhcpMin === '-' || !lan.dhcpMax || lan.dhcpMax === '-' ? '-' : `${lan.dhcpMin} - ${lan.dhcpMax}`}
+                        </LanRow>
+                        <LanRow label="Lease Time">{!lan.leaseTime || lan.leaseTime === '-' ? '-' : `${lan.leaseTime} sec`}</LanRow>
+                      </LanCard>
+
+                      <LanCard
+                        icon={Globe}
+                        iconClass="text-green-600 dark:text-green-400"
+                        title="Domain Name Server (DNS)"
+                        className="md:col-span-2"
+                      >
+                        <div className="grid grid-cols-1 gap-4 text-center sm:grid-cols-3">
+                          {[0, 1, 2].map((index) => (
+                            <div key={index}>
+                              <p className="m-0 text-xs text-gray-500 dark:text-gray-400">DNS Server {index + 1}</p>
+                              <p className="m-0 mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{lan.dns?.[index] || '-'}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </LanCard>
+                    </div>
+                  ) : (
+                    <p className="m-0 rounded-lg border border-gray-200 py-10 text-center text-sm text-gray-500 dark:border-slate-700 dark:text-gray-400">
+                      {lanLoading && 'Memuat konfigurasi LAN...'}
+                      {!lanLoading && lanError && <span className="font-semibold text-red-600 dark:text-red-400">{lanError}</span>}
+                      {!lanLoading && !lanError && 'Data LAN tidak ditemukan.'}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <p className="m-0 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -594,6 +1059,14 @@ function GenieAcs() {
   const [hostsReloadKey, setHostsReloadKey] = useState(0)
   const [wlansState, setWlansState] = useState({ loading: false, error: '' })
   const [wlansReloadKey, setWlansReloadKey] = useState(0)
+  const [lanState, setLanState] = useState({ loading: false, error: '' })
+  const [lanReloadKey, setLanReloadKey] = useState(0)
+  const [editingWlan, setEditingWlan] = useState(null)
+  const [wlanForm, setWlanForm] = useState(EMPTY_WLAN_FORM)
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [isEditLanOpen, setIsEditLanOpen] = useState(false)
+  const [isUpdatingLan, setIsUpdatingLan] = useState(false)
+  const [lanForm, setLanForm] = useState(EMPTY_LAN_FORM)
 
   const hasServer = selectedServer !== ''
 
@@ -752,6 +1225,42 @@ function GenieAcs() {
     return () => controller.abort()
   }, [selectedDeviceId, selectedServer, hostsReloadKey])
 
+  // Konfigurasi LAN diambil saat tab LAN dibuka (data lama tetap tampil selama dimuat ulang).
+  const lanTabActive = activeTab === 'LAN'
+  useEffect(() => {
+    if (!selectedDeviceId || !selectedServer || !lanTabActive) {
+      return undefined
+    }
+    const controller = new AbortController()
+
+    async function loadLan() {
+      setLanState({ loading: true, error: '' })
+      try {
+        const result = await getAcsDeviceLan(selectedServer, selectedDeviceId, { signal: controller.signal })
+        if (controller.signal.aborted) {
+          return
+        }
+        const lanConfig = result?.lanConfig ?? null
+        setSelectedDevice((current) => (current && current.id === selectedDeviceId ? { ...current, lanConfig } : current))
+        setLanState({ loading: false, error: '' })
+      } catch (requestError) {
+        if (controller.signal.aborted) {
+          return
+        }
+        setLanState({ loading: false, error: errorMessage(requestError, 'Gagal memuat konfigurasi LAN.') })
+      }
+    }
+
+    loadLan()
+    return () => controller.abort()
+  }, [selectedDeviceId, selectedServer, lanTabActive, lanReloadKey])
+
+  useLayoutEffect(() => {
+    if (editingWlan) {
+      setWlanForm(wlanFormFrom(editingWlan))
+    }
+  }, [editingWlan])
+
   // Daftar WiFi diambil saat tab WLAN dibuka (data lama tetap tampil selama dimuat ulang).
   const wlanTabActive = activeTab === 'WLAN'
   useEffect(() => {
@@ -787,9 +1296,18 @@ function GenieAcs() {
     setSelected(new Set())
   }
 
+  function closeDevice() {
+    setEditingWlan(null)
+    setIsEditLanOpen(false)
+    setSelectedDevice(null)
+  }
+
   function handleTabChange(tab) {
     if (tab === 'WLAN') {
       setWlansState({ loading: true, error: '' })
+    }
+    if (tab === 'LAN') {
+      setLanState({ loading: true, error: '' })
     }
     setActiveTab(tab)
   }
@@ -797,6 +1315,7 @@ function GenieAcs() {
   function openDevice(item) {
     setActiveTab('TERHUBUNG')
     setWlansState({ loading: false, error: '' })
+    setLanState({ loading: false, error: '' })
     setHostsState({ loading: true, error: '' })
     setSelectedDevice(item)
   }
@@ -804,7 +1323,7 @@ function GenieAcs() {
   function handleServerChange(event) {
     const value = event.target.value
     setSelectedServer(value)
-    setSelectedDevice(null)
+    closeDevice()
     setDataOnu([])
     setError('')
     resetView()
@@ -849,6 +1368,7 @@ function GenieAcs() {
       if (result.success) {
         setHostsReloadKey((key) => key + 1)
         setWlansReloadKey((key) => key + 1)
+        setLanReloadKey((key) => key + 1)
       }
       Swal.fire({
         icon: result.success ? 'success' : 'warning',
@@ -861,6 +1381,110 @@ function GenieAcs() {
       Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal menjalankan Summon.') })
     } finally {
       setBusy('')
+    }
+  }
+
+  // Push perubahan WLAN ke ONU (POST /api/acs/update-wlan -> setParameterValues di GenieACS).
+  async function handleUpdateWlan() {
+    if (!requireServer() || !selectedDevice || !editingWlan || isUpdating) {
+      return
+    }
+
+    const confirm = await Swal.fire({
+      title: 'Kirim perubahan WLAN?',
+      text: 'Perubahan dikirim ke ONU. Perangkat yang tersambung lewat WiFi ini bisa terputus sementara.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Ya, Update',
+      cancelButtonText: 'Batal',
+    })
+    if (!confirm.isConfirmed) {
+      return
+    }
+
+    setIsUpdating(true)
+    try {
+      const result = await updateAcsWlan({
+        server_id: selectedServer,
+        deviceId: selectedDevice.id,
+        wlanId: editingWlan.id,
+        ssid: wlanForm.ssid,
+        password: wlanForm.password,
+        status: wlanForm.status,
+      })
+      setEditingWlan(null)
+      Swal.fire({
+        icon: 'success',
+        title: 'Berhasil',
+        text: result.message,
+        timer: 2500,
+        showConfirmButton: false,
+      })
+      // Beri waktu ONU melapor balik ke ACS, lalu muat ulang daftar WLAN dan tabel utama.
+      setTimeout(() => {
+        setWlansReloadKey((key) => key + 1)
+        reload()
+      }, 2500)
+    } catch (requestError) {
+      // Pop-up tetap terbuka supaya isian tidak hilang dan bisa dicoba lagi.
+      Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal mengirim perubahan WLAN.') })
+    } finally {
+      setIsUpdating(false)
+    }
+  }
+
+  // Tombol Edit LAN: isi form dari konfigurasi LAN saat ini lalu buka pop-up.
+  function handleEditLan() {
+    setLanForm(lanFormFrom(selectedDevice?.lanConfig))
+    setIsEditLanOpen(true)
+  }
+
+  // Push perubahan LAN ke ONU (POST /api/acs/update-lan -> setParameterValues di GenieACS).
+  async function handleUpdateLan() {
+    if (!requireServer() || !selectedDevice || isUpdatingLan) {
+      return
+    }
+
+    // Mengubah IP/subnet LAN memutus akses lokal ke ONU lewat alamat lama, jadi konfirmasinya lebih tegas.
+    const current = selectedDevice.lanConfig
+    const addressChanged = lanForm.ip !== blankIfDash(current?.ip) || lanForm.subnet !== blankIfDash(current?.subnet)
+    const confirm = await Swal.fire({
+      title: 'Simpan pengaturan LAN?',
+      html: addressChanged
+        ? 'IP Gateway / Subnet Mask <b>berubah</b>. Akses lokal ke ONU lewat alamat lama akan terputus dan perangkat di jaringan LAN perlu mendapat IP baru.'
+        : 'Perubahan akan dikirim ke ONU.',
+      icon: addressChanged ? 'warning' : 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Ya, Simpan',
+      confirmButtonColor: addressChanged ? '#dc2626' : undefined,
+      cancelButtonText: 'Batal',
+    })
+    if (!confirm.isConfirmed) {
+      return
+    }
+
+    setIsUpdatingLan(true)
+    try {
+      const result = await updateAcsLan({
+        server_id: selectedServer,
+        deviceId: selectedDevice.id,
+        ...lanForm,
+      })
+      setIsEditLanOpen(false)
+      Swal.fire({
+        icon: 'success',
+        title: 'Berhasil',
+        text: result.message,
+        timer: 2500,
+        showConfirmButton: false,
+      })
+      // Beri waktu ONU melapor balik ke ACS, lalu muat ulang konfigurasi LAN agar tampilan terbarui.
+      setTimeout(() => setLanReloadKey((key) => key + 1), 2500)
+    } catch (requestError) {
+      // Pop-up tetap terbuka supaya isian tidak hilang dan bisa dicoba lagi.
+      Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal mengirim perubahan LAN.') })
+    } finally {
+      setIsUpdatingLan(false)
     }
   }
 
@@ -1153,15 +1777,41 @@ function GenieAcs() {
           device={selectedDevice}
           activeTab={activeTab}
           onTabChange={handleTabChange}
-          onClose={() => setSelectedDevice(null)}
+          onClose={closeDevice}
+          onEditWlan={setEditingWlan}
+          editOpen={Boolean(editingWlan) || isEditLanOpen}
           onSummon={() => handleSummonDevice(selectedDevice)}
           summoning={busy === 'summon-device'}
           hostsLoading={hostsState.loading}
           hostsError={hostsState.error}
           wlansLoading={wlansState.loading}
           wlansError={wlansState.error}
+          lanLoading={lanState.loading}
+          lanError={lanState.error}
+          onEditLan={handleEditLan}
           renderRx={renderRx}
           renderTemp={renderTemp}
+        />
+      )}
+
+      {selectedDevice && editingWlan && (
+        <EditWlanModal
+          wlan={editingWlan}
+          form={wlanForm}
+          updating={isUpdating}
+          onChange={(field, value) => setWlanForm((current) => ({ ...current, [field]: value }))}
+          onClose={() => setEditingWlan(null)}
+          onSubmit={handleUpdateWlan}
+        />
+      )}
+
+      {selectedDevice && isEditLanOpen && (
+        <EditLanModal
+          form={lanForm}
+          updating={isUpdatingLan}
+          onChange={(field, value) => setLanForm((current) => ({ ...current, [field]: value }))}
+          onClose={() => setIsEditLanOpen(false)}
+          onSubmit={handleUpdateLan}
         />
       )}
 

@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
+const { ALL_SERVER, serverAllowed } = require('../router_servers');
+const { writeGroupReply, GROUP_ATTRIBUTE } = require('../radius_group');
 
 const router = express.Router();
 const requireAdmin = requireRole('admin');
@@ -114,6 +116,17 @@ router.post('/profil', requireAdmin, async (req, res) => {
 
   try {
     await connection.beginTransaction();
+    const [langgananGroup] = await connection.execute(
+      'SELECT id FROM langganan_profiles WHERE BINARY group_name = ? LIMIT 1',
+      [mikrotikGroup],
+    );
+    if (langgananGroup.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: 'Group sudah dipakai profil Langganan',
+      });
+    }
     await connection.execute(
       'INSERT INTO hotspot_profiles (nama_profile, mikrotik_group, address_list, rate_limit, shared, masa_aktif, masa_aktif_satuan, harga_jual, komisi_reseller) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
@@ -137,6 +150,11 @@ router.post('/profil', requireAdmin, async (req, res) => {
       pool.execute(
         "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, 'Port-Limit', ':=', ?)",
         [mikrotikGroup, String(shared)],
+      ),
+      // MikroTik memilih Hotspot User Profile dengan nama yang sama persis dengan group ini.
+      pool.execute(
+        "INSERT INTO radgroupreply (groupname, attribute, op, value) VALUES (?, ?, ':=', ?)",
+        [mikrotikGroup, GROUP_ATTRIBUTE, mikrotikGroup],
       ),
     ];
 
@@ -236,11 +254,12 @@ router.post('/profil/delete-massal', requireAdmin, async (req, res) => {
 
 router.put('/profil/:groupname', requireAdmin, async (req, res) => {
   const groupname = typeof req.params.groupname === 'string' ? req.params.groupname.trim() : '';
-  const rateLimit = typeof req.body?.rate_limit === 'string' ? req.body.rate_limit.trim() : '';
-  const masaAktif = readInteger(req.body?.masa_aktif);
-  const masaAktifSatuan = readText(req.body?.masa_aktif_satuan).toUpperCase();
+  const body = req.body || {};
+  const rateLimit = typeof body.rate_limit === 'string' ? body.rate_limit.trim() : '';
+  const masaAktif = readInteger(body.masa_aktif);
+  const masaAktifSatuan = readText(body.masa_aktif_satuan).toUpperCase();
 
-  if (!groupname || !rateLimit
+  if (!groupname
     || !Number.isInteger(masaAktif) || masaAktif < 1
     || !MASA_AKTIF_SATUAN.includes(masaAktifSatuan)) {
     return res.status(400).json({
@@ -249,43 +268,109 @@ router.put('/profil/:groupname', requireAdmin, async (req, res) => {
     });
   }
 
-  const totalDetik = String(masaAktifKeDetik(masaAktif, masaAktifSatuan));
+  const columns = ['masa_aktif = ?', 'masa_aktif_satuan = ?', 'rate_limit = ?'];
+  const params = [masaAktif, masaAktifSatuan, rateLimit];
+
+  if (typeof body.nama_profile === 'string') {
+    const namaProfile = readText(body.nama_profile);
+    if (!namaProfile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data profil belum lengkap atau tidak valid',
+      });
+    }
+    columns.push('nama_profile = ?');
+    params.push(namaProfile);
+  }
+
+  const addressList = typeof body.address_list === 'string' ? readText(body.address_list) : null;
+  if (addressList !== null) {
+    columns.push('address_list = ?');
+    params.push(addressList);
+  }
+
+  let shared = null;
+  if (body.shared !== undefined && body.shared !== null && body.shared !== '') {
+    shared = readInteger(body.shared);
+    if (!Number.isInteger(shared) || shared < 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data profil belum lengkap atau tidak valid',
+      });
+    }
+    columns.push('shared = ?');
+    params.push(shared);
+  }
+
+  if (body.harga_jual !== undefined && body.harga_jual !== null && body.harga_jual !== '') {
+    const hargaJual = readInteger(body.harga_jual);
+    if (!Number.isInteger(hargaJual) || hargaJual < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data profil belum lengkap atau tidak valid',
+      });
+    }
+    columns.push('harga_jual = ?');
+    params.push(hargaJual);
+  }
+
+  if (body.komisi_reseller !== undefined && body.komisi_reseller !== null && body.komisi_reseller !== '') {
+    const komisiReseller = readInteger(body.komisi_reseller);
+    if (!Number.isInteger(komisiReseller) || komisiReseller < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data profil belum lengkap atau tidak valid',
+      });
+    }
+    columns.push('komisi_reseller = ?');
+    params.push(komisiReseller);
+  }
+
+  const connection = await pool.getConnection();
 
   try {
-    const [profiles] = await pool.execute(
+    await connection.beginTransaction();
+    const [profiles] = await connection.execute(
       'SELECT id FROM hotspot_profiles WHERE mikrotik_group = ? LIMIT 1',
       [groupname],
     );
 
     if (profiles.length === 0) {
+      await connection.rollback();
       return res.status(404).json({
         success: false,
         message: 'Profil tidak ditemukan',
       });
     }
 
-    await writeMasaAktif(pool, groupname, totalDetik);
-    await Promise.all([
-      pool.execute(
-        'UPDATE hotspot_profiles SET masa_aktif = ?, masa_aktif_satuan = ?, rate_limit = ? WHERE mikrotik_group = ?',
-        [masaAktif, masaAktifSatuan, rateLimit, groupname],
-      ),
-      pool.execute(
-        "UPDATE radgroupreply SET value = ? WHERE groupname = ? AND attribute = 'Mikrotik-Rate-Limit'",
-        [rateLimit, groupname],
-      ),
-    ]);
+    await connection.execute(
+      `UPDATE hotspot_profiles SET ${columns.join(', ')} WHERE mikrotik_group = ?`,
+      [...params, groupname],
+    );
+    await writeMasaAktif(connection, groupname, String(masaAktifKeDetik(masaAktif, masaAktifSatuan)));
+    await writeGroupReply(connection, groupname, GROUP_ATTRIBUTE, groupname);
+    await writeGroupReply(connection, groupname, 'Mikrotik-Rate-Limit', rateLimit);
+    if (addressList !== null) {
+      await writeGroupReply(connection, groupname, 'Mikrotik-Address-List', addressList);
+    }
+    if (shared !== null) {
+      await writeGroupReply(connection, groupname, 'Port-Limit', String(shared));
+    }
+    await connection.commit();
 
     return res.json({
       success: true,
       message: 'Profil berhasil diperbarui',
     });
   } catch (error) {
+    await connection.rollback();
     return res.status(500).json({
       success: false,
       message: 'Gagal memperbarui profil',
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 });
 
@@ -495,6 +580,11 @@ async function insertVouchersBulk(connection, vouchers, record) {
     radcheckRows.push([voucher.username, 'Cleartext-Password', ':=', voucher.password]);
     if (record.nasIp) {
       radcheckRows.push([voucher.username, 'NAS-IP-Address', '==', record.nasIp]);
+    }
+    // MikroTik mengirim nama server Hotspot sebagai Called-Station-Id.
+    // ALL SERVER tidak membatasi, sehingga voucher bisa login di semua server.
+    if (record.server && record.server !== ALL_SERVER) {
+      radcheckRows.push([voucher.username, 'Called-Station-Id', '==', record.server]);
     }
     radusergroupRows.push([voucher.username, record.mikrotikGroup, 1]);
     voucherRows.push([
@@ -890,21 +980,43 @@ router.post('/voucher/generate', requireAdmin, async (req, res) => {
   if (!Number.isInteger(panjangDiminta) || panjangDiminta < 6 || panjangDiminta > MAX_CODE_LENGTH) {
     return res.status(400).json({
       success: false,
-      message: 'Panjang karakter minimal 6',
+      message: `Panjang karakter harus antara 6 dan ${MAX_CODE_LENGTH}`,
     });
   }
 
-  if (prefix.length > 3 || (prefix && !/^[A-Za-z0-9]+$/.test(prefix))) {
+  // Prefix opsional; bila diisi harus 1 sampai 3 huruf atau angka.
+  if (prefix && !/^[A-Za-z0-9]{1,3}$/.test(prefix)) {
     return res.status(400).json({
       success: false,
-      message: 'Prefix maksimal 3 karakter huruf atau angka',
+      message: 'Prefix harus 1 sampai 3 huruf atau angka',
     });
   }
 
   if (!JENIS_VOUCHER.includes(jenisVoucher) || !charset) {
     return res.status(400).json({
       success: false,
-      message: 'Jenis voucher atau kode kombinasi tidak valid',
+      message: 'Jenis voucher dan kode kombinasi wajib dipilih',
+    });
+  }
+
+  if (!routerName) {
+    return res.status(400).json({
+      success: false,
+      message: 'Router wajib dipilih',
+    });
+  }
+
+  if (!serverName) {
+    return res.status(400).json({
+      success: false,
+      message: 'Server wajib dipilih',
+    });
+  }
+
+  if (!outlet) {
+    return res.status(400).json({
+      success: false,
+      message: 'Outlet wajib dipilih',
     });
   }
 
@@ -912,6 +1024,65 @@ router.post('/voucher/generate', requireAdmin, async (req, res) => {
     return res.status(400).json({
       success: false,
       message: 'Profil wajib dipilih',
+    });
+  }
+
+  // Router, outlet, dan profil harus ada di tabelnya. BINARY: nama harus persis
+  // sama, bukan hanya cocok tanpa membedakan huruf besar kecil.
+  try {
+    if (routerName !== 'ALL ROUTER') {
+      const [routerRows] = await pool.execute(
+        'SELECT nama_router FROM routers WHERE BINARY nama_router = ? LIMIT 1',
+        [routerName],
+      );
+      if (routerRows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Router tidak ditemukan',
+        });
+      }
+    }
+
+    // Server: ALL SERVER, atau server Hotspot yang diinput di menu Router
+    // (milik router terpilih; bila ALL ROUTER, milik router mana pun).
+    const serverOk = await serverAllowed(pool, {
+      jenis: 'hotspot',
+      routerName,
+      server: serverName,
+    });
+    if (!serverOk) {
+      return res.status(400).json({
+        success: false,
+        message: 'Server tidak ditemukan di router yang dipilih',
+      });
+    }
+
+    const [outletRows] = await pool.execute(
+      'SELECT nama_outlet FROM outlets WHERE BINARY nama_outlet = ? LIMIT 1',
+      [outlet],
+    );
+    if (outletRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Outlet tidak ditemukan',
+      });
+    }
+
+    const [groupRows] = await pool.execute(
+      'SELECT mikrotik_group FROM hotspot_profiles WHERE BINARY mikrotik_group = ? LIMIT 1',
+      [mikrotikGroup],
+    );
+    if (groupRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Profil tidak ditemukan',
+      });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memeriksa router, outlet, atau profil',
+      error: error.message,
     });
   }
 

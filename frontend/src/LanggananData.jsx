@@ -123,6 +123,7 @@ function LanggananData() {
   const navigate = useNavigate()
   const [rows, setRows] = useState([])
   const [profiles, setProfiles] = useState([])
+  const [routerServers, setRouterServers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
@@ -183,6 +184,21 @@ function LanggananData() {
     }
   }, [])
 
+  // Pilihan server berasal dari menu Router; gagal memuat tidak mengganggu halaman.
+  useEffect(() => {
+    let ignore = false
+    api.get('/api/routers/servers')
+      .then((response) => {
+        if (!ignore) {
+          setRouterServers(Array.isArray(response.data) ? response.data : [])
+        }
+      })
+      .catch(() => {})
+    return () => {
+      ignore = true
+    }
+  }, [])
+
   useEffect(() => {
     if (!isMenuOpen) {
       return undefined
@@ -223,6 +239,16 @@ function LanggananData() {
   const visibleIds = currentItems.map((item) => item.id)
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id))
   const selectedRows = rows.filter((item) => selectedIds.includes(item.id))
+  // Server: ALL SERVER + server router terpilih untuk jenis layanan ini. Nilai lama
+  // yang tidak ada di daftar tetap ditampilkan supaya data lama tidak hilang saat diedit.
+  const serverJenis = form.ktg === 'Hotspot' ? 'hotspot' : 'pppoe'
+  const serverChoices = [...new Set([
+    'ALL SERVER',
+    ...routerServers
+      .filter((item) => item.jenis === serverJenis && (form.router === 'ALL ROUTER' || item.nama_router === form.router))
+      .map((item) => item.nama),
+    ...(form.server ? [form.server] : []),
+  ])]
   const summaries = [
     { label: 'Total', hint: 'Seluruh pelanggan', value: rows.length, icon: Users, tone: 'total' },
     { label: 'PSB Bulan Ini', hint: 'Pasang bulan ini', value: rows.filter((item) => isThisMonth(item.tgl_pasang)).length, icon: CalendarPlus, tone: 'psb' },
@@ -751,7 +777,15 @@ function LanggananData() {
               <label>IP Address<input value={form.ip_address} onChange={(event) => updateForm('ip_address', event.target.value)} placeholder="10.0.0.2" /></label>
               <label>MAC Address<input value={form.mac_address} onChange={(event) => updateForm('mac_address', event.target.value)} /></label>
               <label>Router<input value={form.router} onChange={(event) => updateForm('router', event.target.value)} /></label>
-              <label>Server<input value={form.server} onChange={(event) => updateForm('server', event.target.value)} /></label>
+              <label>
+                Server
+                <select value={form.server} onChange={(event) => updateForm('server', event.target.value)}>
+                  <option value="">-Pilih-</option>
+                  {serverChoices.map((name) => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </label>
               <label>Addr List<input value={form.addr_list} onChange={(event) => updateForm('addr_list', event.target.value)} /></label>
               <label>Wilayah<input value={form.wilayah} onChange={(event) => updateForm('wilayah', event.target.value)} /></label>
               <label>Alamat Pasang<input value={form.alamat_pasang} onChange={(event) => updateForm('alamat_pasang', event.target.value)} /></label>

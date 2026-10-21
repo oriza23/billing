@@ -1,5 +1,13 @@
 const express = require('express');
 const pool = require('../../database');
+const { syncProfileGroup } = require('../langganan_radius');
+const {
+  MAX_GROUP_NAME,
+  GroupConflictError,
+  writeProfileReply,
+  releaseGroupReply,
+  assertGroupAvailable,
+} = require('../radius_group');
 
 const router = express.Router();
 
@@ -47,8 +55,13 @@ function readProfileBody(body) {
   };
 }
 
+// Group wajib dan harus sama persis dengan nama profil di MikroTik. Rate limit
+// opsional: kosong berarti kecepatan mengikuti profil di MikroTik.
 function profileIsValid(profile) {
   return Boolean(profile.nama_profile)
+    && Boolean(profile.group_name)
+    && profile.group_name.length <= MAX_GROUP_NAME
+    && profile.rate_limit.length <= 50
     && profile.warna_dot
     && profile.shared
     && profile.hpp != null
@@ -120,12 +133,16 @@ router.post('/', async (req, res) => {
   if (!profileIsValid(profile)) {
     return res.status(400).json({
       success: false,
-      message: 'Data profil belum lengkap atau tidak valid',
+      message: 'Data profil belum lengkap atau tidak valid. Group wajib diisi (maksimal 64 karakter)',
     });
   }
 
+  let conn;
   try {
-    const [result] = await pool.execute(
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    await assertGroupAvailable(conn, profile.group_name, profile.rate_limit);
+    const [result] = await conn.execute(
       `INSERT INTO langganan_profiles
         (nama_profile, warna_dot, tipe, media, group_name, rate_limit, shared, masa_aktif, hpp, komisi, harga)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -143,17 +160,29 @@ router.post('/', async (req, res) => {
         profile.harga,
       ],
     );
+    await writeProfileReply(conn, profile.group_name, profile.rate_limit);
+    await conn.commit();
     return res.json({
       success: true,
       message: 'Profil langganan berhasil disimpan',
       id: result.insertId,
     });
   } catch (error) {
+    if (conn) {
+      await conn.rollback().catch(() => {});
+    }
+    if (error instanceof GroupConflictError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
     return res.status(500).json({
       success: false,
       message: 'Gagal menyimpan profil langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 
@@ -163,12 +192,28 @@ router.put('/:id', async (req, res) => {
   if (!Number.isInteger(id) || id < 1 || !profileIsValid(profile)) {
     return res.status(400).json({
       success: false,
-      message: 'Data profil belum lengkap atau tidak valid',
+      message: 'Data profil belum lengkap atau tidak valid. Group wajib diisi (maksimal 64 karakter)',
     });
   }
 
+  let conn;
   try {
-    const [result] = await pool.execute(
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [existing] = await conn.execute(
+      'SELECT group_name FROM langganan_profiles WHERE id = ? LIMIT 1 FOR UPDATE',
+      [id],
+    );
+    if (existing.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Profil tidak ditemukan',
+      });
+    }
+    const oldGroup = existing[0].group_name || '';
+    await assertGroupAvailable(conn, profile.group_name, profile.rate_limit, id);
+    const [result] = await conn.execute(
       `UPDATE langganan_profiles
        SET nama_profile = ?, warna_dot = ?, tipe = ?, media = ?, group_name = ?, rate_limit = ?,
            shared = ?, masa_aktif = ?, hpp = ?, komisi = ?, harga = ?
@@ -189,21 +234,39 @@ router.put('/:id', async (req, res) => {
       ],
     );
     if (result.affectedRows === 0) {
+      await conn.rollback();
       return res.status(404).json({
         success: false,
         message: 'Profil tidak ditemukan',
       });
     }
+    // Jawaban grup RADIUS (Mikrotik-Group dan limit) serta grup semua pelanggan profil ini ikut diperbarui.
+    await writeProfileReply(conn, profile.group_name, profile.rate_limit);
+    await syncProfileGroup(conn, id, profile.group_name);
+    if (oldGroup && oldGroup !== profile.group_name) {
+      await releaseGroupReply(conn, oldGroup);
+    }
+    await conn.commit();
     return res.json({
       success: true,
       message: 'Profil langganan berhasil diperbarui',
     });
   } catch (error) {
+    if (conn) {
+      await conn.rollback().catch(() => {});
+    }
+    if (error instanceof GroupConflictError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
     return res.status(500).json({
       success: false,
       message: 'Gagal memperbarui profil langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 
@@ -216,24 +279,43 @@ router.delete('/:id', async (req, res) => {
     });
   }
 
+  let conn;
   try {
-    const [result] = await pool.execute('DELETE FROM langganan_profiles WHERE id = ?', [id]);
-    if (result.affectedRows === 0) {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [existing] = await conn.execute(
+      'SELECT group_name FROM langganan_profiles WHERE id = ? LIMIT 1 FOR UPDATE',
+      [id],
+    );
+    if (existing.length === 0) {
+      await conn.rollback();
       return res.status(404).json({
         success: false,
         message: 'Profil tidak ditemukan',
       });
     }
+    // Profil dihapus: grup RADIUS pelanggan profil ini dicabut sebelum profil_id jadi NULL.
+    await syncProfileGroup(conn, id, '');
+    await conn.execute('DELETE FROM langganan_profiles WHERE id = ?', [id]);
+    await releaseGroupReply(conn, existing[0].group_name || '');
+    await conn.commit();
     return res.json({
       success: true,
       message: 'Profil langganan berhasil dihapus',
     });
   } catch (error) {
+    if (conn) {
+      await conn.rollback().catch(() => {});
+    }
     return res.status(500).json({
       success: false,
       message: 'Gagal menghapus profil langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 

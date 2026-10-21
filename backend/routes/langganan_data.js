@@ -1,5 +1,17 @@
 const express = require('express');
 const pool = require('../../database');
+const { serverAllowed, ALL_SERVER } = require('../router_servers');
+const {
+  ALL_ROUTER,
+  RadiusSyncError,
+  usesRadius,
+  removeAccount,
+  assertUsernameFree,
+  writeAccount,
+} = require('../langganan_radius');
+const { isExpired, disconnectInBackground } = require('../langganan_isolir');
+
+const EXPIRED_MESSAGE = 'Tgl Isolir sudah lewat, status Aktif akan langsung diisolir. Perpanjang Tgl Isolir atau ubah status';
 
 const router = express.Router();
 const STATUS = ['Aktif', 'Non Aktif', 'Isolir'];
@@ -296,6 +308,16 @@ async function ensureTable() {
       ADD COLUMN IF NOT EXISTS ppn_nominal DECIMAL(15,2) NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS total DECIMAL(15,2) NOT NULL DEFAULT 0`,
   );
+  // Data lama menyimpan "ALL" untuk semua router/server. Disamakan dengan pilihan
+  // ALL ROUTER / ALL SERVER agar tidak terbaca sebagai nama server bernama "ALL".
+  await pool.execute(
+    'UPDATE langganan_pelanggan SET server = ? WHERE UPPER(TRIM(server)) = ? AND server <> ?',
+    [ALL_SERVER, 'ALL', ALL_SERVER],
+  );
+  await pool.execute(
+    'UPDATE langganan_pelanggan SET router = ? WHERE UPPER(TRIM(router)) = ? AND router <> ?',
+    [ALL_ROUTER, 'ALL', ALL_ROUTER],
+  );
   await pool.query(
     `CREATE TABLE IF NOT EXISTS langganan_invoice_items (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -390,6 +412,21 @@ function sqlValues(customer) {
   ];
 }
 
+// Server harus ALL SERVER atau server yang diinput di menu Router untuk router
+// terpilih. Kategori Hotspot memakai server Hotspot, kategori lain server PPPoE.
+// Mengembalikan teks error, atau '' bila valid.
+async function checkServer(customer) {
+  if (!customer.server) {
+    return 'Server wajib dipilih';
+  }
+  const allowed = await serverAllowed(pool, {
+    jenis: customer.ktg === 'Hotspot' ? 'hotspot' : 'pppoe',
+    routerName: customer.router,
+    server: customer.server,
+  });
+  return allowed ? '' : 'Server tidak ditemukan di router yang dipilih';
+}
+
 const KODE_UNIK_MIN = 10;
 const KODE_UNIK_MAX = 999;
 const KODE_UNIK_MAX_TRIES = 200;
@@ -422,6 +459,19 @@ router.post('/', async (req, res) => {
     return res.status(400).json({
       success: false,
       message: 'No Layanan hanya boleh berisi angka!',
+    });
+  }
+
+  try {
+    const serverError = await checkServer(customer);
+    if (serverError) {
+      return res.status(400).json({ success: false, message: serverError });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memeriksa server',
+      error: error.message,
     });
   }
 
@@ -500,7 +550,14 @@ router.post('/', async (req, res) => {
     }
     customer.kode_unik = kodeUnik;
 
-    // Data langganan dan item invoice disimpan bersamaan, gagal salah satu = batal semua.
+    if (usesRadius(customer)) {
+      await assertUsernameFree(conn, customer.username);
+      if (customer.status === 'Aktif' && await isExpired(conn, customer.tgl_isolir)) {
+        return res.status(400).json({ success: false, message: EXPIRED_MESSAGE });
+      }
+    }
+
+    // Data langganan, item invoice, dan akun RADIUS disimpan bersamaan, gagal salah satu = batal semua.
     await conn.beginTransaction();
     inTransaction = true;
 
@@ -546,8 +603,12 @@ router.post('/', async (req, res) => {
         ],
       );
     }
+    await writeAccount(conn, customer);
     await conn.commit();
     inTransaction = false;
+    if (usesRadius(customer) && customer.status !== 'Aktif') {
+      disconnectInBackground(customer.username);
+    }
 
     return res.json({
       success: true,
@@ -561,6 +622,9 @@ router.post('/', async (req, res) => {
   } catch (error) {
     if (inTransaction) {
       await conn.rollback().catch(() => {});
+    }
+    if (error instanceof RadiusSyncError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
     }
     if (error.code === 'ER_NO_REFERENCED_ROW_2') {
       return res.status(400).json({
@@ -593,8 +657,48 @@ router.put('/:id', async (req, res) => {
     });
   }
 
+  let conn;
+  let inTransaction = false;
   try {
-    const [result] = await pool.execute(
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    inTransaction = true;
+
+    const [current] = await conn.execute(
+      'SELECT server, router, username FROM langganan_pelanggan WHERE id = ? LIMIT 1 FOR UPDATE',
+      [id],
+    );
+    if (current.length === 0) {
+      await conn.rollback();
+      inTransaction = false;
+      return res.status(404).json({
+        success: false,
+        message: 'Data langganan tidak ditemukan',
+      });
+    }
+
+    // Server diperiksa hanya bila diubah, supaya data lama (server lama yang
+    // tidak ada di menu Router) tetap bisa diedit tanpa mengganti server.
+    if ((current[0].server || '') !== customer.server || (current[0].router || '') !== customer.router) {
+      const serverError = await checkServer(customer);
+      if (serverError) {
+        await conn.rollback();
+        inTransaction = false;
+        return res.status(400).json({ success: false, message: serverError });
+      }
+    }
+
+    const oldUsername = current[0].username || '';
+    if (usesRadius(customer) && oldUsername !== customer.username) {
+      await assertUsernameFree(conn, customer.username, id);
+    }
+    if (usesRadius(customer) && customer.status === 'Aktif' && await isExpired(conn, customer.tgl_isolir)) {
+      await conn.rollback();
+      inTransaction = false;
+      return res.status(400).json({ success: false, message: EXPIRED_MESSAGE });
+    }
+
+    await conn.execute(
       `UPDATE langganan_pelanggan
        SET nolayanan = ?, pelanggan = ?, ktg = ?, media_tipe = ?, profil_id = ?, jns_tagihan = ?,
            siklus = ?, tgl_aktif = ?, tgl_isolir = ?, username = ?, password = ?, ip_address = ?,
@@ -603,17 +707,34 @@ router.put('/:id', async (req, res) => {
        WHERE id = ?`,
       [...sqlValues(customer).filter((_, index) => ![15, 20, 21].includes(index)), id],
     );
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Data langganan tidak ditemukan',
-      });
+
+    // Username lama dibersihkan dari RADIUS, lalu akun ditulis ulang sesuai data terbaru
+    // (password, grup profil, batas router/server, dan status).
+    if (oldUsername && oldUsername !== customer.username) {
+      await removeAccount(conn, oldUsername);
     }
+    await writeAccount(conn, customer);
+    await conn.commit();
+    inTransaction = false;
+    // Status bukan Aktif atau username berganti: sesi yang masih berjalan diputus.
+    if (oldUsername && oldUsername !== customer.username) {
+      disconnectInBackground(oldUsername);
+    }
+    if (usesRadius(customer) && customer.status !== 'Aktif') {
+      disconnectInBackground(customer.username);
+    }
+
     return res.json({
       success: true,
       message: 'Data langganan berhasil diperbarui',
     });
   } catch (error) {
+    if (inTransaction) {
+      await conn.rollback().catch(() => {});
+    }
+    if (error instanceof RadiusSyncError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
     if (error.code === 'ER_NO_REFERENCED_ROW_2') {
       return res.status(400).json({
         success: false,
@@ -625,6 +746,10 @@ router.put('/:id', async (req, res) => {
       message: 'Gagal memperbarui data langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 
@@ -637,24 +762,65 @@ router.delete('/:id', async (req, res) => {
     });
   }
 
+  let conn;
+  let inTransaction = false;
+  let removedUsername = '';
   try {
-    const [result] = await pool.execute('DELETE FROM langganan_pelanggan WHERE id = ?', [id]);
-    if (result.affectedRows === 0) {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    inTransaction = true;
+
+    const [current] = await conn.execute(
+      'SELECT username FROM langganan_pelanggan WHERE id = ? LIMIT 1 FOR UPDATE',
+      [id],
+    );
+    if (current.length === 0) {
+      await conn.rollback();
+      inTransaction = false;
       return res.status(404).json({
         success: false,
         message: 'Data langganan tidak ditemukan',
       });
     }
+
+    await conn.execute('DELETE FROM langganan_pelanggan WHERE id = ?', [id]);
+
+    // Akun RADIUS ikut dihapus supaya pelanggan yang dihapus tidak bisa login lagi,
+    // kecuali username yang sama masih dipakai langganan lain.
+    const username = current[0].username || '';
+    if (username) {
+      const [shared] = await conn.execute(
+        'SELECT id FROM langganan_pelanggan WHERE username = ? LIMIT 1',
+        [username],
+      );
+      if (shared.length === 0) {
+        await removeAccount(conn, username);
+        removedUsername = username;
+      }
+    }
+    await conn.commit();
+    inTransaction = false;
+    if (removedUsername) {
+      disconnectInBackground(removedUsername);
+    }
+
     return res.json({
       success: true,
       message: 'Data langganan berhasil dihapus',
     });
   } catch (error) {
+    if (inTransaction) {
+      await conn.rollback().catch(() => {});
+    }
     return res.status(500).json({
       success: false,
       message: 'Gagal menghapus data langganan',
       error: error.message,
     });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 

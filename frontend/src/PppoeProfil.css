@@ -221,6 +221,12 @@
   font-weight: 700;
 }
 
+.profil-rate-mikrotik {
+  color: #4b647a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .profil-empty {
   text-align: center;
   color: #4b647a;

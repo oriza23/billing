@@ -4,6 +4,8 @@ const pool = require('./database');
 const requireAuth = require('./backend/middleware/auth');
 const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
 const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
+const { startIsolirEnforcement } = require('./backend/langganan_isolir');
+const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
 
 const app = express();
 const PORT = 5000;
@@ -25,8 +27,6 @@ const langgananProfilRouter = require('./backend/routes/langganan_profil');
 app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
-const langgananMaster = require('./backend/routes/langganan_master');
-app.use('/api/langganan/server', langgananMaster.serverRouter);
 app.use('/api/wilayah', require('./backend/routes/wilayah'));
 app.use('/api/langganan/online', require('./backend/routes/langganan_online'));
 const pelangganRouter = require('./backend/routes/pelanggan');
@@ -52,6 +52,8 @@ async function ensureHotspotVouchersTable() {
   await pool.query(
     'ALTER TABLE hotspot_vouchers ADD COLUMN IF NOT EXISTS kode_batch VARCHAR(50)',
   );
+  // Nama server MikroTik bisa sampai 100 karakter.
+  await pool.query('ALTER TABLE hotspot_vouchers MODIFY server VARCHAR(100)');
 }
 
 async function ensureRoutersTable() {
@@ -87,7 +89,7 @@ async function start() {
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
-  await langgananMaster.ensureTables();
+  await ensureRouterServers();
   await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
@@ -98,6 +100,7 @@ async function start() {
     console.warn(`Peringatan: zona waktu OS (${osTimezone || 'tidak diketahui'}) berbeda dengan pengaturan web (${timezone}). Simpan ulang di menu Sistem > Pengaturan untuk menyamakan.`);
   }
   startExpiredVoucherEnforcement();
+  startIsolirEnforcement();
   app.listen(PORT, () => {
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });

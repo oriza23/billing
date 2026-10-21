@@ -279,3 +279,115 @@ test('Ultimate: urutan prioritas RX dan suhu mengikuti daftar (path awal menang)
   check(RX_PATHS, '-10.5', '-30.5', (result) => result.rx_onu);
   check(TEMP_PATHS, '33.5', '44.5', (result) => result.temp);
 });
+
+const { extractHosts, HOSTS_PROJECTION } = require('../backend/acs_summary');
+
+const host = (fields) => Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, { _value: value }]));
+
+test('extractHosts: TR-098 LANDevice[1].Hosts.Host, hanya key angka', () => {
+  const item = {
+    InternetGatewayDevice: { LANDevice: { 1: { Hosts: { Host: {
+      _object: true, _writable: false,
+      1: host({ HostName: 'laptop-budi', IPAddress: '192.168.1.10', MACAddress: 'AA:BB:CC:DD:EE:01', InterfaceType: '802.11', Active: true }),
+      2: host({ HostName: '', IPAddress: '192.168.1.11', MACAddress: 'AA:BB:CC:DD:EE:02', Layer2Interface: 'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1', Active: 'true' }),
+      3: host({ HostName: 'pc', IPAddress: '192.168.1.12', MACAddress: 'AA:BB:CC:DD:EE:03', Layer2Interface: 'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1' }),
+      10: host({ IPAddress: '192.168.1.20', MACAddress: 'aa-bb-cc-dd-ee-10' }),
+    } } } } },
+  };
+  assert.deepEqual(extractHosts(item), [
+    { hostname: 'laptop-budi', ip: '192.168.1.10', mac: 'AA:BB:CC:DD:EE:01', type: '802.11', active: true },
+    { hostname: 'N/A', ip: '192.168.1.11', mac: 'AA:BB:CC:DD:EE:02', type: '802.11', active: true },
+    { hostname: 'pc', ip: '192.168.1.12', mac: 'AA:BB:CC:DD:EE:03', type: 'Ethernet', active: undefined },
+    { hostname: 'N/A', ip: '192.168.1.20', mac: 'aa-bb-cc-dd-ee-10', type: 'Ethernet', active: undefined },
+  ]);
+});
+
+test('extractHosts: Active=false dibuang, MAC tidak valid tanpa Active dibuang, Active=true tanpa MAC dipertahankan', () => {
+  const item = { Device: { Hosts: { Host: {
+    1: host({ HostName: 'putus', MACAddress: 'AA:BB:CC:DD:EE:01', Active: false }),
+    2: host({ HostName: 'rusak', MACAddress: 'xyz', IPAddress: '10.0.0.2' }),
+    3: host({ HostName: 'aktif-tanpa-mac', IPAddress: '10.0.0.3', Active: true }),
+    4: host({ HostName: 'putus-string', MACAddress: 'AA:BB:CC:DD:EE:04', Active: 'false' }),
+  } } } };
+  const result = extractHosts(item);
+  assert.deepEqual(result.map((entry) => entry.hostname), ['aktif-tanpa-mac']);
+  assert.equal(result[0].mac, '-');
+  assert.equal(result[0].type, 'Ethernet');
+});
+
+test('extractHosts: data kosong / tidak ada menghasilkan array kosong', () => {
+  assert.deepEqual(extractHosts({}), []);
+  assert.deepEqual(extractHosts(null), []);
+  assert.deepEqual(extractHosts({ InternetGatewayDevice: { LANDevice: { 1: { Hosts: { Host: {} } } } } }), []);
+  assert.deepEqual(extractHosts({ InternetGatewayDevice: { LANDevice: { 1: { Hosts: { Host: { 1: 'bukan-objek' } } } } } }), []);
+  assert.ok(HOSTS_PROJECTION.includes('Hosts.Host'));
+  // Host tidak ikut projection daftar ONU (terlalu berat untuk semua perangkat).
+  assert.ok(!LIVE_PROJECTION.split(',').some((path) => /Hosts\.Host(\.|$)/.test(path)));
+});
+
+const { extractWlans, WLANS_PROJECTION } = require('../backend/acs_summary');
+
+const wlanNode = (fields) => host(fields);
+
+test('extractWlans: TR-098 dengan 4 SSID 2.4G + 4 SSID 5G', () => {
+  const WLAN = {};
+  for (let i = 1; i <= 8; i += 1) {
+    WLAN[i] = wlanNode({ SSID: `Wifi-${i}`, Enable: i <= 2 ? '1' : '0', BeaconType: '11i', TotalAssociations: i === 1 ? '3' : '0' });
+  }
+  WLAN[1].PreSharedKey = { 1: { PreSharedKey: { _value: 'rahasia123' } } };
+  WLAN[2].KeyPassphrase = { _value: 'cadangan456' };
+  const wlans = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: { _object: true, ...WLAN } } } } });
+  assert.equal(wlans.length, 8);
+  assert.deepEqual(wlans.map((w) => w.freq), ['2.4 GHz', '2.4 GHz', '2.4 GHz', '2.4 GHz', '5 GHz', '5 GHz', '5 GHz', '5 GHz']);
+  assert.deepEqual(wlans[0], {
+    id: '1', ssid: 'Wifi-1', password: 'rahasia123', security: '11i', freq: '2.4 GHz', band: '20MHz/40MHz', connected: 3, status: true,
+  });
+  assert.equal(wlans[1].password, 'cadangan456');
+  assert.equal(wlans[2].password, '-');
+  assert.equal(wlans[2].status, false);
+  assert.equal(wlans[4].status, false);
+});
+
+test('extractWlans: keamanan terbuka, channel menentukan pita, SSID tanpa node dilewati', () => {
+  const wlans = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {
+    1: wlanNode({ SSID: 'Tamu', BeaconType: 'Basic', BasicEncryptionModes: 'None', Enable: true }),
+    2: wlanNode({ SSID: 'Aneh', BeaconType: 'Basic', BasicEncryptionModes: 'WEPEncryption', Channel: 36, OperatingChannelBandwidth: '80MHz', Enable: 'true' }),
+    3: { Enable: { _value: '1' } },
+    4: 'bukan-objek',
+    x: wlanNode({ SSID: 'bukan-angka' }),
+  } } } } });
+  assert.equal(wlans.length, 2);
+  assert.equal(wlans[0].security, 'Open System');
+  assert.equal(wlans[0].status, true);
+  assert.equal(wlans[1].security, 'WEPEncryption');
+  assert.equal(wlans[1].freq, '5 GHz');
+  assert.equal(wlans[1].band, '80MHz');
+});
+
+test('extractWlans: TR-181 (SSID + AccessPoint + Radio)', () => {
+  const wlans = extractWlans({ Device: { WiFi: {
+    Radio: { 1: wlanNode({ OperatingFrequencyBand: '2.4GHz', OperatingChannelBandwidth: '40MHz' }), 2: wlanNode({ OperatingFrequencyBand: '5GHz' }) },
+    SSID: {
+      1: wlanNode({ SSID: 'Rumah', Enable: true, LowerLayers: 'Device.WiFi.Radio.1' }),
+      2: wlanNode({ SSID: 'Rumah-5G', Enable: false, LowerLayers: 'Device.WiFi.Radio.2' }),
+    },
+    AccessPoint: {
+      1: { ...wlanNode({ SSIDReference: 'Device.WiFi.SSID.1', AssociatedDeviceNumberOfEntries: 4 }), Security: wlanNode({ ModeEnabled: 'WPA2-Personal', KeyPassphrase: 'sandi-181' }) },
+      2: { ...wlanNode({ SSIDReference: 'Device.WiFi.SSID.2' }), Security: wlanNode({ ModeEnabled: 'None' }) },
+    },
+  } } });
+  assert.deepEqual(wlans[0], {
+    id: '1', ssid: 'Rumah', password: 'sandi-181', security: 'WPA2-Personal', freq: '2.4 GHz', band: '40MHz', connected: 4, status: true,
+  });
+  assert.equal(wlans[1].freq, '5 GHz');
+  assert.equal(wlans[1].security, 'Open System');
+  assert.equal(wlans[1].status, false);
+});
+
+test('extractWlans: data kosong -> array kosong; projection WLAN terpisah dari daftar ONU', () => {
+  assert.deepEqual(extractWlans({}), []);
+  assert.deepEqual(extractWlans(null), []);
+  assert.deepEqual(extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {} } } } }), []);
+  assert.ok(WLANS_PROJECTION.includes('WLANConfiguration'));
+  assert.ok(!LIVE_PROJECTION.split(',').some((path) => path.endsWith('WLANConfiguration')));
+});

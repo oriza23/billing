@@ -27,3 +27,13 @@ export const resetAcsDevices = (serverId, ids) => postAction('reset', serverId, 
 export const rebootAcsDevices = (serverId, ids) => postAction('reboot', serverId, ids)
 export const summonAcsDevices = (serverId, ids) => postAction('summon', serverId, ids)
 export const deleteAcsDevices = (serverId, ids) => postAction('delete', serverId, ids)
+
+// Klien terhubung (Host LAN/WLAN) satu perangkat -> { connected_hosts: [{ hostname, ip, mac, type, active }] }
+// deviceId = _id GenieACS. Diambil saat modal detail dibuka.
+export const getAcsDeviceHosts = (serverId, deviceId, config = {}) =>
+  api.get(`${BASE}/devices/hosts`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)
+
+// Daftar WiFi (WLAN) satu perangkat -> { wlans: [{ id, ssid, password, security, freq, band, connected, status }] }
+// Berisi sandi WiFi, jadi hanya bisa diakses admin. Diambil saat tab WLAN dibuka.
+export const getAcsDeviceWlans = (serverId, deviceId, config = {}) =>
+  api.get(`${BASE}/devices/wlans`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)

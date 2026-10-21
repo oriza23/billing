@@ -9,6 +9,9 @@ const MAX_HOST_LENGTH = 100;
 // Sesuaikan dengan Periodic Inform Interval ONU (bisa diubah lewat env).
 const ONLINE_WINDOW_MINUTES = Math.max(parseInt(process.env.ACS_ONLINE_MINUTES, 10) || 30, 1);
 const NBI_TIMEOUT_MS = 15000;
+// Batas tunggu tugas (Summon/Reboot/Reset). Dengan ?connection_request, GenieACS lebih dulu menghubungi
+// ONU dan bisa lama bila ONU tidak terjangkau, jadi lebih longgar dari permintaan biasa.
+const TASK_TIMEOUT_MS = Math.max(parseInt(process.env.ACS_TASK_TIMEOUT_MS, 10) || 30000, 1000);
 const NBI_PAGE_SIZE = 500;
 const NBI_MAX_PAGES = 200;
 
@@ -81,10 +84,11 @@ function baseUrl(server) {
 
 // ---- Klien NBI GenieACS ----------------------------------------------------
 class NbiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, code) {
     super(message);
     this.name = 'NbiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -116,7 +120,7 @@ async function nbiRequest(server, method, path, { body, timeout = NBI_TIMEOUT_MS
       throw error;
     }
     if (error.name === 'AbortError') {
-      throw new NbiError(`Server ACS tidak merespons dalam ${Math.round(timeout / 1000)} detik`);
+      throw new NbiError(`Server ACS tidak merespons dalam ${Math.round(timeout / 1000)} detik`, undefined, 'TIMEOUT');
     }
     throw new NbiError(`Tidak dapat terhubung ke ACS ${server.host}:${server.port} (${error.cause?.code || error.message})`);
   } finally {
@@ -353,7 +357,20 @@ async function sendTask(server, deviceInput, action) {
     device.data_model = await detectDataModel(server, device.device_id);
   }
   const path = `/devices/${encodeURIComponent(device.device_id)}/tasks?timeout=3000&connection_request`;
-  const { status } = await nbiRequest(server, 'POST', path, { body: taskBody(action, device), timeout: 10000 });
+  let status;
+  try {
+    ({ status } = await nbiRequest(server, 'POST', path, { body: taskBody(action, device), timeout: TASK_TIMEOUT_MS }));
+  } catch (error) {
+    if (error.code === 'TIMEOUT') {
+      // Permintaan sudah terkirim; GenieACS biasanya sudah mengantrikan tugasnya sebelum menunggu ONU.
+      throw new NbiError(
+        `GenieACS belum membalas dalam ${Math.round(TASK_TIMEOUT_MS / 1000)} detik (ONU mungkin tidak terjangkau dari ACS). Perintah kemungkinan sudah diantrikan; cek di GenieACS lalu coba lagi.`,
+        undefined,
+        'TIMEOUT',
+      );
+    }
+    throw error;
+  }
   if (status === 404) {
     throw new NbiError('Perangkat tidak ditemukan di GenieACS (coba SINKRON)', 404);
   }
@@ -367,6 +384,7 @@ async function deleteRemoteDevice(server, device) {
 
 module.exports = {
   DEFAULT_NBI_PORT,
+  TASK_TIMEOUT_MS,
   MAX_SERVER_NAME,
   MAX_HOST_LENGTH,
   ONLINE_WINDOW_MINUTES,

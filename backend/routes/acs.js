@@ -4,7 +4,9 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const acs = require('../acs');
-const { LIVE_PROJECTION, summarizeDevice } = require('../acs_summary');
+const {
+  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, extractHosts, extractWlans, summarizeDevice,
+} = require('../acs_summary');
 
 const router = express.Router();
 const requireAdmin = requireRole('admin');
@@ -132,6 +134,20 @@ router.delete('/server/:id', requireAdmin, async (req, res) => {
 // bersih (ekstraksi path TR-069 + konversi satuan ada di backend/acs_summary.js).
 const LIVE_TIMEOUT_MS = 5000;
 
+// Alamat dasar NBI server ACS (http://host:port) dari data_server_acs; null bila tidak ada.
+async function liveBaseUrl(serverId) {
+  const [rows] = await pool.execute(
+    'SELECT ip_domain, port FROM data_server_acs WHERE id = ? LIMIT 1',
+    [serverId],
+  );
+  if (rows.length === 0) {
+    return null;
+  }
+  const { ip_domain: ipDomain, port } = rows[0];
+  const host = net.isIPv6(ipDomain) ? `[${ipDomain}]` : ipDomain;
+  return `http://${host}:${port}`;
+}
+
 router.get('/devices', async (req, res) => {
   const serverId = readId(req.query.server_id);
   if (!serverId) {
@@ -139,17 +155,12 @@ router.get('/devices', async (req, res) => {
   }
 
   try {
-    const [rows] = await pool.execute(
-      'SELECT ip_domain, port FROM data_server_acs WHERE id = ? LIMIT 1',
-      [serverId],
-    );
-    if (rows.length === 0) {
+    const baseUrl = await liveBaseUrl(serverId);
+    if (!baseUrl) {
       return fail(res, 404, 'Server ACS tidak ditemukan');
     }
 
-    const { ip_domain: ipDomain, port } = rows[0];
-    const host = net.isIPv6(ipDomain) ? `[${ipDomain}]` : ipDomain;
-    const response = await axios.get(`http://${host}:${port}/devices`, {
+    const response = await axios.get(`${baseUrl}/devices`, {
       params: { projection: LIVE_PROJECTION },
       timeout: LIVE_TIMEOUT_MS,
     });
@@ -164,6 +175,57 @@ router.get('/devices', async (req, res) => {
     console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
     return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
   }
+});
+
+// Endpoint per perangkat (GET ...?server_id=..&id=<_id GenieACS>): mengambil subtree tertentu satu ONU
+// langsung dari NBI, lalu merangkumnya di backend. Dipanggil saat modal detail / tab dibuka,
+// bukan di daftar ONU (subtree-nya terlalu berat bila diambil untuk semua perangkat).
+function deviceDetailRoute(path, { projection, build, label, middlewares = [] }) {
+  router.get(path, ...middlewares, async (req, res) => {
+    const serverId = readId(req.query.server_id);
+    const deviceId = typeof req.query.id === 'string' ? req.query.id.trim() : '';
+    if (!serverId) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+    if (!deviceId || deviceId.length > 255) {
+      return fail(res, 400, 'ID perangkat tidak valid');
+    }
+
+    try {
+      const baseUrl = await liveBaseUrl(serverId);
+      if (!baseUrl) {
+        return fail(res, 404, 'Server ACS tidak ditemukan');
+      }
+
+      const response = await axios.get(`${baseUrl}/devices/`, {
+        params: { query: JSON.stringify({ _id: deviceId }), projection },
+        timeout: LIVE_TIMEOUT_MS,
+      });
+      const item = Array.isArray(response.data) ? response.data[0] : null;
+      if (!item) {
+        return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+      }
+      return res.json(build(item));
+    } catch (error) {
+      console.error(`Gagal mengambil ${label} dari GenieACS:`, error.code || error.message);
+      return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
+    }
+  });
+}
+
+// Klien terhubung (Host LAN/WLAN) -> { connected_hosts: [...] }
+deviceDetailRoute('/devices/hosts', {
+  projection: HOSTS_PROJECTION,
+  build: (item) => ({ connected_hosts: extractHosts(item) }),
+  label: 'host',
+});
+
+// Daftar WiFi -> { wlans: [...] }. Memuat sandi WiFi pelanggan, jadi hanya untuk admin.
+deviceDetailRoute('/devices/wlans', {
+  projection: WLANS_PROJECTION,
+  build: (item) => ({ wlans: extractWlans(item) }),
+  label: 'WLAN',
+  middlewares: [requireAdmin],
 });
 
 // ---- Daftar ONU hasil SINKRON (tersimpan di DB web) + statistik ---------------
@@ -345,6 +407,13 @@ async function loadActionTargets(req) {
   return { server, devices };
 }
 
+// Kegagalan per perangkat dicatat di log backend supaya mudah dilacak.
+function logFailures(label, serverRow, results) {
+  results.filter((item) => !item.ok).forEach((item) => {
+    console.error(`[ACS ${label}] ${serverRow.host}:${serverRow.port} ${item.device_id}: ${item.message}`);
+  });
+}
+
 function summarize(label, results) {
   const berhasil = results.filter((item) => item.ok).length;
   const gagal = results.length - berhasil;
@@ -372,6 +441,7 @@ function taskRoute(path, action, label) {
           return { id: device.id, device_id: device.device_id, ok: false, message: taskError.message };
         }
       });
+      logFailures(label, server, results);
       return res.json(summarize(label, results));
     } catch (error) {
       return fail(res, 500, `Gagal menjalankan ${label}`, error);
@@ -402,6 +472,7 @@ router.post('/delete', requireAdmin, async (req, res) => {
         return { id: device.id, device_id: device.device_id, ok: false, message: deleteError.message };
       }
     });
+    logFailures('Hapus ONU', server, results);
     return res.json(summarize('Hapus ONU', results));
   } catch (error) {
     return fail(res, 500, 'Gagal menghapus ONU', error);

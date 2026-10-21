@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Flag, X } from 'lucide-react'
+import { Eye, EyeOff, Flag, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import {
   createAcsServer,
   deleteAcsDevices,
   deleteAcsServer,
+  getAcsDeviceHosts,
+  getAcsDeviceWlans,
   getAcsDevices,
   getAcsServers,
   rebootAcsDevices,
@@ -303,6 +305,7 @@ function IpLink({ ip }) {
       target="_blank"
       rel="noopener noreferrer"
       className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+      onClick={(event) => event.stopPropagation()}
     >
       {ip}
     </a>
@@ -330,6 +333,245 @@ function matchesSearch(item, term) {
     .some((value) => String(value ?? '').toLowerCase().includes(term))
 }
 
+const DETAIL_TABS = ['TERHUBUNG', 'WLAN', 'LAN', 'WAN']
+const HOST_COLUMNS = ['No', 'HOSTNAME', 'IP ADDRESS', 'MAC ADDRESS', 'TYPE']
+const WLAN_COLUMNS = ['ID', 'SSID', 'PASSWORD', 'SECURITY', 'FREQ', 'BAND', 'CONNECTED', 'STATUS']
+
+const STATUS_BADGE = {
+  online: { label: 'ONLINE', className: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' },
+  off24: { label: 'OFF < 24H', className: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' },
+  off24plus: { label: 'OFF > 24H', className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+}
+
+// Sandi WiFi disembunyikan secara bawaan; klik ikon mata untuk melihatnya.
+function WlanPassword({ value }) {
+  const [revealed, setRevealed] = useState(false)
+  if (!value || value === '-') {
+    return '-'
+  }
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="font-mono text-xs">{revealed ? value : '••••••••'}</span>
+      <button
+        type="button"
+        className="grid h-6 w-6 cursor-pointer place-items-center rounded border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
+        aria-label={revealed ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
+        onClick={() => setRevealed((current) => !current)}
+      >
+        {revealed ? <EyeOff size={14} /> : <Eye size={14} />}
+      </button>
+    </span>
+  )
+}
+
+function DetailRow({ label, children }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-gray-100 py-2 last:border-b-0 dark:border-slate-700">
+      <dt className="shrink-0 text-xs font-bold tracking-wide text-gray-500 uppercase dark:text-gray-400">{label}</dt>
+      <dd className="m-0 min-w-0 truncate text-right text-sm font-medium text-gray-900 dark:text-gray-100">{children}</dd>
+    </div>
+  )
+}
+
+function DetailIndicator({ label, children }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-slate-700 dark:bg-slate-900/40">
+      <p className="m-0 text-xs font-bold tracking-widest text-gray-500 uppercase dark:text-gray-400">{label}</p>
+      <div className="mt-2 text-lg font-bold text-gray-900 dark:text-gray-100">{children}</div>
+    </div>
+  )
+}
+
+// Modal detail satu ONU. Data diambil dari baris yang diklik (sudah bersih dari backend).
+// Info pelanggan / host LAN belum punya sumber data, jadi memakai placeholder.
+function DeviceDetailModal({
+  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, renderRx, renderTemp,
+}) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const badge = STATUS_BADGE[device.status] || STATUS_BADGE.off24plus
+  const hasHosts = Boolean(device?.connected_hosts && device.connected_hosts.length > 0)
+  const hasWlans = Boolean(device?.wlans && device.wlans.length > 0)
+
+  return (
+    <div
+      className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+    >
+      <div
+        className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-white shadow-xl dark:bg-slate-800"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="acs-detail-title"
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-800">
+          <h2 id="acs-detail-title" className="m-0 text-base font-bold tracking-wide text-gray-900 dark:text-gray-100">
+            DETAIL PERANGKAT
+          </h2>
+          <button
+            type="button"
+            className="grid h-8 w-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
+            aria-label="Tutup"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="grid gap-6 p-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <DetailIndicator label="REDAMAN ONU">{renderRx(device.rx_onu)}</DetailIndicator>
+            <DetailIndicator label="TEMPERATURE">{renderTemp(device.temp)}</DetailIndicator>
+            <DetailIndicator label="UPTIME">{formatUptime(device.uptime)}</DetailIndicator>
+          </div>
+
+          <div className="grid grid-cols-1 gap-x-8 gap-y-2 md:grid-cols-3">
+            <dl className="m-0">
+              <DetailRow label="Nama Pelanggan">{device.username ?? '-'}</DetailRow>
+              <DetailRow label="No Layanan">-</DetailRow>
+              <DetailRow label="Tgl Isolir">-</DetailRow>
+            </dl>
+            <dl className="m-0">
+              <DetailRow label="Username">{device.username ?? '-'}</DetailRow>
+              <DetailRow label="IP TR069"><IpLink ip={device.ip_tr069} /></DetailRow>
+              <DetailRow label="SuperAdmin">-</DetailRow>
+            </dl>
+            <dl className="m-0">
+              <DetailRow label="Status">
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${badge.className}`}>{badge.label}</span>
+              </DetailRow>
+              <DetailRow label="SerialNumber">{device.sn || '-'}</DetailRow>
+              <DetailRow label="Last Inform">{formatDate(device.last_inform)}</DetailRow>
+            </dl>
+          </div>
+
+          <div>
+            <div className="flex items-end justify-between gap-3 border-b border-gray-200 dark:border-slate-700">
+              <div className="flex flex-wrap gap-1" role="tablist">
+                {DETAIL_TABS.map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab}
+                    className={`-mb-px cursor-pointer border-0 border-b-2 bg-transparent px-4 py-2.5 text-[13px] font-bold tracking-wide transition-colors ${activeTab === tab ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}
+                    onClick={() => onTabChange(tab)}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="mb-1.5 cursor-pointer rounded-md border-0 bg-red-600 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={summoning}
+                onClick={onSummon}
+              >
+                {summoning ? '...' : 'Summon'}
+              </button>
+            </div>
+
+            <div className="pt-4">
+              {activeTab === 'TERHUBUNG' ? (
+                <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
+                  <table className="w-full min-w-max border-collapse">
+                    <thead>
+                      <tr>
+                        {HOST_COLUMNS.map((column) => (
+                          <th key={column} className={thClass}>{column}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hasHosts ? (
+                        device.connected_hosts.map((host, index) => (
+                          <tr key={`${host.mac}-${host.ip}-${index}`} className="border-b border-gray-100 last:border-b-0 dark:border-slate-700">
+                            <td className={tdClass}>{index + 1}</td>
+                            <td className={`${tdClass} font-semibold`}>{host.hostname}</td>
+                            <td className={tdClass}>{host.ip}</td>
+                            <td className={`${tdClass} font-mono text-xs`}>{host.mac}</td>
+                            <td className={tdClass}>{host.type}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={HOST_COLUMNS.length} className="px-4 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+                            {hostsLoading && 'Memuat daftar perangkat terhubung...'}
+                            {!hostsLoading && hostsError && <span className="font-semibold text-red-600 dark:text-red-400">{hostsError}</span>}
+                            {!hostsLoading && !hostsError && 'Tidak ada perangkat yang terhubung.'}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : activeTab === 'WLAN' ? (
+                <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
+                  <table className="w-full min-w-max border-collapse">
+                    <thead>
+                      <tr>
+                        {WLAN_COLUMNS.map((column) => (
+                          <th key={column} className={thClass}>{column}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hasWlans ? (
+                        device.wlans.map((wlan) => (
+                          <tr key={wlan.id} className="border-b border-gray-100 last:border-b-0 dark:border-slate-700">
+                            <td className={tdClass}>{wlan.id}</td>
+                            <td className={`${tdClass} font-semibold`}>{wlan.ssid}</td>
+                            <td className={tdClass}><WlanPassword value={wlan.password} /></td>
+                            <td className={tdClass}>{wlan.security}</td>
+                            <td className={tdClass}>{wlan.freq}</td>
+                            <td className={tdClass}>{wlan.band}</td>
+                            <td className={tdClass}>{wlan.connected}</td>
+                            <td className={tdClass}>
+                              {wlan.status ? (
+                                <span className="rounded border border-blue-600 px-2 py-1 text-xs font-bold text-blue-600 dark:border-blue-400 dark:text-blue-400">ENABLED</span>
+                              ) : (
+                                <span className="rounded border border-orange-500 px-2 py-1 text-xs font-bold text-orange-500">DISABLED</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={WLAN_COLUMNS.length} className="px-4 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+                            {wlansLoading && 'Memuat data WLAN...'}
+                            {!wlansLoading && wlansError && <span className="font-semibold text-red-600 dark:text-red-400">{wlansError}</span>}
+                            {!wlansLoading && !wlansError && 'Data WLAN tidak ditemukan.'}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="m-0 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+                  Tab {activeTab} belum tersedia.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function GenieAcs() {
   const [servers, setServers] = useState([])
   // Server wajib dipilih manual: kosong ('') = belum dipilih, data tidak dimuat.
@@ -346,6 +588,12 @@ function GenieAcs() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
+  const [selectedDevice, setSelectedDevice] = useState(null)
+  const [activeTab, setActiveTab] = useState('TERHUBUNG')
+  const [hostsState, setHostsState] = useState({ loading: false, error: '' })
+  const [hostsReloadKey, setHostsReloadKey] = useState(0)
+  const [wlansState, setWlansState] = useState({ loading: false, error: '' })
+  const [wlansReloadKey, setWlansReloadKey] = useState(0)
 
   const hasServer = selectedServer !== ''
 
@@ -472,14 +720,91 @@ function GenieAcs() {
 
   const reload = () => setReloadKey((key) => key + 1)
 
+  // Daftar klien terhubung diambil per perangkat saat modal dibuka (tidak ikut daftar ONU).
+  const selectedDeviceId = selectedDevice?.id ?? null
+  useEffect(() => {
+    if (!selectedDeviceId || !selectedServer) {
+      return undefined
+    }
+    const controller = new AbortController()
+
+    async function loadHosts() {
+      setHostsState({ loading: true, error: '' })
+      try {
+        const result = await getAcsDeviceHosts(selectedServer, selectedDeviceId, { signal: controller.signal })
+        if (controller.signal.aborted) {
+          return
+        }
+        const connectedHosts = Array.isArray(result?.connected_hosts) ? result.connected_hosts : []
+        setSelectedDevice((current) => (current && current.id === selectedDeviceId
+          ? { ...current, connected_hosts: connectedHosts }
+          : current))
+        setHostsState({ loading: false, error: '' })
+      } catch (requestError) {
+        if (controller.signal.aborted) {
+          return
+        }
+        setHostsState({ loading: false, error: errorMessage(requestError, 'Gagal memuat perangkat terhubung.') })
+      }
+    }
+
+    loadHosts()
+    return () => controller.abort()
+  }, [selectedDeviceId, selectedServer, hostsReloadKey])
+
+  // Daftar WiFi diambil saat tab WLAN dibuka (data lama tetap tampil selama dimuat ulang).
+  const wlanTabActive = activeTab === 'WLAN'
+  useEffect(() => {
+    if (!selectedDeviceId || !selectedServer || !wlanTabActive) {
+      return undefined
+    }
+    const controller = new AbortController()
+
+    async function loadWlans() {
+      setWlansState({ loading: true, error: '' })
+      try {
+        const result = await getAcsDeviceWlans(selectedServer, selectedDeviceId, { signal: controller.signal })
+        if (controller.signal.aborted) {
+          return
+        }
+        const wlans = Array.isArray(result?.wlans) ? result.wlans : []
+        setSelectedDevice((current) => (current && current.id === selectedDeviceId ? { ...current, wlans } : current))
+        setWlansState({ loading: false, error: '' })
+      } catch (requestError) {
+        if (controller.signal.aborted) {
+          return
+        }
+        setWlansState({ loading: false, error: errorMessage(requestError, 'Gagal memuat data WLAN.') })
+      }
+    }
+
+    loadWlans()
+    return () => controller.abort()
+  }, [selectedDeviceId, selectedServer, wlanTabActive, wlansReloadKey])
+
   function resetView() {
     setPage(1)
     setSelected(new Set())
   }
 
+  function handleTabChange(tab) {
+    if (tab === 'WLAN') {
+      setWlansState({ loading: true, error: '' })
+    }
+    setActiveTab(tab)
+  }
+
+  function openDevice(item) {
+    setActiveTab('TERHUBUNG')
+    setWlansState({ loading: false, error: '' })
+    setHostsState({ loading: true, error: '' })
+    setSelectedDevice(item)
+  }
+
   function handleServerChange(event) {
     const value = event.target.value
     setSelectedServer(value)
+    setSelectedDevice(null)
     setDataOnu([])
     setError('')
     resetView()
@@ -511,6 +836,32 @@ function GenieAcs() {
     }
     Swal.fire({ icon: 'warning', title: 'Pilih server', text: 'Pilih server ACS terlebih dahulu.' })
     return false
+  }
+
+  // Summon satu ONU dari modal detail (memakai endpoint /api/acs/summon yang sama dengan tombol SUMMON).
+  async function handleSummonDevice(device) {
+    if (!requireServer()) {
+      return
+    }
+    setBusy('summon-device')
+    try {
+      const result = await summonAcsDevices(selectedServer, [device.id])
+      if (result.success) {
+        setHostsReloadKey((key) => key + 1)
+        setWlansReloadKey((key) => key + 1)
+      }
+      Swal.fire({
+        icon: result.success ? 'success' : 'warning',
+        title: 'Summon',
+        text: result.message,
+        timer: result.success ? 2000 : undefined,
+        showConfirmButton: !result.success,
+      })
+    } catch (requestError) {
+      Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal menjalankan Summon.') })
+    } finally {
+      setBusy('')
+    }
   }
 
   async function handleSync() {
@@ -731,9 +1082,10 @@ function GenieAcs() {
                   return (
                     <tr
                       key={item.id}
-                      className={`border-b border-gray-100 last:border-b-0 dark:border-gray-700 ${isSelected ? 'bg-blue-50 dark:bg-blue-950/40' : 'hover:bg-gray-50 dark:hover:bg-gray-700/40'}`}
+                      className={`cursor-pointer border-b border-gray-100 last:border-b-0 dark:border-gray-700 ${isSelected ? 'bg-blue-50 dark:bg-blue-950/40' : 'hover:bg-gray-100 dark:hover:bg-slate-700'}`}
+                      onClick={() => openDevice(item)}
                     >
-                      <td className={tdClass}>
+                      <td className={tdClass} onClick={(event) => event.stopPropagation()}>
                         <input
                           type="checkbox"
                           className="h-4 w-4 cursor-pointer accent-blue-600"
@@ -795,6 +1147,23 @@ function GenieAcs() {
           onPageChange={setPage}
         />
       </div>
+
+      {selectedDevice && (
+        <DeviceDetailModal
+          device={selectedDevice}
+          activeTab={activeTab}
+          onTabChange={handleTabChange}
+          onClose={() => setSelectedDevice(null)}
+          onSummon={() => handleSummonDevice(selectedDevice)}
+          summoning={busy === 'summon-device'}
+          hostsLoading={hostsState.loading}
+          hostsError={hostsState.error}
+          wlansLoading={wlansState.loading}
+          wlansError={wlansState.error}
+          renderRx={renderRx}
+          renderTemp={renderTemp}
+        />
+      )}
 
       {serverModalOpen && (
         <ServerModal

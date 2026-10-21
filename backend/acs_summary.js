@@ -271,8 +271,162 @@ function summarizeDevice(item) {
   };
 }
 
+// ---- Daftar klien terhubung (Hosts.Host) -------------------------------------
+// Tidak ikut di LIVE_PROJECTION: subtree Host berisi puluhan parameter per klien, dan daftar
+// ONU mengambil semua perangkat sekaligus. Diambil per perangkat saat modal detail dibuka.
+const HOSTS_PROJECTION = `${IGD}.LANDevice.1.Hosts.Host,Device.Hosts.Host`;
+const MAC_PATTERN = /^([0-9A-F]{2}[:-]){5}[0-9A-F]{2}$/i;
+const MAX_HOSTS = 200;
+
+function hostIsActive(value) {
+  if (value === true || value === 1) {
+    return true;
+  }
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return text === 'true' || text === '1';
+}
+
+// Host yang ditampilkan: Active = true, atau (bila Active tidak dilaporkan) punya MAC valid.
+// Active = false berarti klien sudah putus (TR-069 menyimpan riwayat host), jadi tidak ikut.
+function shouldKeepHost(host) {
+  if (host.active === true) {
+    return true;
+  }
+  if (host.active === false) {
+    return false;
+  }
+  return MAC_PATTERN.test(host.mac);
+}
+
+function extractHosts(item) {
+  const hostNode = item?.InternetGatewayDevice?.LANDevice?.[1]?.Hosts?.Host ?? item?.Device?.Hosts?.Host;
+  if (!isNode(hostNode)) {
+    return [];
+  }
+  const connectedHosts = [];
+  // Key angka saja ('1', '2', ...); key berawalan "_" adalah metadata GenieACS.
+  for (const key of Object.keys(hostNode).filter((name) => /^\d+$/.test(name))) {
+    const hostData = hostNode[key];
+    if (!isNode(hostData)) {
+      continue;
+    }
+    const layer2 = hostData?.Layer2Interface?._value;
+    const rawActive = hostData?.Active?._value;
+    connectedHosts.push({
+      hostname: toText(hostData?.HostName?._value) || 'N/A',
+      ip: toText(hostData?.IPAddress?._value) || '-',
+      mac: toText(hostData?.MACAddress?._value) || '-',
+      type: toText(hostData?.InterfaceType?._value)
+        || (typeof layer2 === 'string' && layer2.includes('WLAN') ? '802.11' : 'Ethernet'),
+      active: isEmpty(rawActive) ? undefined : hostIsActive(rawActive),
+    });
+  }
+  return connectedHosts.filter(shouldKeepHost).slice(0, MAX_HOSTS);
+}
+
+// ---- Daftar WiFi (WLAN) --------------------------------------------------------
+// Seperti host: tidak ikut LIVE_PROJECTION karena subtree WLANConfiguration berisi puluhan
+// parameter per SSID. Diambil per perangkat saat tab WLAN dibuka.
+const WLANS_PROJECTION = `${IGD}.LANDevice.1.WLANConfiguration,Device.WiFi.SSID,Device.WiFi.AccessPoint,Device.WiFi.Radio`;
+const MAX_WLANS = 16;
+const DEFAULT_BAND = '20MHz/40MHz';
+
+function numericKeys(node) {
+  return isNode(node) ? Object.keys(node).filter((name) => /^\d+$/.test(name)) : [];
+}
+
+// 2.4 GHz untuk index 1-4 dan 5 GHz untuk 5-8 (asumsi umum). Bila channel dilaporkan, channel
+// yang menentukan: 1-14 = 2.4 GHz, >= 32 = 5 GHz (channel 0 / auto tidak dipakai).
+function frequencyOf(key, channel) {
+  if (channel !== null && channel >= 32) {
+    return '5 GHz';
+  }
+  if (channel !== null && channel >= 1 && channel <= 14) {
+    return '2.4 GHz';
+  }
+  return parseInt(key, 10) > 4 ? '5 GHz' : '2.4 GHz';
+}
+
+// BeaconType "Basic" berarti tanpa WPA: lihat BasicEncryptionModes ("None" = terbuka).
+function securityTr098(wlanData) {
+  const beacon = toText(wlanData?.BeaconType?._value);
+  if (beacon && beacon !== 'Basic') {
+    return beacon;
+  }
+  const basic = toText(wlanData?.BasicEncryptionModes?._value);
+  if (basic && basic !== 'None') {
+    return basic;
+  }
+  return 'Open System';
+}
+
+function wlansTr098(wlanObj) {
+  const wlans = [];
+  for (const key of numericKeys(wlanObj)) {
+    const wlanData = wlanObj[key];
+    if (isNode(wlanData) && wlanData.SSID) {
+      const channel = toNumber(wlanData?.Channel?._value);
+      wlans.push({
+        id: key,
+        ssid: toText(wlanData?.SSID?._value) || 'N/A',
+        password: toText(wlanData?.PreSharedKey?.[1]?.PreSharedKey?._value)
+          || toText(wlanData?.KeyPassphrase?._value)
+          || toText(wlanData?.PreSharedKey?.[1]?.KeyPassphrase?._value)
+          || '-',
+        security: securityTr098(wlanData),
+        freq: frequencyOf(key, channel),
+        band: toText(wlanData?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
+        connected: toNumber(wlanData?.TotalAssociations?._value) ?? 0,
+        status: hostIsActive(wlanData?.Enable?._value),
+      });
+    }
+  }
+  return wlans;
+}
+
+// TR-181: SSID.{i} (nama, enable), AccessPoint.{j} (sandi, keamanan, klien; dirujuk lewat
+// SSIDReference, cadangannya index sama), Radio.{k} (pita frekuensi; dirujuk lewat LowerLayers).
+function wlansTr181(wifi) {
+  const wlans = [];
+  const accessPoints = numericKeys(wifi?.AccessPoint).map((name) => wifi.AccessPoint[name]);
+  for (const key of numericKeys(wifi?.SSID)) {
+    const ssidData = wifi.SSID[key];
+    if (isNode(ssidData) && ssidData.SSID) {
+      const accessPoint = accessPoints.find((entry) => String(entry?.SSIDReference?._value ?? '').endsWith(`WiFi.SSID.${key}`))
+        ?? wifi?.AccessPoint?.[key];
+      const radioIndex = String(ssidData?.LowerLayers?._value ?? '').match(/Radio\.(\d+)/)?.[1];
+      const radio = radioIndex ? wifi?.Radio?.[radioIndex] : undefined;
+      const radioBand = toText(radio?.OperatingFrequencyBand?._value);
+      const mode = toText(accessPoint?.Security?.ModeEnabled?._value);
+      wlans.push({
+        id: key,
+        ssid: toText(ssidData?.SSID?._value) || 'N/A',
+        password: toText(accessPoint?.Security?.KeyPassphrase?._value)
+          || toText(accessPoint?.Security?.PreSharedKey?._value)
+          || '-',
+        security: mode && mode !== 'None' ? mode : 'Open System',
+        freq: radioBand ? radioBand.replace(/GHz/i, ' GHz').replace(/\s+/g, ' ').trim() : frequencyOf(key, null),
+        band: toText(radio?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
+        connected: toNumber(accessPoint?.AssociatedDeviceNumberOfEntries?._value) ?? 0,
+        status: hostIsActive(ssidData?.Enable?._value),
+      });
+    }
+  }
+  return wlans;
+}
+
+function extractWlans(item) {
+  const tr098 = wlansTr098(item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration);
+  const wlans = tr098.length > 0 ? tr098 : wlansTr181(item?.Device?.WiFi);
+  return wlans.slice(0, MAX_WLANS);
+}
+
 module.exports = {
   LIVE_PROJECTION,
+  HOSTS_PROJECTION,
+  WLANS_PROJECTION,
+  extractHosts,
+  extractWlans,
   RX_PATHS,
   TEMP_PATHS,
   readPath,

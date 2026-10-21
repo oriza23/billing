@@ -64,24 +64,41 @@
   color: #6b7280;
 }
 
+/* ---- Isi tabel ----
+   Semua sel diberi latar gelap eksplisit (bukan transparan) supaya tidak ada baris yang
+   tetap putih. Urutan penting: dasar -> zebra -> hover -> terpilih/edit (spesifisitas sama,
+   yang terakhir menang). */
 .dark .stok-table td,
 .dark .outlet-table td,
 .dark .hprofil-table td,
 .dark .data-table td,
 .dark .langganan-table td,
+.dark .online-table td,
+.dark .terjual-table td,
 .dark .profil-table td,
 .dark .admin-table td,
 .dark .pelanggan-table td,
 .dark .monitoring-table td,
 .dark .setting-status-table td {
+  background-color: #1f2937;
   color: #f3f4f6;
   border-bottom-color: #374151;
+}
+
+/* Zebra baris genap (di mode terang berwarna #f7fbfd). */
+.dark .profil-table tbody tr:nth-child(even) td,
+.dark .admin-table tbody tr:nth-child(even) td,
+.dark .pelanggan-table tbody tr:nth-child(even) td,
+.dark .monitoring-table tbody tr:nth-child(even) td {
+  background-color: #243041;
 }
 
 .dark .stok-table tbody tr:hover td,
 .dark .hprofil-table tbody tr:hover td,
 .dark .data-table tbody tr:hover td,
 .dark .langganan-table tbody tr:hover td,
+.dark .online-table tbody tr:hover td,
+.dark .terjual-table tbody tr:hover td,
 .dark .profil-table tbody tr:hover td,
 .dark .admin-table tbody tr:hover td,
 .dark .pelanggan-table tbody tr:hover td,
@@ -93,8 +110,52 @@
 .dark .outlet-table tbody tr.is-selected td,
 .dark .hprofil-table tbody tr.is-selected td,
 .dark .data-table tbody tr.is-selected td,
-.dark .langganan-table tbody tr.is-selected td {
+.dark .langganan-table tbody tr.is-selected td,
+.dark .online-table tbody tr.is-selected td,
+.dark .terjual-table tbody tr.is-selected td,
+.dark .profil-table tbody tr.is-editing td,
+.dark .admin-table tbody tr.is-editing td,
+.dark .pelanggan-table tbody tr.is-editing td {
   background-color: #0c4a6e;
+}
+
+/* Warna aksen per-kolom tetap dipertahankan (aturan dasar di atas akan menimpanya). */
+.dark .online-table td.online-uptime {
+  color: #fb923c;
+}
+
+.dark .outlet-table td.outlet-stock {
+  color: #fb7185;
+}
+
+.dark .setting-status-table td.is-ok {
+  color: #34d399;
+}
+
+.dark .setting-status-table td.is-warn {
+  color: #fbbf24;
+}
+
+/* Kolom nomor urut memakai abu-abu gelap di mode terang; terangkan di mode gelap. */
+.dark .profil-table td:first-child,
+.dark .admin-table td:first-child,
+.dark .pelanggan-table td:first-child,
+.dark .monitoring-table td:first-child {
+  color: #9ca3af;
+}
+
+/* Voucher terjual yang sudah kedaluwarsa: teks merah tetap terbaca di latar gelap. */
+.dark .terjual-table tbody tr.terjual-expired td {
+  color: #fb7185;
+}
+
+.dark .terjual-table tbody tr.terjual-expired:hover td {
+  background-color: #4c0519;
+}
+
+.dark .terjual-table tbody tr.terjual-expired .stok-profil {
+  background-color: #4c0519;
+  color: #fb7185;
 }
 
 .dark .stok-stat strong,

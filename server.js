@@ -99,9 +99,20 @@ async function start() {
   if (osTimezone !== timezone) {
     console.warn(`Peringatan: zona waktu OS (${osTimezone || 'tidak diketahui'}) berbeda dengan pengaturan web (${timezone}). Simpan ulang di menu Sistem > Pengaturan untuk menyamakan.`);
   }
-  startExpiredVoucherEnforcement();
-  startIsolirEnforcement();
-  app.listen(PORT, () => {
+  // Express 5 mengirim error bind (mis. EADDRINUSE) ke callback listen. Tanpa pengecekan ini,
+  // server kedua tetap mencetak "berjalan" padahal port dipakai proses lama (kode lama + cron ganda).
+  app.listen(PORT, (error) => {
+    if (error) {
+      console.error(
+        error.code === 'EADDRINUSE'
+          ? `Port ${PORT} sudah dipakai proses lain. Hentikan proses lama dulu: fuser -k ${PORT}/tcp`
+          : `Gagal membuka port ${PORT}: ${error.message}`,
+      );
+      process.exit(1);
+    }
+    // Penjadwal hanya dijalankan setelah port benar-benar terbuka, supaya tidak ada cron ganda.
+    startExpiredVoucherEnforcement();
+    startIsolirEnforcement();
     console.log(`Server berjalan di http://localhost:${PORT}`);
   });
 }

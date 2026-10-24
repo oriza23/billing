@@ -370,6 +370,10 @@ function WlanPassword({ value }) {
 const WLAN_SECURITY_OPTIONS = ['WPA/WPA2-PSK', 'WPA2-PSK', 'WPA-PSK', 'Open System']
 const EMPTY_WLAN_FORM = { ssid: '', security: '', password: '', status: true }
 
+function isOpenSecurity(security) {
+  return security === 'Open System' || security === 'None'
+}
+
 // Nilai keamanan dari ACS (BeaconType TR-098 / ModeEnabled TR-181) -> label yang ramah di form.
 function securityLabel(raw) {
   const value = String(raw ?? '').trim()
@@ -386,10 +390,11 @@ function securityLabel(raw) {
 }
 
 function wlanFormFrom(wlan) {
+  const security = securityLabel(wlan.security)
   return {
     ssid: wlan.ssid === 'N/A' ? '' : wlan.ssid,
-    security: securityLabel(wlan.security),
-    password: !wlan.password || wlan.password === '-' ? '' : wlan.password,
+    security,
+    password: !wlan.password || wlan.password === '-' || isOpenSecurity(security) ? '' : wlan.password,
     status: Boolean(wlan.status),
   }
 }
@@ -409,7 +414,7 @@ function FormField({ label, hint, children }) {
   )
 }
 
-// Pop-up edit WLAN (berlapis di atas modal detail). Saat ini belum mengirim perubahan ke ONU.
+// Pop-up edit WLAN (berlapis di atas modal detail). Perubahan dikirim ke ONU lewat onSubmit.
 function EditWlanModal({ wlan, form, updating, onChange, onClose, onSubmit }) {
   const [showPassword, setShowPassword] = useState(false)
 
@@ -423,7 +428,7 @@ function EditWlanModal({ wlan, form, updating, onChange, onClose, onSubmit }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
-  const isOpen = form.security === 'Open System'
+  const isOpen = isOpenSecurity(form.security)
   const securityOptions = WLAN_SECURITY_OPTIONS.includes(form.security) || !form.security
     ? WLAN_SECURITY_OPTIONS
     : [...WLAN_SECURITY_OPTIONS, form.security]
@@ -478,12 +483,18 @@ function EditWlanModal({ wlan, form, updating, onChange, onClose, onSubmit }) {
             />
           </FormField>
 
-          <FormField label="Security Mode" hint="Perubahan mode keamanan belum didukung">
+          <FormField label="Security Mode">
             <select
               className={formInput}
-              disabled
+              disabled={updating}
               value={form.security}
-              onChange={(event) => onChange('security', event.target.value)}
+              onChange={(event) => {
+                const value = event.target.value
+                onChange('security', value)
+                if (isOpenSecurity(value)) {
+                  onChange('password', '')
+                }
+              }}
             >
               {securityOptions.map((option) => (
                 <option key={option} value={option}>{option}</option>
@@ -501,7 +512,7 @@ function EditWlanModal({ wlan, form, updating, onChange, onClose, onSubmit }) {
                 maxLength={20}
                 required={!isOpen}
                 disabled={isOpen || updating}
-                value={isOpen ? '' : form.password}
+                value={form.password}
                 onChange={(event) => onChange('password', event.target.value)}
               />
               <button
@@ -1409,7 +1420,8 @@ function GenieAcs() {
         deviceId: selectedDevice.id,
         wlanId: editingWlan.id,
         ssid: wlanForm.ssid,
-        password: wlanForm.password,
+        security: wlanForm.security,
+        password: isOpenSecurity(wlanForm.security) ? '' : wlanForm.password,
         status: wlanForm.status,
       })
       setEditingWlan(null)
@@ -1799,7 +1811,13 @@ function GenieAcs() {
           wlan={editingWlan}
           form={wlanForm}
           updating={isUpdating}
-          onChange={(field, value) => setWlanForm((current) => ({ ...current, [field]: value }))}
+          onChange={(field, value) => setWlanForm((current) => {
+            const next = { ...current, [field]: value }
+            if (field === 'security' && isOpenSecurity(value)) {
+              next.password = ''
+            }
+            return next
+          })}
           onClose={() => setEditingWlan(null)}
           onSubmit={handleUpdateWlan}
         />

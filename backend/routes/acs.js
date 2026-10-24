@@ -238,8 +238,8 @@ deviceDetailRoute('/devices/wlans', {
   middlewares: [requireAdmin],
 });
 
-// ---- Update WLAN: push perubahan SSID / password / status ke ONU (setParameterValues) ----
-// Body: { server_id, deviceId (_id GenieACS), wlanId, ssid, password, status }.
+// ---- Update WLAN: push perubahan SSID / password / status / security ke ONU (setParameterValues) ----
+// Body: { server_id, deviceId (_id GenieACS), wlanId, ssid, password, status, security }.
 // Hanya admin. Hanya parameter yang berbeda dari konfigurasi saat ini yang dikirim.
 router.post('/update-wlan', requireAdmin, async (req, res) => {
   const parsed = parseWlanUpdate(req.body);
@@ -247,7 +247,7 @@ router.post('/update-wlan', requireAdmin, async (req, res) => {
     return fail(res, 400, parsed.error);
   }
   const {
-    deviceId, wlanId, ssid, password, status,
+    deviceId, wlanId, ssid, password, status, security,
   } = parsed.value;
 
   try {
@@ -267,9 +267,13 @@ router.post('/update-wlan', requireAdmin, async (req, res) => {
       return fail(res, 404, `WLAN ${wlanId} tidak ditemukan pada perangkat (coba Summon lalu muat ulang)`);
     }
 
-    const { parameterValues, changed } = planWlanUpdate({
-      wlanId, wlanNode: target.wlanNode, ssid, password, status,
+    const plan = planWlanUpdate({
+      wlanId, wlanNode: target.wlanNode, ssid, password, status, security,
     });
+    if (plan.error) {
+      return fail(res, 400, plan.error);
+    }
+    const { parameterValues, changed } = plan;
     if (parameterValues.length === 0) {
       return res.json({ success: true, message: 'Tidak ada perubahan untuk dikirim', changed });
     }

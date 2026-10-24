@@ -7,6 +7,34 @@ const SSID_MAX_BYTES = 32; // standar 802.11: SSID maksimal 32 oktet
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 63; // batas passphrase WPA/WPA2 (UI membatasi lebih ketat: 8-20)
 
+// Nilai BeaconType / mode mentah -> label yang sama dengan form.
+// Harus selaras dengan securityLabel di frontend dan securityTr098 di acs_summary.js.
+const SECURITY_LABELS = {
+  '11i': 'WPA2-PSK',
+  WPA: 'WPA-PSK',
+  WPAand11i: 'WPA/WPA2-PSK',
+  'WPA2-Personal': 'WPA2-PSK',
+  'WPA-Personal': 'WPA-PSK',
+  'WPA-WPA2-Personal': 'WPA/WPA2-PSK',
+  None: 'Open System',
+  Basic: 'Open System',
+  'Open System': 'Open System',
+};
+
+const KNOWN_SECURITY = new Set([
+  'WPA/WPA2-PSK',
+  'WPA2-PSK',
+  'WPA-PSK',
+  'WPA2-Personal',
+  'WPA-Personal',
+  'WPA-WPA2-Personal',
+  '11i',
+  'WPA',
+  'WPAand11i',
+  'Open System',
+  'None',
+]);
+
 function isNode(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -17,6 +45,69 @@ function asBoolean(value) {
   }
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return text === 'true' || text === '1';
+}
+
+function textOf(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return String(value).trim();
+}
+
+function isOpenSecurity(security) {
+  return security === 'Open System' || security === 'None';
+}
+
+// Mode dari body. Kosong = jangan ubah keamanan (kompatibel dengan klien lama).
+// Nilai di luar daftar dikenal tetap diterima bila berupa token aman, supaya SSID
+// tetap bisa disimpan saat ONU melaporkan mode yang tidak ada di daftar (mis. WEP).
+function readSecurity(body) {
+  if (body?.security === undefined || body?.security === null || body?.security === '') {
+    return { security: '' };
+  }
+  if (typeof body.security !== 'string') {
+    return { error: 'Mode keamanan tidak valid' };
+  }
+  const security = body.security.trim();
+  if (!security) {
+    return { security: '' };
+  }
+  if (!KNOWN_SECURITY.has(security) && (security.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9 ./+_-]{0,63}$/.test(security))) {
+    return { error: 'Mode keamanan tidak valid' };
+  }
+  return { security };
+}
+
+// BeaconType + BasicEncryptionModes untuk label form.
+// Open/None -> None. WPA2 tetap 11i. Campuran WPA/WPA2 (dan label lain yang memuat "WPA") -> WPAand11i.
+function tr098Security(security) {
+  let beaconType = '11i';
+  const basicEncryption = 'None';
+
+  if (isOpenSecurity(security)) {
+    beaconType = 'None';
+  } else if (security === 'WPA2-PSK' || security === '11i' || security === 'WPA2-Personal') {
+    beaconType = '11i';
+  } else if (security === 'WPA-PSK' || security === 'WPA' || security === 'WPA-Personal') {
+    beaconType = 'WPA';
+  } else if (security.includes('WPA')) {
+    beaconType = 'WPAand11i';
+  }
+
+  return { beaconType, basicEncryption };
+}
+
+// Label yang sama dengan yang ditampilkan form, dari node WLANConfiguration saat ini.
+function currentSecurityLabel(wlanNode) {
+  const beacon = textOf(wlanNode?.BeaconType?._value);
+  let raw = '';
+  if (beacon && beacon !== 'Basic') {
+    raw = beacon;
+  } else {
+    const basic = textOf(wlanNode?.BasicEncryptionModes?._value);
+    raw = basic && basic !== 'None' ? basic : 'Open System';
+  }
+  return SECURITY_LABELS[raw] ?? (raw || 'Open System');
 }
 
 // Membaca & memvalidasi body. Hasil: { error } atau { value }.
@@ -42,10 +133,17 @@ function parseWlanUpdate(body) {
     return { error: `SSID maksimal ${SSID_MAX_BYTES} karakter` };
   }
 
-  // Password opsional: kosong = tidak diubah.
+  const securityResult = readSecurity(body);
+  if (securityResult.error) {
+    return securityResult;
+  }
+  const { security } = securityResult;
+  const open = isOpenSecurity(security);
+
+  // Password opsional: kosong = tidak diubah. Mode terbuka tidak memakai sandi.
   const rawPassword = body?.password;
   let password = '';
-  if (rawPassword !== undefined && rawPassword !== null && rawPassword !== '') {
+  if (!open && rawPassword !== undefined && rawPassword !== null && rawPassword !== '') {
     if (typeof rawPassword !== 'string' || !/^[\x20-\x7e]+$/.test(rawPassword)) {
       return { error: 'Password hanya boleh berisi karakter ASCII yang dapat dicetak' };
     }
@@ -61,7 +159,7 @@ function parseWlanUpdate(body) {
 
   return {
     value: {
-      deviceId, wlanId: String(wlanNumber), ssid, password, status: body.status,
+      deviceId, wlanId: String(wlanNumber), ssid, password, status: body.status, security,
     },
   };
 }
@@ -79,10 +177,14 @@ function passwordPathFor(wlanId, wlanNode) {
 
 // Menyusun parameterValues ([path, nilai, tipe]) hanya untuk yang berubah dari konfigurasi saat ini
 // (wlanNode = node WLANConfiguration.{id} dari GenieACS). changed berisi nama field, bukan nilainya.
-function planWlanUpdate({ wlanId, wlanNode, ssid, password, status }) {
+// security kosong = jangan ubah mode. Mengembalikan { error } bila mode baru butuh sandi yang tidak ada.
+function planWlanUpdate({
+  wlanId, wlanNode, ssid, password, status, security = '',
+}) {
   const base = `${IGD}.LANDevice.1.WLANConfiguration.${wlanId}`;
   const parameterValues = [];
   const changed = [];
+  const open = isOpenSecurity(security);
 
   if (wlanNode?.SSID?._value !== ssid) {
     parameterValues.push([`${base}.SSID`, ssid, 'xsd:string']);
@@ -92,7 +194,7 @@ function planWlanUpdate({ wlanId, wlanNode, ssid, password, status }) {
     parameterValues.push([`${base}.Enable`, status, 'xsd:boolean']);
     changed.push('status');
   }
-  if (password) {
+  if (password && !open) {
     const path = passwordPathFor(wlanId, wlanNode);
     const currentPassword = path.endsWith('.PreSharedKey.1.PreSharedKey')
       ? wlanNode?.PreSharedKey?.[1]?.PreSharedKey?._value
@@ -102,6 +204,27 @@ function planWlanUpdate({ wlanId, wlanNode, ssid, password, status }) {
       changed.push('password');
     }
   }
+
+  if (security) {
+    const current = currentSecurityLabel(wlanNode);
+    if (security !== current) {
+      if (!KNOWN_SECURITY.has(security)) {
+        return { error: 'Mode keamanan tidak didukung', parameterValues: [], changed: [] };
+      }
+      if (!open && isOpenSecurity(current) && !password) {
+        return { error: 'Password wajib diisi untuk mode keamanan ini', parameterValues: [], changed: [] };
+      }
+      const { beaconType, basicEncryption } = tr098Security(security);
+      parameterValues.push([`${base}.BeaconType`, beaconType, 'xsd:string']);
+      changed.push('security');
+      // Hanya dikirim bila ONU sudah memajang parameter ini. ONT yang tidak punya
+      // BasicEncryptionModes menolak seluruh setParameterValues bila path-nya ikut.
+      if (isNode(wlanNode?.BasicEncryptionModes) && textOf(wlanNode.BasicEncryptionModes._value) !== basicEncryption) {
+        parameterValues.push([`${base}.BasicEncryptionModes`, basicEncryption, 'xsd:string']);
+      }
+    }
+  }
+
   return { parameterValues, changed };
 }
 

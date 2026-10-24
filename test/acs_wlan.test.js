@@ -7,7 +7,12 @@ const v = (value) => ({ _value: value });
 const BASE = 'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1';
 
 test('parseWlanUpdate: input valid dinormalisasi', () => {
-  assert.deepEqual(parseWlanUpdate(ok).value, { deviceId: 'ONU-1', wlanId: '1', ssid: 'Rumah', password: 'sandi1234', status: true });
+  assert.deepEqual(parseWlanUpdate(ok).value, {
+    deviceId: 'ONU-1', wlanId: '1', ssid: 'Rumah', password: 'sandi1234', status: true, security: '',
+  });
+  assert.equal(parseWlanUpdate({ ...ok, security: 'WPA/WPA2-PSK' }).value.security, 'WPA/WPA2-PSK');
+  assert.equal(parseWlanUpdate({ ...ok, security: 'Open System', password: 'sandi1234' }).value.password, '');
+  assert.equal(parseWlanUpdate({ ...ok, security: 'None' }).value.password, '');
   assert.deepEqual(parseWlanUpdate({ ...ok, wlanId: '05', password: '' }).value.wlanId, '5');
   assert.equal(parseWlanUpdate({ ...ok, password: undefined }).value.password, '');
   assert.equal(parseWlanUpdate({ ...ok, status: false }).value.status, false);
@@ -33,6 +38,9 @@ test('parseWlanUpdate: menolak input berbahaya / tidak valid', () => {
   assert.ok(bad({ password: 12345678 }));
   assert.ok(bad({ status: 'true' }), 'status harus boolean sungguhan');
   assert.ok(bad({ status: undefined }));
+  assert.ok(bad({ security: 'WPA;reboot' }), 'security tidak boleh menyisipkan pemisah');
+  assert.ok(bad({ security: '../None' }));
+  assert.ok(bad({ security: 1 }));
   assert.ok(parseWlanUpdate(null).error);
 });
 
@@ -63,6 +71,81 @@ test('planWlanUpdate: sandi yang hanya dibaca ACS tersembunyi tetap dikirim bila
   const node = { SSID: v('Rumah'), Enable: v(true), PreSharedKey: { 1: { PreSharedKey: v('') } } };
   const plan = planWlanUpdate({ wlanId: '1', wlanNode: node, ssid: 'Rumah', password: 'sandi1234', status: true });
   assert.deepEqual(plan.changed, ['password']);
+});
+
+test('planWlanUpdate: WPA/WPA2-PSK mengirim BeaconType WPAand11i', () => {
+  const node = {
+    SSID: v('Rumah'), Enable: v(true), BeaconType: v('11i'), BasicEncryptionModes: v('None'),
+    PreSharedKey: { 1: { PreSharedKey: v('sandi1234') } },
+  };
+  const plan = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: '', status: true, security: 'WPA/WPA2-PSK',
+  });
+  assert.deepEqual(plan.parameterValues, [[`${BASE}.BeaconType`, 'WPAand11i', 'xsd:string']]);
+  assert.deepEqual(plan.changed, ['security']);
+});
+
+test('planWlanUpdate: Open System mengirim BeaconType None dan tidak mengirim password', () => {
+  const node = {
+    SSID: v('Rumah'), Enable: v(true), BeaconType: v('WPAand11i'), BasicEncryptionModes: v('None'),
+    PreSharedKey: { 1: { PreSharedKey: v('sandi1234') } },
+  };
+  const plan = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: 'lain12345', status: true, security: 'Open System',
+  });
+  assert.deepEqual(plan, {
+    parameterValues: [[`${BASE}.BeaconType`, 'None', 'xsd:string']],
+    changed: ['security'],
+  });
+  const none = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: 'lain12345', status: true, security: 'None',
+  });
+  assert.deepEqual(none.parameterValues, [[`${BASE}.BeaconType`, 'None', 'xsd:string']]);
+});
+
+test('planWlanUpdate: WPA2-PSK memakai BeaconType 11i; BasicEncryptionModes ikut bila nilainya berubah', () => {
+  const node = {
+    SSID: v('Rumah'), Enable: v(true), BeaconType: v('Basic'), BasicEncryptionModes: v('WEPEncryption'),
+  };
+  const plan = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: 'sandi1234', status: true, security: 'WPA2-PSK',
+  });
+  assert.deepEqual(plan.parameterValues, [
+    [`${BASE}.PreSharedKey.1.PreSharedKey`, 'sandi1234', 'xsd:string'],
+    [`${BASE}.BeaconType`, '11i', 'xsd:string'],
+    [`${BASE}.BasicEncryptionModes`, 'None', 'xsd:string'],
+  ]);
+  assert.deepEqual(plan.changed, ['password', 'security']);
+});
+
+test('planWlanUpdate: label keamanan yang sama tidak mengirim BeaconType', () => {
+  const node = { SSID: v('Rumah'), Enable: v(true), BeaconType: v('11i'), BasicEncryptionModes: v('None') };
+  assert.deepEqual(
+    planWlanUpdate({ wlanId: '1', wlanNode: node, ssid: 'Rumah', password: '', status: true, security: 'WPA2-PSK' }),
+    { parameterValues: [], changed: [] },
+  );
+  const openNode = { SSID: v('Rumah'), Enable: v(true), BeaconType: v('Basic'), BasicEncryptionModes: v('None') };
+  assert.deepEqual(
+    planWlanUpdate({ wlanId: '1', wlanNode: openNode, ssid: 'Rumah', password: '', status: true, security: 'Open System' }).changed,
+    [],
+  );
+});
+
+test('planWlanUpdate: dari jaringan terbuka ke WPA tanpa password ditolak', () => {
+  const node = { SSID: v('Rumah'), Enable: v(true), BeaconType: v('None') };
+  const plan = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: '', status: true, security: 'WPA-PSK',
+  });
+  assert.equal(plan.error, 'Password wajib diisi untuk mode keamanan ini');
+  assert.deepEqual(plan.parameterValues, []);
+});
+
+test('planWlanUpdate: mode tidak dikenal yang berbeda dari ONU ditolak', () => {
+  const node = { SSID: v('Rumah'), Enable: v(true), BeaconType: v('11i') };
+  const plan = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: '', status: true, security: 'WEPEncryption',
+  });
+  assert.equal(plan.error, 'Mode keamanan tidak didukung');
 });
 
 test('passwordPathFor: memilih path sandi yang ada di ONU', () => {

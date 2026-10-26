@@ -144,8 +144,19 @@ function planLanUpdate({ lanNode, values }) {
     }
   };
   const interfaceNode = lanNode?.IPInterface?.[1];
-
-  push('ip', `${LAN_BASE}.IPInterface.1.IPInterfaceIPAddress`, values.ip, 'xsd:string', interfaceNode?.IPInterfaceIPAddress?._value);
+  const ipChanged = interfaceNode?.IPInterfaceIPAddress?._value !== values.ip;
+  if (ipChanged) {
+    parameterValues.push([`${LAN_BASE}.IPInterface.1.IPInterfaceIPAddress`, values.ip, 'xsd:string']);
+    changed.push('ip');
+  }
+  // Gateway DHCP (opsi router). Dikirim bersama IP LAN agar klien tidak tetap memakai gateway lama.
+  // Bila IP LAN sudah sama tetapi IPRouters yang tersimpan berbeda, parameter ini tetap dikirim.
+  const currentRouters = lanNode?.IPRouters?._value;
+  const routersDiffer = currentRouters !== undefined && currentRouters !== null && String(currentRouters).trim() !== values.ip;
+  if (ipChanged || routersDiffer) {
+    parameterValues.push([`${LAN_BASE}.IPRouters`, values.ip, 'xsd:string']);
+    changed.push('ipRouters');
+  }
   push('subnet', `${LAN_BASE}.IPInterface.1.IPInterfaceSubnetMask`, values.subnet, 'xsd:string', interfaceNode?.IPInterfaceSubnetMask?._value);
   push('dhcpEnabled', `${LAN_BASE}.DHCPServerEnable`, values.dhcpEnabled, 'xsd:boolean',
     lanNode?.DHCPServerEnable === undefined ? undefined : asBoolean(lanNode.DHCPServerEnable._value));

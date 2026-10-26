@@ -88,13 +88,28 @@ test('planLanUpdate: hanya yang berubah, tipe XSD benar, IP/subnet lebih dulu', 
   const { parameterValues, changed } = planLanUpdate({ lanNode: node, values: parseLanUpdate(ok).value });
   assert.deepEqual(parameterValues, [
     [`${B}.IPInterface.1.IPInterfaceIPAddress`, '192.168.1.1', 'xsd:string'],
+    [`${B}.IPRouters`, '192.168.1.1', 'xsd:string'],
     [`${B}.DHCPServerEnable`, true, 'xsd:boolean'],
     [`${B}.MinAddress`, '192.168.1.2', 'xsd:string'],
     [`${B}.MaxAddress`, '192.168.1.254', 'xsd:string'],
     [`${B}.DHCPLeaseTime`, 86400, 'xsd:unsignedInt'],
     [`${B}.DNSServers`, '8.8.8.8,1.1.1.1', 'xsd:string'],
   ]);
-  assert.deepEqual(changed, ['ip', 'dhcpEnabled', 'dhcpMin', 'dhcpMax', 'leaseTime', 'dns']);
+  assert.deepEqual(changed, ['ip', 'ipRouters', 'dhcpEnabled', 'dhcpMin', 'dhcpMax', 'leaseTime', 'dns']);
+});
+
+test('planLanUpdate: IPRouters ikut IP gateway, dan tetap dikirim bila gateway DHCP tertinggal', () => {
+  const sameIp = {
+    IPInterface: { 1: { IPInterfaceIPAddress: v('192.168.1.1'), IPInterfaceSubnetMask: v('255.255.255.0') } },
+    IPRouters: v('192.168.0.1'),
+    DHCPServerEnable: v(true), MinAddress: v('192.168.1.2'), MaxAddress: v('192.168.1.254'), DHCPLeaseTime: v(86400), DNSServers: v('8.8.8.8,1.1.1.1'),
+  };
+  assert.deepEqual(planLanUpdate({ lanNode: sameIp, values: parseLanUpdate(ok).value }).parameterValues, [
+    [`${B}.IPRouters`, '192.168.1.1', 'xsd:string'],
+  ]);
+
+  const already = { ...sameIp, IPRouters: v('192.168.1.1') };
+  assert.deepEqual(planLanUpdate({ lanNode: already, values: parseLanUpdate(ok).value }), { parameterValues: [], changed: [] });
 });
 
 test('planLanUpdate: tanpa perubahan -> kosong; DNS dibandingkan tanpa peduli spasi', () => {

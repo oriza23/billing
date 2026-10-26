@@ -473,14 +473,307 @@ function extractLanConfig(item) {
   };
 }
 
+// ---- Daftar koneksi WAN -------------------------------------------------------
+// Tidak ikut LIVE_PROJECTION: subtree WANConnectionDevice besar. Diambil per perangkat
+// saat tab WAN dibuka. Sandi PPPoE tidak pernah dikirim apa adanya.
+const WANS_PROJECTION = [
+  `${IGD}.WANDevice.1.WANConnectionDevice`,
+  `${IGD}.WANDevice.2.WANConnectionDevice`,
+  'Device.PPP.Interface',
+  'Device.IP.Interface',
+  'Device.Ethernet.VLANTermination',
+  'Device.NAT.InterfaceSetting',
+].join(',');
+const MAX_WANS = 32;
+
+const SERVICE_KEYS = [
+  'X_CT-COM_ServiceList',
+  'X_CMCC_ServiceList',
+  'X_CU_ServiceList',
+  'X_HW_SERVICELIST',
+  'X_BROADCOM_COM_ServiceName',
+  'X_BROADCOM_COM_IfName',
+];
+
+const VLAN_KEYS = [
+  'X_BROADCOM_COM_VLANID',
+  'X_CT-COM_VLANIDMark',
+  'X_CTCOM_VLAN',
+  'X_CT-COM_VLAN',
+  'X_HW_VLAN',
+  'X_CMCC_VLANIDMark',
+  'X_ZTE-COM_VLANID',
+  'X_FH_VLAN',
+  'VLANID',
+];
+
+const LINK_VLAN_NODES = [
+  'X_CT-COM_WANGponLinkConfig',
+  'X_CT-COM_WANEponLinkConfig',
+  'X_CMCC_WANGponLinkConfig',
+  'X_CMCC_WANEponLinkConfig',
+  'X_FH_WANGponLinkConfig',
+  'X_CU_WANGponLinkConfig',
+];
+
+function leafText(node, key) {
+  return toText(node?.[key]?._value);
+}
+
+function firstLeaf(node, keys) {
+  for (const key of keys) {
+    const value = leafText(node, key);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function enabledLabel(value) {
+  if (isEmpty(value)) {
+    return '-';
+  }
+  if (value === true || value === 1) {
+    return 'Enabled';
+  }
+  const text = String(value).trim().toLowerCase();
+  if (text === '1' || text === 'true' || text === 'enabled') {
+    return 'Enabled';
+  }
+  if (text === '0' || text === 'false' || text === 'disabled') {
+    return 'Disabled';
+  }
+  return '-';
+}
+
+function maskedSecret(value) {
+  return isEmpty(value) ? '-' : '********';
+}
+
+function vlanIdOf(data, parent) {
+  const direct = firstLeaf(data, VLAN_KEYS);
+  if (direct) {
+    return direct;
+  }
+  for (const name of LINK_VLAN_NODES) {
+    const mark = leafText(parent?.[name], 'VLANIDMark') || leafText(parent?.[name], 'VLANID');
+    if (mark) {
+      return mark;
+    }
+  }
+  return leafText(parent?.WANEthernetLinkConfig, 'X_CT-COM_VLANIDMark')
+    || leafText(parent?.WANEthernetLinkConfig, 'VLANID');
+}
+
+function vlanStatusOf(data, vlanId) {
+  const flag = firstLeaf(data, ['X_CT-COM_VLANEnabled', 'X_HW_VLANEnabled', 'X_CMCC_VLANEnabled']);
+  if (flag) {
+    const label = enabledLabel(flag);
+    if (label !== '-') {
+      return label;
+    }
+  }
+  if (vlanId && vlanId !== '0') {
+    return 'Enabled';
+  }
+  if (vlanId === '0') {
+    return 'Disabled';
+  }
+  return '-';
+}
+
+function hasConnectionData(data) {
+  return isNode(data) && Boolean(
+    data.Name || data.ConnectionStatus || data.ExternalIPAddress || data.Username
+    || data.Enable || data.ConnectionType || data.TransportType || data.DNSServers,
+  );
+}
+
+function connectionRecord(id, kind, data, parent) {
+  const ppp = kind === 'PPP';
+  const vlanId = vlanIdOf(data, parent);
+  return {
+    id,
+    type: kind,
+    name: leafText(data, 'Name') || '-',
+    status: leafText(data, 'ConnectionStatus') || '-',
+    ip: leafText(data, 'ExternalIPAddress') || '-',
+    remoteIp: leafText(data, 'RemoteIPAddress') || leafText(data, 'DefaultGateway') || '-',
+    username: ppp ? (leafText(data, 'Username') || '-') : '-',
+    password: ppp ? maskedSecret(data?.Password?._value) : '-',
+    vlanStatus: vlanStatusOf(data, vlanId),
+    vlanId: vlanId || '-',
+    service: firstLeaf(data, SERVICE_KEYS) || leafText(data, 'Name') || '-',
+    dns: leafText(data, 'DNSServers') || '-',
+    connTrigger: leafText(data, 'ConnectionTrigger') || 'AlwaysOn',
+    nat: enabledLabel(data?.NATEnabled?._value),
+    transport: leafText(data, 'TransportType') || (ppp ? 'PPPoE' : 'IP_Routed'),
+    mac: leafText(data, 'MACAddress') || '-',
+    connType: leafText(data, 'ConnectionType') || (ppp ? 'PPPoE' : 'IP_Routed'),
+    uptime: leafText(data, 'Uptime') || '0',
+  };
+}
+
+function wansTr098(igd) {
+  const wans = [];
+  const wanDevices = igd?.WANDevice;
+  for (const wanKey of numericKeys(wanDevices)) {
+    const connections = wanDevices[wanKey]?.WANConnectionDevice;
+    for (const key of numericKeys(connections)) {
+      const device = connections[key];
+      if (!isNode(device)) {
+        continue;
+      }
+      for (const connKey of numericKeys(device.WANPPPConnection)) {
+        const data = device.WANPPPConnection[connKey];
+        if (hasConnectionData(data)) {
+          wans.push(connectionRecord(`${wanKey}.${key}.ppp.${connKey}`, 'PPP', data, device));
+        }
+      }
+      for (const connKey of numericKeys(device.WANIPConnection)) {
+        const data = device.WANIPConnection[connKey];
+        if (hasConnectionData(data)) {
+          wans.push(connectionRecord(`${wanKey}.${key}.ip.${connKey}`, 'IP', data, device));
+        }
+      }
+    }
+  }
+  return wans;
+}
+
+function ipv4Of(iface) {
+  for (const key of numericKeys(iface?.IPv4Address)) {
+    const ip = leafText(iface.IPv4Address[key], 'IPAddress');
+    if (ip) {
+      return ip;
+    }
+  }
+  return null;
+}
+
+function natForInterface(device, interfaceRef) {
+  for (const key of numericKeys(device?.NAT?.InterfaceSetting)) {
+    const setting = device.NAT.InterfaceSetting[key];
+    const ref = leafText(setting, 'Interface') || '';
+    if (ref && (ref === interfaceRef || ref.endsWith(interfaceRef) || interfaceRef.endsWith(ref))) {
+      return enabledLabel(setting?.Enable?._value);
+    }
+  }
+  return '-';
+}
+
+function vlanFromLower(device, lower) {
+  const match = String(lower || '').match(/VLANTermination\.(\d+)/);
+  if (!match) {
+    return null;
+  }
+  return leafText(device?.Ethernet?.VLANTermination?.[match[1]], 'VLANID');
+}
+
+function wansTr181(device) {
+  if (!isNode(device)) {
+    return [];
+  }
+  const wans = [];
+  const interfaces = device.IP?.Interface;
+
+  for (const key of numericKeys(device.PPP?.Interface)) {
+    const data = device.PPP.Interface[key];
+    if (!isNode(data) || !(data.Username || data.Name || data.Status || data.ConnectionStatus)) {
+      continue;
+    }
+    let ip = '-';
+    let mac = '-';
+    let nat = '-';
+    let lower = '';
+    for (const ipKey of numericKeys(interfaces)) {
+      const iface = interfaces[ipKey];
+      const layers = leafText(iface, 'LowerLayers') || '';
+      if (layers.includes(`PPP.Interface.${key}`)) {
+        ip = ipv4Of(iface) || '-';
+        mac = leafText(iface, 'MACAddress') || '-';
+        nat = natForInterface(device, `Device.IP.Interface.${ipKey}`);
+        lower = layers;
+        break;
+      }
+    }
+    const vlanId = vlanFromLower(device, lower);
+    wans.push({
+      id: `ppp.${key}`,
+      type: 'PPP',
+      name: leafText(data, 'Name') || '-',
+      status: leafText(data, 'ConnectionStatus') || leafText(data, 'Status') || '-',
+      ip,
+      remoteIp: '-',
+      username: leafText(data, 'Username') || '-',
+      password: maskedSecret(data?.Password?._value),
+      vlanStatus: vlanId && vlanId !== '0' ? 'Enabled' : '-',
+      vlanId: vlanId || '-',
+      service: leafText(data, 'Name') || '-',
+      dns: '-',
+      connTrigger: leafText(data, 'ConnectionTrigger') || 'AlwaysOn',
+      nat,
+      transport: 'PPPoE',
+      mac,
+      connType: 'PPPoE',
+      uptime: leafText(data, 'LastChange') || '0',
+    });
+  }
+
+  for (const key of numericKeys(interfaces)) {
+    const iface = interfaces[key];
+    if (!isNode(iface) || !hostIsActive(iface?.Upstream?._value)) {
+      continue;
+    }
+    const lower = leafText(iface, 'LowerLayers') || '';
+    if (lower.includes('PPP.Interface')) {
+      continue;
+    }
+    const vlanId = vlanFromLower(device, lower);
+    wans.push({
+      id: `ip.${key}`,
+      type: 'IP',
+      name: leafText(iface, 'Name') || '-',
+      status: leafText(iface, 'Status') || '-',
+      ip: ipv4Of(iface) || '-',
+      remoteIp: '-',
+      username: '-',
+      password: '-',
+      vlanStatus: vlanId && vlanId !== '0' ? 'Enabled' : '-',
+      vlanId: vlanId || '-',
+      service: leafText(iface, 'Name') || '-',
+      dns: '-',
+      connTrigger: 'AlwaysOn',
+      nat: natForInterface(device, `Device.IP.Interface.${key}`),
+      transport: 'IP_Routed',
+      mac: leafText(iface, 'MACAddress') || '-',
+      connType: leafText(iface, 'Type') || 'IP_Routed',
+      uptime: '0',
+    });
+  }
+  return wans;
+}
+
+function extractWans(item) {
+  if (!isNode(item)) {
+    return [];
+  }
+  const tr098 = wansTr098(item.InternetGatewayDevice);
+  const wans = tr098.length > 0 ? tr098 : wansTr181(item.Device);
+  return wans.slice(0, MAX_WANS);
+}
+
 module.exports = {
   LIVE_PROJECTION,
   HOSTS_PROJECTION,
   WLANS_PROJECTION,
   LAN_PROJECTION,
+  WANS_PROJECTION,
   extractLanConfig,
   extractHosts,
   extractWlans,
+  extractWans,
   RX_PATHS,
   TEMP_PATHS,
   readPath,

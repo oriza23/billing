@@ -7,8 +7,8 @@ const acs = require('../acs');
 const { parseWlanUpdate, planWlanUpdate } = require('../acs_wlan');
 const { parseLanUpdate, planLanUpdate } = require('../acs_lan');
 const {
-  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, LAN_PROJECTION, extractHosts, extractWlans,
-  extractLanConfig, summarizeDevice,
+  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, LAN_PROJECTION, WANS_PROJECTION,
+  extractHosts, extractWlans, extractWans, extractLanConfig, summarizeDevice,
 } = require('../acs_summary');
 
 const router = express.Router();
@@ -230,6 +230,13 @@ deviceDetailRoute('/devices/lan', {
   label: 'LAN',
 });
 
+// Daftar koneksi WAN -> { wans: [...] }. Sandi PPPoE disamarkan di ekstraksi.
+deviceDetailRoute('/devices/wans', {
+  projection: WANS_PROJECTION,
+  build: (item) => ({ wans: extractWans(item) }),
+  label: 'WAN',
+});
+
 // Daftar WiFi -> { wlans: [...] }. Memuat sandi WiFi pelanggan, jadi hanya untuk admin.
 deviceDetailRoute('/devices/wlans', {
   projection: WLANS_PROJECTION,
@@ -426,6 +433,43 @@ router.get('/devices/db', async (req, res) => {
     });
   } catch (error) {
     return fail(res, 500, 'Gagal mengambil data ONU', error);
+  }
+});
+
+// Satu ONU dari NBI, diringkas sama seperti baris di GET /devices.
+// Didaftarkan setelah /devices/hosts|lan|wans|wlans|db supaya path itu tidak tertangkap :deviceId.
+// GET /api/acs/devices/:deviceId?server_id=
+router.get('/devices/:deviceId', async (req, res) => {
+  const serverId = readId(req.query.server_id);
+  const deviceId = typeof req.params.deviceId === 'string' ? req.params.deviceId.trim() : '';
+  if (!serverId) {
+    return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+  }
+  if (!deviceId || deviceId.length > 255) {
+    return fail(res, 400, 'ID perangkat tidak valid');
+  }
+
+  try {
+    const baseUrl = await liveBaseUrl(serverId);
+    if (!baseUrl) {
+      return fail(res, 404, 'Server ACS tidak ditemukan');
+    }
+
+    const response = await axios.get(`${baseUrl}/devices/`, {
+      params: {
+        query: JSON.stringify({ _id: deviceId }),
+        projection: LIVE_PROJECTION,
+      },
+      timeout: LIVE_TIMEOUT_MS,
+    });
+    const item = Array.isArray(response.data) ? response.data[0] : null;
+    if (!item || !item._id) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    return res.json(summarizeDevice(item));
+  } catch (error) {
+    console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
+    return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
   }
 });
 

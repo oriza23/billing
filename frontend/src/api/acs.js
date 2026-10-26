@@ -16,6 +16,14 @@ export const deleteAcsServer = (id) => api.delete(`${BASE}/server/${id}`).then((
 export const getAcsDevices = (serverId, config = {}) =>
   api.get(`${BASE}/devices`, { ...config, params: { server_id: serverId } }).then((res) => res.data)
 
+// Ringkasan satu ONU langsung dari NBI (last_inform, RX, suhu, uptime, ...).
+// deviceId = _id GenieACS. Dipakai saat modal dibuka dan saat polling setelah Summon.
+export const getAcsDevice = (serverId, deviceId, config = {}) =>
+  api.get(`${BASE}/devices/${encodeURIComponent(deviceId)}`, {
+    ...config,
+    params: { server_id: serverId },
+  }).then((res) => res.data)
+
 // SINKRON: selaraskan DB web dengan GenieACS.
 export const syncAcs = (serverId) => api.post(`${BASE}/sync`, { server_id: serverId }).then((res) => res.data)
 
@@ -47,6 +55,11 @@ export const updateAcsWlan = (payload) => api.post(`${BASE}/update-wlan`, payloa
 // { lanConfig: { ip, subnet, mac, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns: [3] } }. Diambil saat tab LAN dibuka.
 export const getAcsDeviceLan = (serverId, deviceId, config = {}) =>
   api.get(`${BASE}/devices/lan`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)
+
+// Daftar koneksi WAN satu perangkat -> { wans: [{ id, type, name, status, ip, ... }] }.
+// Diambil saat tab WAN dibuka. Sandi PPPoE sudah disamarkan backend.
+export const getAcsDeviceWans = (serverId, deviceId, config = {}) =>
+  api.get(`${BASE}/devices/wans`, { ...config, params: { server_id: serverId, id: deviceId } }).then((res) => res.data)
 
 // Push perubahan LAN (IP gateway, DHCP, DNS) ke ONU lewat GenieACS. Hanya admin.
 // payload: { server_id, deviceId (_id GenieACS), ip, subnet, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns1, dns2, dns3 }

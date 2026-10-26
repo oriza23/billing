@@ -440,3 +440,150 @@ test('extractLanConfig: cadangan TR-181 dan projection LAN terpisah dari daftar 
   assert.ok(LAN_PROJECTION.includes('LANHostConfigManagement'));
   assert.ok(!LIVE_PROJECTION.includes('LANHostConfigManagement'));
 });
+
+const { extractWans, WANS_PROJECTION } = require('../backend/acs_summary');
+
+test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
+  const item = {
+    InternetGatewayDevice: {
+      WANDevice: {
+        1: {
+          WANConnectionDevice: {
+            1: {
+              'X_CT-COM_WANGponLinkConfig': { VLANIDMark: v('200') },
+              WANPPPConnection: {
+                1: host({
+                  Name: 'pppoe_internet',
+                  ConnectionStatus: 'Connected',
+                  ExternalIPAddress: '100.64.1.9',
+                  RemoteIPAddress: '100.64.0.1',
+                  Username: 'budi@isp',
+                  Password: 'rahasia-ppp',
+                  'X_CT-COM_ServiceList': 'INTERNET',
+                  DNSServers: '8.8.8.8,1.1.1.1',
+                  ConnectionTrigger: 'AlwaysOn',
+                  NATEnabled: '1',
+                  TransportType: 'PPPoE',
+                  MACAddress: 'AA:BB:CC:DD:EE:FF',
+                  ConnectionType: 'IP_Routed',
+                  Uptime: '3660',
+                }),
+              },
+              WANIPConnection: {
+                1: {},
+                2: host({
+                  Name: 'ip_tr069',
+                  ConnectionStatus: 'Disconnected',
+                  ExternalIPAddress: '10.1.1.5',
+                  DefaultGateway: '10.1.1.1',
+                  'X_BROADCOM_COM_VLANID': '100',
+                  NATEnabled: false,
+                  Uptime: '0',
+                }),
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(wans.length, 2);
+  assert.equal(JSON.stringify(wans).includes('rahasia-ppp'), false);
+  assert.deepEqual(wans[0], {
+    id: '1.1.ppp.1',
+    type: 'PPP',
+    name: 'pppoe_internet',
+    status: 'Connected',
+    ip: '100.64.1.9',
+    remoteIp: '100.64.0.1',
+    username: 'budi@isp',
+    password: '********',
+    vlanStatus: 'Enabled',
+    vlanId: '200',
+    service: 'INTERNET',
+    dns: '8.8.8.8,1.1.1.1',
+    connTrigger: 'AlwaysOn',
+    nat: 'Enabled',
+    transport: 'PPPoE',
+    mac: 'AA:BB:CC:DD:EE:FF',
+    connType: 'IP_Routed',
+    uptime: '3660',
+  });
+  assert.equal(wans[1].type, 'IP');
+  assert.equal(wans[1].id, '1.1.ip.2');
+  assert.equal(wans[1].username, '-');
+  assert.equal(wans[1].password, '-');
+  assert.equal(wans[1].remoteIp, '10.1.1.1');
+  assert.equal(wans[1].vlanId, '100');
+  assert.equal(wans[1].vlanStatus, 'Enabled');
+  assert.equal(wans[1].nat, 'Disabled');
+  assert.equal(wans[1].transport, 'IP_Routed');
+  assert.equal(wans[1].service, 'ip_tr069');
+  assert.equal(wans[1].connTrigger, 'AlwaysOn');
+});
+
+test('extractWans: TR-181 hanya PPP dan IP upstream, LAN tidak ikut', () => {
+  const item = {
+    Device: {
+      PPP: {
+        Interface: {
+          1: host({
+            Name: 'wanppp',
+            Username: 'user@isp',
+            Password: 'sandi-181',
+            ConnectionStatus: 'Connected',
+            ConnectionTrigger: 'OnDemand',
+          }),
+        },
+      },
+      IP: {
+        Interface: {
+          1: {
+            ...host({ Name: 'lan', Upstream: false, Status: 'Up', MACAddress: '11:11:11:11:11:11' }),
+            IPv4Address: { 1: host({ IPAddress: '192.168.1.1' }) },
+          },
+          2: {
+            ...host({
+              Name: 'wanip',
+              Upstream: true,
+              Status: 'Up',
+              LowerLayers: 'Device.Ethernet.VLANTermination.1',
+              MACAddress: '22:22:22:22:22:22',
+              Type: 'Normal',
+            }),
+            IPv4Address: { 1: host({ IPAddress: '36.1.2.3' }) },
+          },
+          3: {
+            ...host({ Name: 'ppp-ip', Upstream: true, Status: 'Up', LowerLayers: 'Device.PPP.Interface.1' }),
+            IPv4Address: { 1: host({ IPAddress: '100.1.1.1' }) },
+          },
+        },
+      },
+      Ethernet: { VLANTermination: { 1: host({ VLANID: '300' }) } },
+      NAT: { InterfaceSetting: { 1: host({ Interface: 'Device.IP.Interface.2', Enable: true }) } },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(JSON.stringify(wans).includes('sandi-181'), false);
+  assert.deepEqual(wans.map((wan) => wan.type), ['PPP', 'IP']);
+  assert.equal(wans[0].ip, '100.1.1.1');
+  assert.equal(wans[0].username, 'user@isp');
+  assert.equal(wans[0].password, '********');
+  assert.equal(wans[0].connTrigger, 'OnDemand');
+  assert.equal(wans[1].ip, '36.1.2.3');
+  assert.equal(wans[1].vlanId, '300');
+  assert.equal(wans[1].vlanStatus, 'Enabled');
+  assert.equal(wans[1].nat, 'Enabled');
+  assert.equal(wans[1].mac, '22:22:22:22:22:22');
+  assert.ok(!wans.some((wan) => wan.ip === '192.168.1.1'));
+});
+
+test('extractWans: data kosong dan projection tidak ikut daftar ONU', () => {
+  assert.deepEqual(extractWans({}), []);
+  assert.deepEqual(extractWans(null), []);
+  assert.deepEqual(extractWans({ InternetGatewayDevice: { WANDevice: { 1: { WANConnectionDevice: {} } } } }), []);
+  assert.ok(WANS_PROJECTION.includes('InternetGatewayDevice.WANDevice.1.WANConnectionDevice'));
+  // Daftar ONU hanya mengambil Username/IP, bukan seluruh subtree koneksi WAN.
+  assert.ok(!LIVE_PROJECTION.split(',').includes('InternetGatewayDevice.WANDevice.1.WANConnectionDevice'));
+});

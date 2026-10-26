@@ -328,6 +328,7 @@ function extractHosts(item) {
 // Seperti host: tidak ikut LIVE_PROJECTION karena subtree WLANConfiguration berisi puluhan
 // parameter per SSID. Diambil per perangkat saat tab WLAN dibuka.
 const WLANS_PROJECTION = `${IGD}.LANDevice.1.WLANConfiguration,Device.WiFi.SSID,Device.WiFi.AccessPoint,Device.WiFi.Radio`;
+const MIN_WLANS = 4;
 const MAX_WLANS = 16;
 const DEFAULT_BAND = '20MHz/40MHz';
 
@@ -360,25 +361,48 @@ function securityTr098(wlanData) {
   return 'Open System';
 }
 
+function placeholderWlan(index) {
+  return {
+    id: String(index),
+    ssid: `SSID${index}`,
+    password: '-',
+    security: 'None',
+    freq: index > 4 ? '5 GHz' : '2.4 GHz',
+    band: '-',
+    connected: 0,
+    status: false,
+  };
+}
+
+// Minimal 4 baris. Jika ONT melaporkan indeks lebih tinggi (misalnya SSID 5 GHz),
+// batas ikut indeks tertinggi itu, tetapi tidak melewati MAX_WLANS.
+function wlanLimit(keys) {
+  const highest = keys.reduce((max, key) => Math.max(max, parseInt(key, 10) || 0), 0);
+  return Math.min(MAX_WLANS, Math.max(MIN_WLANS, highest));
+}
+
 function wlansTr098(wlanObj) {
   const wlans = [];
-  for (const key of numericKeys(wlanObj)) {
-    const wlanData = wlanObj[key];
+  const limit = wlanLimit(numericKeys(wlanObj));
+  for (let i = 1; i <= limit; i += 1) {
+    const wlanData = wlanObj?.[i];
     if (isNode(wlanData) && wlanData.SSID) {
       const channel = toNumber(wlanData?.Channel?._value);
       wlans.push({
-        id: key,
+        id: String(i),
         ssid: toText(wlanData?.SSID?._value) || 'N/A',
         password: toText(wlanData?.PreSharedKey?.[1]?.PreSharedKey?._value)
           || toText(wlanData?.KeyPassphrase?._value)
           || toText(wlanData?.PreSharedKey?.[1]?.KeyPassphrase?._value)
           || '-',
         security: securityTr098(wlanData),
-        freq: frequencyOf(key, channel),
+        freq: frequencyOf(i, channel),
         band: toText(wlanData?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
         connected: toNumber(wlanData?.TotalAssociations?._value) ?? 0,
         status: hostIsActive(wlanData?.Enable?._value),
       });
+    } else {
+      wlans.push(placeholderWlan(i));
     }
   }
   return wlans;
@@ -389,11 +413,13 @@ function wlansTr098(wlanObj) {
 function wlansTr181(wifi) {
   const wlans = [];
   const accessPoints = numericKeys(wifi?.AccessPoint).map((name) => wifi.AccessPoint[name]);
-  for (const key of numericKeys(wifi?.SSID)) {
-    const ssidData = wifi.SSID[key];
+  const limit = wlanLimit(numericKeys(wifi?.SSID));
+  for (let i = 1; i <= limit; i += 1) {
+    const key = String(i);
+    const ssidData = wifi?.SSID?.[i];
     if (isNode(ssidData) && ssidData.SSID) {
       const accessPoint = accessPoints.find((entry) => String(entry?.SSIDReference?._value ?? '').endsWith(`WiFi.SSID.${key}`))
-        ?? wifi?.AccessPoint?.[key];
+        ?? wifi?.AccessPoint?.[i];
       const radioIndex = String(ssidData?.LowerLayers?._value ?? '').match(/Radio\.(\d+)/)?.[1];
       const radio = radioIndex ? wifi?.Radio?.[radioIndex] : undefined;
       const radioBand = toText(radio?.OperatingFrequencyBand?._value);
@@ -410,15 +436,23 @@ function wlansTr181(wifi) {
         connected: toNumber(accessPoint?.AssociatedDeviceNumberOfEntries?._value) ?? 0,
         status: hostIsActive(ssidData?.Enable?._value),
       });
+    } else {
+      wlans.push(placeholderWlan(i));
     }
   }
   return wlans;
 }
 
 function extractWlans(item) {
-  const tr098 = wlansTr098(item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration);
-  const wlans = tr098.length > 0 ? tr098 : wlansTr181(item?.Device?.WiFi);
-  return wlans.slice(0, MAX_WLANS);
+  const wlanObj = item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration;
+  const wifi = item?.Device?.WiFi;
+  if (numericKeys(wlanObj).length > 0) {
+    return wlansTr098(wlanObj);
+  }
+  if (numericKeys(wifi?.SSID).length > 0) {
+    return wlansTr181(wifi);
+  }
+  return wlansTr098(wlanObj);
 }
 
 // ---- Konfigurasi LAN (IP gateway, DHCP server, DNS) -----------------------------
@@ -590,11 +624,12 @@ function hasConnectionData(data) {
   );
 }
 
-function connectionRecord(id, kind, data, parent) {
+function connectionRecord(id, kind, data, parent, fullPath) {
   const ppp = kind === 'PPP';
   const vlanId = vlanIdOf(data, parent);
   return {
     id,
+    fullPath,
     type: kind,
     name: leafText(data, 'Name') || '-',
     status: leafText(data, 'ConnectionStatus') || '-',
@@ -628,13 +663,25 @@ function wansTr098(igd) {
       for (const connKey of numericKeys(device.WANPPPConnection)) {
         const data = device.WANPPPConnection[connKey];
         if (hasConnectionData(data)) {
-          wans.push(connectionRecord(`${wanKey}.${key}.ppp.${connKey}`, 'PPP', data, device));
+          wans.push(connectionRecord(
+            `${wanKey}.${key}.ppp.${connKey}`,
+            'PPP',
+            data,
+            device,
+            `${IGD}.WANDevice.${wanKey}.WANConnectionDevice.${key}.WANPPPConnection.${connKey}.`,
+          ));
         }
       }
       for (const connKey of numericKeys(device.WANIPConnection)) {
         const data = device.WANIPConnection[connKey];
         if (hasConnectionData(data)) {
-          wans.push(connectionRecord(`${wanKey}.${key}.ip.${connKey}`, 'IP', data, device));
+          wans.push(connectionRecord(
+            `${wanKey}.${key}.ip.${connKey}`,
+            'IP',
+            data,
+            device,
+            `${IGD}.WANDevice.${wanKey}.WANConnectionDevice.${key}.WANIPConnection.${connKey}.`,
+          ));
         }
       }
     }
@@ -701,6 +748,7 @@ function wansTr181(device) {
     const vlanId = vlanFromLower(device, lower);
     wans.push({
       id: `ppp.${key}`,
+      fullPath: `Device.PPP.Interface.${key}.`,
       type: 'PPP',
       name: leafText(data, 'Name') || '-',
       status: leafText(data, 'ConnectionStatus') || leafText(data, 'Status') || '-',
@@ -733,6 +781,7 @@ function wansTr181(device) {
     const vlanId = vlanFromLower(device, lower);
     wans.push({
       id: `ip.${key}`,
+      fullPath: `Device.IP.Interface.${key}.`,
       type: 'IP',
       name: leafText(iface, 'Name') || '-',
       status: leafText(iface, 'Status') || '-',

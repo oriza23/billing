@@ -151,6 +151,11 @@ async function liveBaseUrl(serverId) {
   return `http://${host}:${port}`;
 }
 
+function registeredTime(value) {
+  const time = new Date(value ?? 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
 router.get('/devices', async (req, res) => {
   const serverId = readId(req.query.server_id);
   if (!serverId) {
@@ -170,10 +175,12 @@ router.get('/devices', async (req, res) => {
     if (!Array.isArray(response.data)) {
       throw new Error('Format balasan NBI tidak dikenali');
     }
-    const cleanedData = response.data
+    const mappedDevices = response.data
       .filter((item) => item && item._id)
       .map(summarizeDevice);
-    return res.json(cleanedData);
+    // ONU terbaru terdaftar di atas. Tanpa tanggal dianggap paling lama.
+    const sortedDevices = mappedDevices.sort((a, b) => registeredTime(b.registered) - registeredTime(a.registered));
+    return res.json(sortedDevices);
   } catch (error) {
     console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
     return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
@@ -352,6 +359,57 @@ router.post('/update-lan', requireAdmin, async (req, res) => {
   }
 });
 
+// Hanya instance koneksi WAN yang boleh dihapus, bukan objek TR-069 lain.
+const WAN_DELETE_PATH = /^(?:InternetGatewayDevice\.WANDevice\.\d+\.WANConnectionDevice\.\d+\.WAN(?:PPP|IP)Connection\.\d+\.|Device\.PPP\.Interface\.\d+\.|Device\.IP\.Interface\.\d+\.)$/;
+
+function parseWanDelete(body) {
+  const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : '';
+  let wanPath = typeof body?.wanPath === 'string' ? body.wanPath.trim() : '';
+  if (!deviceId || deviceId.length > 255) {
+    return { error: 'ID perangkat tidak valid' };
+  }
+  if (!wanPath || wanPath.length > 300) {
+    return { error: 'Path WAN tidak valid' };
+  }
+  if (!wanPath.endsWith('.')) {
+    wanPath += '.';
+  }
+  if (!WAN_DELETE_PATH.test(wanPath)) {
+    return { error: 'Path WAN tidak valid' };
+  }
+  return { value: { deviceId, wanPath } };
+}
+
+// Hapus satu koneksi WAN (DeleteObject) lewat NBI server ACS yang dipilih.
+// Body: { server_id, deviceId (_id GenieACS), wanPath }.
+router.post('/delete-wan', requireAdmin, async (req, res) => {
+  const parsed = parseWanDelete(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const { deviceId, wanPath } = parsed.value;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+    const { applied } = await acs.sendDeleteObject(server, deviceId, wanPath);
+    console.log(`[ACS delete-wan] ${req.user?.username || '-'} ${server.host}:${server.port} ${deviceId} ${wanPath} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      message: applied
+        ? 'Koneksi WAN dihapus dari ONU'
+        : 'Penghapusan WAN masuk antrean dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS delete-wan] ${deviceId} ${wanPath}: ${error.message}`);
+    const isNbiError = error instanceof acs.NbiError;
+    return fail(res, isNbiError ? 502 : 500, isNbiError ? error.message : 'Gagal menghapus koneksi WAN');
+  }
+});
+
 // ---- Daftar ONU hasil SINKRON (tersimpan di DB web) + statistik ---------------
 router.get('/devices/db', async (req, res) => {
   const server = await findServer(req.query.server_id).catch(() => null);
@@ -410,7 +468,7 @@ router.get('/devices/db', async (req, res) => {
       `SELECT id, device_id, username, ip_pppoe, ip_tr069, sn, pon, manufacturer, tipe,
               ssid, wifi_users, rx_power, temp, uptime, last_inform, registered, tags
        FROM acs_devices ${whereSql}
-       ORDER BY last_inform IS NULL, last_inform DESC, id DESC
+       ORDER BY registered IS NULL, registered DESC, id DESC
        LIMIT ? OFFSET ?`,
       [...params, limit, (page - 1) * limit],
     );

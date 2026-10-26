@@ -435,6 +435,18 @@ async function sendSetParameterValues(server, deviceId, parameterValues) {
   return { applied: status !== 202 };
 }
 
+// Menghapus satu instance objek TR-069 (DeleteObject). objectName wajib berakhir titik.
+// Hasil: { applied: true } bila ONU sudah menghapus, { applied: false } bila hanya diantrikan.
+async function sendDeleteObject(server, deviceId, objectName) {
+  const objectPath = String(objectName).endsWith('.') ? String(objectName) : `${objectName}.`;
+  const { status, data } = await postTask(server, deviceId, { name: 'deleteObject', objectName: objectPath });
+  if (isParamNode(data) && data.fault) {
+    const detail = [data.fault.code, data.fault.message].filter(Boolean).join(': ');
+    throw new NbiError(`ONU menolak penghapusan${detail ? ` (${detail})` : ''}`, undefined, 'FAULT');
+  }
+  return { applied: status !== 202 };
+}
+
 async function deleteRemoteDevice(server, device) {
   // 404 = sudah tidak ada di ACS, dianggap berhasil.
   await nbiRequest(server, 'DELETE', `/devices/${encodeURIComponent(device.device_id)}`);
@@ -457,5 +469,6 @@ module.exports = {
   readWlanTarget,
   readLanTarget,
   sendSetParameterValues,
+  sendDeleteObject,
   deleteRemoteDevice,
 };

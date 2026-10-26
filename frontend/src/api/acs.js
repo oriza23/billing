@@ -65,3 +65,8 @@ export const getAcsDeviceWans = (serverId, deviceId, config = {}) =>
 // payload: { server_id, deviceId (_id GenieACS), ip, subnet, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns1, dns2, dns3 }
 // -> { success, applied, changed, message }
 export const updateAcsLan = (payload) => api.post(`${BASE}/update-lan`, payload).then((res) => res.data)
+
+// Hapus satu koneksi WAN (DeleteObject). Hanya admin.
+// payload: { server_id, deviceId (_id GenieACS), wanPath }
+// -> { success, applied, message }
+export const deleteAcsWan = (payload) => api.post(`${BASE}/delete-wan`, payload).then((res) => res.data)

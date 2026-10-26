@@ -348,7 +348,7 @@ test('extractWlans: TR-098 dengan 4 SSID 2.4G + 4 SSID 5G', () => {
   assert.equal(wlans[4].status, false);
 });
 
-test('extractWlans: keamanan terbuka, channel menentukan pita, SSID tanpa node dilewati', () => {
+test('extractWlans: keamanan terbuka, channel menentukan pita, slot kosong jadi SSID default', () => {
   const wlans = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {
     1: wlanNode({ SSID: 'Tamu', BeaconType: 'Basic', BasicEncryptionModes: 'None', Enable: true }),
     2: wlanNode({ SSID: 'Aneh', BeaconType: 'Basic', BasicEncryptionModes: 'WEPEncryption', Channel: 36, OperatingChannelBandwidth: '80MHz', Enable: 'true' }),
@@ -356,12 +356,17 @@ test('extractWlans: keamanan terbuka, channel menentukan pita, SSID tanpa node d
     4: 'bukan-objek',
     x: wlanNode({ SSID: 'bukan-angka' }),
   } } } } });
-  assert.equal(wlans.length, 2);
+  assert.equal(wlans.length, 4);
   assert.equal(wlans[0].security, 'Open System');
   assert.equal(wlans[0].status, true);
   assert.equal(wlans[1].security, 'WEPEncryption');
   assert.equal(wlans[1].freq, '5 GHz');
   assert.equal(wlans[1].band, '80MHz');
+  assert.deepEqual(wlans[2], {
+    id: '3', ssid: 'SSID3', password: '-', security: 'None', freq: '2.4 GHz', band: '-', connected: 0, status: false,
+  });
+  assert.equal(wlans[3].ssid, 'SSID4');
+  assert.equal(wlans[3].status, false);
 });
 
 test('extractWlans: TR-181 (SSID + AccessPoint + Radio)', () => {
@@ -379,15 +384,40 @@ test('extractWlans: TR-181 (SSID + AccessPoint + Radio)', () => {
   assert.deepEqual(wlans[0], {
     id: '1', ssid: 'Rumah', password: 'sandi-181', security: 'WPA2-Personal', freq: '2.4 GHz', band: '40MHz', connected: 4, status: true,
   });
+  assert.equal(wlans.length, 4);
   assert.equal(wlans[1].freq, '5 GHz');
   assert.equal(wlans[1].security, 'Open System');
   assert.equal(wlans[1].status, false);
+  assert.equal(wlans[2].ssid, 'SSID3');
+  assert.equal(wlans[2].status, false);
+  assert.equal(wlans[3].freq, '2.4 GHz');
 });
 
-test('extractWlans: data kosong -> array kosong; projection WLAN terpisah dari daftar ONU', () => {
-  assert.deepEqual(extractWlans({}), []);
-  assert.deepEqual(extractWlans(null), []);
-  assert.deepEqual(extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {} } } } }), []);
+test('extractWlans: data kosong tetap 4 SSID default; indeks 5 GHz memperpanjang daftar', () => {
+  const defaults = [1, 2, 3, 4].map((index) => ({
+    id: String(index),
+    ssid: `SSID${index}`,
+    password: '-',
+    security: 'None',
+    freq: '2.4 GHz',
+    band: '-',
+    connected: 0,
+    status: false,
+  }));
+  assert.deepEqual(extractWlans({}), defaults);
+  assert.deepEqual(extractWlans(null), defaults);
+  assert.deepEqual(extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {} } } } }), defaults);
+
+  const extended = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {
+    1: wlanNode({ SSID: 'Utama', Enable: '1' }),
+    6: wlanNode({ SSID: 'Lima', Enable: '0' }),
+  } } } } });
+  assert.equal(extended.length, 6);
+  assert.equal(extended[0].ssid, 'Utama');
+  assert.equal(extended[4].ssid, 'SSID5');
+  assert.equal(extended[4].freq, '5 GHz');
+  assert.equal(extended[5].ssid, 'Lima');
+  assert.equal(extended[5].freq, '5 GHz');
   assert.ok(WLANS_PROJECTION.includes('WLANConfiguration'));
   assert.ok(!LIVE_PROJECTION.split(',').some((path) => path.endsWith('WLANConfiguration')));
 });
@@ -492,6 +522,7 @@ test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
   assert.equal(JSON.stringify(wans).includes('rahasia-ppp'), false);
   assert.deepEqual(wans[0], {
     id: '1.1.ppp.1',
+    fullPath: 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.',
     type: 'PPP',
     name: 'pppoe_internet',
     status: 'Connected',
@@ -512,6 +543,7 @@ test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
   });
   assert.equal(wans[1].type, 'IP');
   assert.equal(wans[1].id, '1.1.ip.2');
+  assert.equal(wans[1].fullPath, 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.2.');
   assert.equal(wans[1].username, '-');
   assert.equal(wans[1].password, '-');
   assert.equal(wans[1].remoteIp, '10.1.1.1');
@@ -567,6 +599,8 @@ test('extractWans: TR-181 hanya PPP dan IP upstream, LAN tidak ikut', () => {
   const wans = extractWans(item);
   assert.equal(JSON.stringify(wans).includes('sandi-181'), false);
   assert.deepEqual(wans.map((wan) => wan.type), ['PPP', 'IP']);
+  assert.equal(wans[0].fullPath, 'Device.PPP.Interface.1.');
+  assert.equal(wans[1].fullPath, 'Device.IP.Interface.2.');
   assert.equal(wans[0].ip, '100.1.1.1');
   assert.equal(wans[0].username, 'user@isp');
   assert.equal(wans[0].password, '********');

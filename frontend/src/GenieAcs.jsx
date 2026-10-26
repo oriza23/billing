@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Cable, Eye, EyeOff, Flag, Globe, KeyRound, Network, Pencil, Server, Trash2, X } from 'lucide-react'
+import { Cable, Eye, EyeOff, Flag, Globe, KeyRound, Network, Pencil, Server, Trash2, TriangleAlert, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import {
   createAcsServer,
@@ -9,6 +9,7 @@ import {
   getAcsDevice,
   getAcsDeviceHosts,
   getAcsDeviceLan,
+  deleteAcsWan,
   getAcsDeviceWans,
   getAcsDeviceWlans,
   getAcsDevices,
@@ -351,13 +352,13 @@ function isNewerInform(next, previous) {
 }
 
 // Data ONU dari backend sudah bersih dan terstandarisasi (sn, ip_pppoe, rx_onu, ...).
-// Di sini hanya ditambah status online (dari last_inform) dan kunci urut.
+// Di sini hanya ditambah status online (dari last_inform) dan kunci urut registrasi.
 function toRow(item, now) {
   return {
     ...item,
     tags: Array.isArray(item.tags) ? item.tags : [],
     status: statusFromInform(item.last_inform, now),
-    sortKey: informMillis(item.last_inform) ?? 0,
+    sortKey: informMillis(item.registered) ?? 0,
   }
 }
 
@@ -675,9 +676,40 @@ function emptyWanForm() {
   }
 }
 
-function WanPanel({ wans, loading, error, onOverlayChange }) {
+function wanText(value) {
+  return !value || value === '-' ? '' : String(value)
+}
+
+function wanFormFrom(wan) {
+  return {
+    ...emptyWanForm(),
+    connectionName: wanText(wan.name),
+    enableConnection: wan.status !== 'Disabled',
+    natStatus: wan.nat === 'Enabled',
+    serviceList: wanText(wan.service) || 'INTERNET',
+    connectionType: wan.transport === 'PPPoE' ? 'IP_Routed' : (wanText(wan.connType) || 'IP_Routed'),
+    vlanStatus: wan.vlanId !== '-',
+    vlanId: wan.vlanId !== '-' ? String(wan.vlanId) : '',
+    username: wanText(wan.username),
+    password: '',
+    addressing: wan.ip !== '-' ? 'Static' : 'DHCP',
+    ipAddress: wanText(wan.ip),
+    gateway: wanText(wan.remoteIp),
+    dnsServer: wanText(wan.dns),
+  }
+}
+
+function optionsWithCurrent(options, value) {
+  if (!value || options.includes(value)) {
+    return options
+  }
+  return [value, ...options]
+}
+
+function WanPanel({ wans, loading, error, onOverlayChange, setWanToDelete, deletingWanPath }) {
   const [isWanPppOpen, setIsWanPppOpen] = useState(false)
   const [isWanIpOpen, setIsWanIpOpen] = useState(false)
+  const [editingWanPath, setEditingWanPath] = useState(null)
   const [wanForm, setWanForm] = useState(emptyWanForm)
   const hasWans = Array.isArray(wans) && wans.length > 0
 
@@ -701,16 +733,32 @@ function WanPanel({ wans, loading, error, onOverlayChange }) {
   function closeWanModal() {
     setIsWanPppOpen(false)
     setIsWanIpOpen(false)
+    setEditingWanPath(null)
     setWanForm(emptyWanForm())
+  }
+
+  function openAddWan(kind) {
+    setEditingWanPath(null)
+    setWanForm(emptyWanForm())
+    setIsWanPppOpen(kind === 'ppp')
+    setIsWanIpOpen(kind === 'ip')
+  }
+
+  function openEditWan(wan) {
+    setEditingWanPath(wan.fullPath || null)
+    setWanForm(wanFormFrom(wan))
+    const ppp = wan.type === 'PPP' || wan.transport === 'PPPoE'
+    setIsWanPppOpen(ppp)
+    setIsWanIpOpen(!ppp)
   }
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap justify-end gap-2">
-        <button type="button" className={`${wanButtonClass} bg-green-500 hover:bg-green-600`} onClick={() => setIsWanIpOpen(true)}>
+        <button type="button" className={`${wanButtonClass} bg-green-500 hover:bg-green-600`} onClick={() => openAddWan('ip')}>
           Add WAN IP
         </button>
-        <button type="button" className={`${wanButtonClass} bg-cyan-500 hover:bg-cyan-600`} onClick={() => setIsWanPppOpen(true)}>
+        <button type="button" className={`${wanButtonClass} bg-cyan-500 hover:bg-cyan-600`} onClick={() => openAddWan('ppp')}>
           Add WAN PPP
         </button>
       </div>
@@ -730,13 +778,16 @@ function WanPanel({ wans, loading, error, onOverlayChange }) {
                   type="button"
                   className="grid h-7 w-7 cursor-pointer place-items-center rounded border-0 bg-transparent text-white hover:bg-white/20"
                   aria-label={`Edit WAN ${wan.type}`}
+                  onClick={() => openEditWan(wan)}
                 >
                   <Pencil size={15} />
                 </button>
                 <button
                   type="button"
-                  className="grid h-7 w-7 cursor-pointer place-items-center rounded border-0 bg-transparent text-white hover:bg-white/20"
+                  className="grid h-7 w-7 cursor-pointer place-items-center rounded border-0 bg-transparent text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
                   aria-label={`Hapus WAN ${wan.type}`}
+                  disabled={deletingWanPath === wan.fullPath}
+                  onClick={() => setWanToDelete(wan)}
                 >
                   <Trash2 size={15} />
                 </button>
@@ -781,6 +832,7 @@ function WanPanel({ wans, loading, error, onOverlayChange }) {
       {isWanPppOpen && (
         <WanConfigModal
           variant="ppp"
+          editing={Boolean(editingWanPath)}
           form={wanForm}
           onChange={updateWanField}
           onPortChange={updateWanPort}
@@ -790,6 +842,7 @@ function WanPanel({ wans, loading, error, onOverlayChange }) {
       {isWanIpOpen && (
         <WanConfigModal
           variant="ip"
+          editing={Boolean(editingWanPath)}
           form={wanForm}
           onChange={updateWanField}
           onPortChange={updateWanPort}
@@ -865,7 +918,7 @@ function WanSection({ icon: Icon, title, iconClass, children }) {
 }
 
 // Form tambah koneksi WAN. Penyimpanan ke ONU belum dihubungkan.
-function WanConfigModal({ variant, form, onChange, onPortChange, onClose }) {
+function WanConfigModal({ variant, editing = false, form, onChange, onPortChange, onClose }) {
   const isPpp = variant === 'ppp'
   const dhcp = form.addressing === 'DHCP'
   const accentClass = isPpp ? 'accent-cyan-600' : 'accent-blue-600'
@@ -928,9 +981,11 @@ function WanConfigModal({ variant, form, onChange, onPortChange, onClose }) {
               {isPpp ? 'Konfigurasi WAN PPP Connection' : 'Konfigurasi WAN IP'}
             </h2>
             <p className="m-0 mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-              {isPpp
-                ? 'Atur autentikasi PPPoE, VLAN, dan port binding koneksi baru.'
-                : 'Atur pengalamatan IP, VLAN, dan port binding koneksi baru.'}
+              {editing
+                ? 'Ubah koneksi yang sudah ada. Sandi dikosongkan; isi ulang hanya bila ingin diganti.'
+                : isPpp
+                  ? 'Atur autentikasi PPPoE, VLAN, dan port binding koneksi baru.'
+                  : 'Atur pengalamatan IP, VLAN, dan port binding koneksi baru.'}
             </p>
           </div>
           <button
@@ -974,13 +1029,13 @@ function WanConfigModal({ variant, form, onChange, onPortChange, onClose }) {
             <WanSelectControl
               label="Service List"
               value={form.serviceList}
-              options={WAN_SERVICE_OPTIONS}
+              options={optionsWithCurrent(WAN_SERVICE_OPTIONS, form.serviceList)}
               onChange={(value) => onChange('serviceList', value)}
             />
             <WanSelectControl
               label="Connection Type"
               value={form.connectionType}
-              options={WAN_CONNECTION_OPTIONS}
+              options={optionsWithCurrent(WAN_CONNECTION_OPTIONS, form.connectionType)}
               onChange={(value) => onChange('connectionType', value)}
             />
             <WanCheckControl
@@ -1032,7 +1087,8 @@ function WanConfigModal({ variant, form, onChange, onPortChange, onClose }) {
                       type={showPassword ? 'text' : 'password'}
                       name="password"
                       autoComplete="new-password"
-                      required
+                      required={!editing}
+                      placeholder={editing ? 'Kosongkan jika tidak diubah' : undefined}
                       value={form.password}
                       onChange={(event) => onChange('password', event.target.value)}
                     />
@@ -1325,20 +1381,20 @@ function DetailIndicator({ label, children }) {
 // Modal detail satu ONU. Data diambil dari baris yang diklik (sudah bersih dari backend).
 // Info pelanggan / host LAN belum punya sumber data, jadi memakai placeholder.
 function DeviceDetailModal({
-  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, lanLoading, lanError, wansLoading, wansError, onEditWlan, onEditLan, editOpen, renderRx, renderTemp,
+  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, lanLoading, lanError, wansLoading, wansError, onEditWlan, onEditLan, editOpen, renderRx, renderTemp, setWanToDelete, deletingWanPath, deleteConfirmOpen,
 }) {
   const [wanOverlayOpen, setWanOverlayOpen] = useState(false)
 
   useEffect(() => {
     function onKeyDown(event) {
       // Esc menutup modal detail hanya bila pop-up berlapis (WLAN, LAN, WAN) sedang tertutup.
-      if (event.key === 'Escape' && !editOpen && !wanOverlayOpen) {
+      if (event.key === 'Escape' && !editOpen && !wanOverlayOpen && !deleteConfirmOpen) {
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose, editOpen, wanOverlayOpen])
+  }, [onClose, editOpen, wanOverlayOpen, deleteConfirmOpen])
 
   const badge = STATUS_BADGE[device.status] || STATUS_BADGE.off24plus
   const hasHosts = Boolean(device?.connected_hosts && device.connected_hosts.length > 0)
@@ -1571,6 +1627,8 @@ function DeviceDetailModal({
                   loading={wansLoading}
                   error={wansError}
                   onOverlayChange={setWanOverlayOpen}
+                  setWanToDelete={setWanToDelete}
+                  deletingWanPath={deletingWanPath}
                 />
               ) : (
                 <p className="m-0 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -1611,6 +1669,8 @@ function GenieAcs() {
   const [lanReloadKey, setLanReloadKey] = useState(0)
   const [wansState, setWansState] = useState({ loading: false, error: '' })
   const [wansReloadKey, setWansReloadKey] = useState(0)
+  const [deletingWanPath, setDeletingWanPath] = useState(null)
+  const [wanToDelete, setWanToDelete] = useState(null)
   const [editingWlan, setEditingWlan] = useState(null)
   const [wlanForm, setWlanForm] = useState(EMPTY_WLAN_FORM)
   const [isUpdating, setIsUpdating] = useState(false)
@@ -1964,6 +2024,7 @@ function GenieAcs() {
     setIsSummoning(false)
     setEditingWlan(null)
     setIsEditLanOpen(false)
+    setWanToDelete(null)
     setSelectedDevice(null)
   }
 
@@ -2025,6 +2086,39 @@ function GenieAcs() {
     }
     Swal.fire({ icon: 'warning', title: 'Pilih server', text: 'Pilih server ACS terlebih dahulu.' })
     return false
+  }
+
+  async function confirmDeleteWan(wan) {
+    const id = selectedDevice?._id || selectedDevice?.id
+    if (!requireServer() || !id || deletingWanPath) {
+      return
+    }
+    if (!wan?.fullPath) {
+      Swal.fire({ icon: 'error', title: 'Gagal', text: 'Path WAN tidak tersedia. Muat ulang tab WAN.' })
+      return
+    }
+    setDeletingWanPath(wan.fullPath)
+    try {
+      const result = await deleteAcsWan({
+        server_id: selectedServer,
+        deviceId: id,
+        wanPath: wan.fullPath,
+      })
+      await fetchDeviceDetail(id)
+      setWansReloadKey((key) => key + 1)
+      setWanToDelete(null)
+      Swal.fire({
+        icon: 'success',
+        title: 'Berhasil',
+        text: result.message,
+        timer: 2200,
+        showConfirmButton: false,
+      })
+    } catch (requestError) {
+      Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal menghapus koneksi WAN.') })
+    } finally {
+      setDeletingWanPath(null)
+    }
   }
 
   // Summon satu ONU dari modal detail. Loading tetap sampai last_inform berubah, atau 35 detik.
@@ -2521,6 +2615,9 @@ function GenieAcs() {
           wansLoading={wansState.loading}
           wansError={wansState.error}
           onEditLan={handleEditLan}
+          setWanToDelete={setWanToDelete}
+          deletingWanPath={deletingWanPath}
+          deleteConfirmOpen={Boolean(wanToDelete)}
           renderRx={renderRx}
           renderTemp={renderTemp}
         />
@@ -2559,6 +2656,37 @@ function GenieAcs() {
           onClose={() => setServerModalOpen(false)}
           onChanged={handleServersChanged}
         />
+      )}
+
+      {wanToDelete && createPortal(
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black bg-opacity-60 p-4">
+          <div className="w-full max-w-sm rounded-lg bg-white p-6 text-center shadow-xl dark:bg-slate-900" role="dialog" aria-modal="true" aria-labelledby="wan-delete-title">
+            <TriangleAlert className="mx-auto text-amber-500" size={48} aria-hidden="true" />
+            <h2 id="wan-delete-title" className="m-0 mt-4 text-lg font-bold text-gray-900 dark:text-gray-100">Hapus Koneksi WAN?</h2>
+            <p className="m-0 mt-2 text-sm text-gray-500 dark:text-gray-400">
+              Apakah Anda yakin ingin menghapus WAN {wanToDelete.name && wanToDelete.name !== '-' ? wanToDelete.name : wanToDelete.type}? Tindakan ini akan memutuskan koneksi terkait.
+            </p>
+            <div className="mt-6 flex justify-center gap-4">
+              <button
+                type="button"
+                className="cursor-pointer rounded-md border-0 bg-gray-500 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={Boolean(deletingWanPath)}
+                onClick={() => setWanToDelete(null)}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                className="cursor-pointer rounded-md border-0 bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={Boolean(deletingWanPath)}
+                onClick={() => confirmDeleteWan(wanToDelete)}
+              >
+                {deletingWanPath ? 'Menghapus...' : 'Ya, Hapus'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </section>
   )

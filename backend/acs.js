@@ -1,5 +1,10 @@
+
 const net = require('net');
 const pool = require('../database');
+const {
+  formatAcsFault, selectWanLocation, selectTr181Location, vendorProfile, normalizeAcsObjectName, sanitizeParameterValues,
+  isCommitLoopFault,
+} = require('./acs_wan');
 
 // ---- Konstanta -------------------------------------------------------------
 const DEFAULT_NBI_PORT = 7557;
@@ -9,9 +14,12 @@ const MAX_HOST_LENGTH = 100;
 // Sesuaikan dengan Periodic Inform Interval ONU (bisa diubah lewat env).
 const ONLINE_WINDOW_MINUTES = Math.max(parseInt(process.env.ACS_ONLINE_MINUTES, 10) || 30, 1);
 const NBI_TIMEOUT_MS = 15000;
-// Batas tunggu tugas (Summon/Reboot/Reset). Dengan ?connection_request, GenieACS lebih dulu menghubungi
-// ONU dan bisa lama bila ONU tidak terjangkau, jadi lebih longgar dari permintaan biasa.
-const TASK_TIMEOUT_MS = Math.max(parseInt(process.env.ACS_TASK_TIMEOUT_MS, 10) || 30000, 1000);
+// Batas tunggu HTTP ke GenieACS untuk tugas (Summon/Reboot/Reset). Parameter query timeout=3000
+// di URL task membuat GenieACS tidak menunggu ONT lama (200 selesai / 202 diantrikan).
+// Angka ini hanya batas klien bila ACS sendiri lambat membalas, bukan batas tunggu ONT.
+const TASK_TIMEOUT_MS = Math.max(parseInt(process.env.ACS_TASK_TIMEOUT_MS, 10) || 45000, 1000);
+// Add/Edit WAN: ONT lambat sering tidak sempat menjemput antrean dalam 30 detik.
+const WAN_TASK_TIMEOUT_MS = 60000;
 const NBI_PAGE_SIZE = 500;
 const NBI_MAX_PAGES = 200;
 
@@ -92,7 +100,7 @@ class NbiError extends Error {
   }
 }
 
-async function nbiRequest(server, method, path, { body, timeout = NBI_TIMEOUT_MS } = {}) {
+async function nbiRequest(server, method, path, { body, timeout = NBI_TIMEOUT_MS, allowBusy = false } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
@@ -103,8 +111,11 @@ async function nbiRequest(server, method, path, { body, timeout = NBI_TIMEOUT_MS
       signal: controller.signal,
     });
     const text = await response.text();
-    if (!response.ok && response.status !== 404) {
-      throw new NbiError(`NBI membalas ${response.status}${text ? `: ${text.slice(0, 200)}` : ''}`, response.status);
+    // 404 = tidak ditemukan (ditangani pemanggil). 503 = sesi CWMP sedang berjalan: hanya diteruskan
+    // bila pemanggil meminta (allowBusy). Default sama seperti acs-standalone: 503 dilempar sebagai error,
+    // supaya alur WAN (AddObject/setParameterValues) tidak mengira perintah berhasil.
+    if (!response.ok && response.status !== 404 && !(allowBusy && response.status === 503)) {
+      throw new NbiError(`NBI membalas ${response.status}${text ? `: ${text.slice(0, 500)}` : ''}`, response.status);
     }
     let data = null;
     if (text) {
@@ -340,40 +351,307 @@ function taskBody(action, device) {
   }
 }
 
-// Root data model ONU (TR-098 atau TR-181), dibaca dari subtree DeviceInfo.
-async function detectDataModel(server, deviceId) {
+// Summon hanya untuk ONU online (last_inform dalam jendela ONLINE_WINDOW_MINUTES).
+// Sekalian membaca data model agar tidak perlu request NBI kedua.
+async function readSummonTarget(server, deviceId) {
   const query = new URLSearchParams({
     query: JSON.stringify({ _id: deviceId }),
-    projection: 'InternetGatewayDevice.DeviceInfo,Device.DeviceInfo',
+    projection: '_lastInform,InternetGatewayDevice.DeviceInfo,Device.DeviceInfo',
   });
   const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
   const doc = Array.isArray(data) ? data[0] : null;
-  return ROOTS.find((name) => isParamNode(doc?.[name])) || 'InternetGatewayDevice';
+  if (!doc) {
+    throw new NbiError('Perangkat tidak ditemukan di GenieACS', 404);
+  }
+  const lastInform = doc._lastInform ? new Date(doc._lastInform) : null;
+  const online = Boolean(lastInform && !Number.isNaN(lastInform.getTime()) && lastInform >= statusCutoffs().online);
+  if (!online) {
+    throw new NbiError('Perangkat sedang offline, tidak dapat melakukan summon', 400, 'OFFLINE');
+  }
+  return {
+    dataModel: ROOTS.find((name) => isParamNode(doc[name])) || 'InternetGatewayDevice',
+  };
 }
 
 async function sendTask(server, deviceInput, action) {
   const device = { ...deviceInput };
-  if (action === 'summon' && !device.data_model) {
-    device.data_model = await detectDataModel(server, device.device_id);
+  if (action === 'summon') {
+    const target = await readSummonTarget(server, device.device_id);
+    device.data_model = device.data_model || target.dataModel;
   }
-  const { status } = await postTask(server, device.device_id, taskBody(action, device));
+  // Summon: fire-and-forget — GenieACS timeout=0 agar NBI segera 200/202 tanpa menunggu ONT.
+  const waitMs = action === 'summon' ? 0 : 3000;
+  const { status } = await postTask(server, device.device_id, taskBody(action, device), { waitMs });
+  if (action === 'summon') {
+    return 'Perintah masuk antrean';
+  }
   return status === 202 ? 'Diantrikan, ONU belum merespons' : 'Terkirim';
 }
 
-// POST /devices/{id}/tasks?timeout=3000&connection_request. Status 200 = tugas selesai dikerjakan ONU,
-// 202 = diantrikan (ONU belum merespons). Mengembalikan { status, data }.
-async function postTask(server, deviceId, body) {
-  const path = `/devices/${encodeURIComponent(deviceId)}/tasks?timeout=3000&connection_request`;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// POST /devices/{id}/tasks?timeout={waitMs}&connection_request.
+// waitMs=0 (Summon): GenieACS mengantrikan task + connection_request lalu segera membalas
+// tanpa menunggu sesi ONT. waitMs>0: tunggu agar tugas bisa selesai (200) atau 202.
+async function postTask(server, deviceId, body, { waitMs = 3000, retries = 2, connectionRequest = true } = {}) {
+  const acsWait = Math.max(0, Number(waitMs) || 0);
+  const flags = [`timeout=${acsWait}`];
+  if (connectionRequest) {
+    flags.push('connection_request');
+  }
+  const path = `/devices/${encodeURIComponent(deviceId)}/tasks?${flags.join('&')}`;
+  // HTTP client harus menunggu lebih lama dari timeout GenieACS + buffer.
+  const httpTimeout = Math.max(TASK_TIMEOUT_MS, acsWait + 20000);
+
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    let result;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      result = await nbiRequest(server, 'POST', path, { body, timeout: httpTimeout, allowBusy: true });
+    } catch (error) {
+      if (error.code === 'TIMEOUT') {
+        throw new NbiError(
+          `GenieACS belum membalas dalam ${Math.round(httpTimeout / 1000)} detik (ONU mungkin tidak terjangkau dari ACS). Perintah kemungkinan sudah diantrikan; cek di GenieACS lalu coba lagi.`,
+          undefined,
+          'TIMEOUT',
+        );
+      }
+      throw error;
+    }
+    if (result.status === 404) {
+      throw new NbiError('Perangkat tidak ditemukan di GenieACS (coba SINKRON)', 404);
+    }
+    if (result.status === 503) {
+      lastError = new NbiError(
+        'GenieACS sibuk (ONU sedang dalam sesi CWMP). Menunggu lalu mencoba lagi...',
+        503,
+        'BUSY',
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(2000);
+      continue;
+    }
+    return result;
+  }
+  throw lastError || new NbiError('GenieACS sibuk (perangkat dalam sesi CWMP). Coba lagi sebentar.', 503, 'BUSY');
+}
+
+async function sendDeleteObject(server, deviceId, objectName) {
+  const objectPath = normalizeAcsObjectName(objectName);
+  const { status, data } = await postTask(
+    server,
+    deviceId,
+    { name: 'deleteObject', objectName: objectPath },
+    { waitMs: 3000, retries: 0, connectionRequest: true },
+  );
+  if (isParamNode(data) && data.fault) {
+    const detail = [data.fault.code, data.fault.message].filter(Boolean).join(': ');
+    throw new NbiError(`ONU menolak penghapusan${detail ? ` (${detail})` : ''}`, undefined, 'FAULT');
+  }
+  return { applied: status !== 202 };
+}
+
+// Tugas WAN menunggu sesi TR-069 lebih lama daripada Summon biasa.
+// GenieACS ?timeout= dalam milidetik: bila ONU belum selesai, NBI membalas 202 dan task tetap antre.
+// HTTP harus lebih panjang dari timeout GenieACS agar ID tugas tidak hilang saat koneksi diputus.
+const WAN_HTTP_TIMEOUT_MS = 70000;
+const WAN_WAKE_TIMEOUT_MS = 20000;
+const WAN_WAKE_HTTP_TIMEOUT_MS = 25000;
+const WAN_WAKE_DELAY_MS = 1500;
+const WAN_POLL_INTERVAL_MS = 3000;
+const WAN_POLL_BUDGET_MS = 60000;
+const WAN_ROLLBACK_TASK_TIMEOUT_MS = 20000;
+const WAN_ROLLBACK_HTTP_TIMEOUT_MS = 25000;
+const WAN_ROLLBACK_POLL_BUDGET_MS = 20000;
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function taskInstanceNumber(data) {
+  if (!isParamNode(data) || data.instanceNumber == null || String(data.instanceNumber) === '') {
+    return null;
+  }
+  return String(data.instanceNumber);
+}
+
+const COMMIT_LOOP_MESSAGE = 'Gagal: GenieACS menghentikan sesi karena too many commits. Antrean tugas perangkat ini dibersihkan agar server tidak macet.';
+
+function commitLoopSeen(fault) {
+  if (fault == null) {
+    return false;
+  }
+  if (typeof fault === 'string') {
+    return isCommitLoopFault({ message: fault });
+  }
+  const text = [fault.code, fault.message, formatAcsFault(fault, '')].filter(Boolean).join(' ');
+  return isCommitLoopFault({ message: text, code: fault.code });
+}
+
+// Hapus satu task beserta fault-nya. Task yang fault tidak boleh tertinggal di antrean:
+// GenieACS mengulangnya di setiap sesi dan menahan task berikutnya (AddObject baru ikut gagal/timeout).
+async function dropWanTask(server, deviceId, taskId) {
+  if (!taskId) {
+    return;
+  }
+  const id = encodeURIComponent(String(taskId));
+  try {
+    await nbiRequest(server, 'DELETE', `/tasks/${id}`, { timeout: 8000 });
+  } catch (error) {
+    console.warn(`[ACS wan] hapus task ${taskId}: ${error.message}`);
+  }
+  if (deviceId) {
+    try {
+      await nbiRequest(server, 'DELETE', `/faults/${encodeURIComponent(`${deviceId}:task_${taskId}`)}`, { timeout: 8000 });
+    } catch (error) {
+      console.warn(`[ACS wan] hapus fault ${taskId}: ${error.message}`);
+    }
+  }
+}
+
+async function clearWanQueue(server, deviceId, taskId) {
+  await dropWanTask(server, deviceId, taskId);
+  if (!deviceId) {
+    return;
+  }
+  try {
+    // NBI tertentu menolak bulk DELETE /tasks/?query (405), jadi daftar lalu hapus per ID.
+    const query = new URLSearchParams({ query: JSON.stringify({ device: deviceId }), projection: '_id' });
+    const { data } = await nbiRequest(server, 'GET', `/tasks/?${query}`, { timeout: 8000 });
+    const ids = Array.isArray(data) ? data.map((item) => item?._id).filter(Boolean) : [];
+    for (const id of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await dropWanTask(server, deviceId, id);
+    }
+    console.warn(`[ACS wan] antrean ${deviceId} dibersihkan (${ids.length} task)`);
+  } catch (error) {
+    console.warn(`[ACS wan] bersihkan antrean ${deviceId}: ${error.message}`);
+  }
+}
+
+function throwTaskFault(data) {
+  if (isParamNode(data) && data.fault) {
+    throw new NbiError(formatAcsFault(data.fault), undefined, commitLoopSeen(data.fault) ? 'COMMIT_LOOP' : 'FAULT');
+  }
+}
+
+async function fetchQueuedTask(server, taskId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: taskId }),
+  });
+  const { data } = await nbiRequest(server, 'GET', `/tasks/?${query}`, { timeout: 20000 });
+  return Array.isArray(data) && data.length > 0 ? data[0] : null;
+}
+
+async function recentDeviceFault(server, deviceId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ device: deviceId }),
+    sort: JSON.stringify({ timestamp: -1 }),
+    limit: '1',
+  });
+  try {
+    const { data } = await nbiRequest(server, 'GET', `/faults/?${query}`, { timeout: 8000 });
+    const fault = Array.isArray(data) ? data[0] : null;
+    if (!fault) {
+      return '';
+    }
+    const stamp = new Date(fault.timestamp).getTime();
+    if (!Number.isFinite(stamp) || Date.now() - stamp > 2 * 60 * 1000) {
+      return '';
+    }
+    return formatAcsFault(fault, '');
+  } catch {
+    return '';
+  }
+}
+
+function sessionModel(body) {
+  if (String(body?.objectName || '').startsWith('Device.')) {
+    return 'Device';
+  }
+  const rows = Array.isArray(body?.parameterValues) ? body.parameterValues : [];
+  if (rows.some((row) => String(row?.[0] || '').startsWith('Device.'))) {
+    return 'Device';
+  }
+  return 'InternetGatewayDevice';
+}
+
+// Task 202 belum selesai. Dicek tiap 3 detik sampai 60 detik: hilang dari antrean, membawa fault, atau waktu habis.
+async function pollWanTask(server, deviceId, taskId, budgetMs = WAN_POLL_BUDGET_MS) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    await delay(WAN_POLL_INTERVAL_MS);
+    let task = null;
+    try {
+      task = await fetchQueuedTask(server, taskId);
+    } catch (error) {
+      console.warn(`[ACS wan] cek task ${taskId}: ${error.message}`);
+      continue;
+    }
+    if (!task) {
+      return null;
+    }
+    if (commitLoopSeen(task.fault)) {
+      await clearWanQueue(server, deviceId, taskId);
+      throw new NbiError(COMMIT_LOOP_MESSAGE, undefined, 'COMMIT_LOOP');
+    }
+    if (task.fault) {
+      await dropWanTask(server, deviceId, taskId);
+    }
+    throwTaskFault(task);
+    if (taskInstanceNumber(task)) {
+      return task;
+    }
+  }
+  const faultText = await recentDeviceFault(server, deviceId);
+  if (commitLoopSeen(faultText)) {
+    await clearWanQueue(server, deviceId, taskId);
+    throw new NbiError(COMMIT_LOOP_MESSAGE, undefined, 'COMMIT_LOOP');
+  }
+  // Task yang tak selesai dalam batas waktu dibuang agar tidak jalan terlambat dan meninggalkan WAN yatim.
+  await dropWanTask(server, deviceId, taskId);
+  throw new NbiError(
+    faultText
+      ? `ONU menolak perintah TR-069. ${faultText}`
+      : 'Perintah masih antre di GenieACS dan sesi TR-069 belum selesai dalam batas waktu. Coba lagi beberapa saat lagi.',
+    undefined,
+    faultText ? 'FAULT' : 'PENDING',
+  );
+}
+
+// POST task WAN dengan connection request. AddObject dan setParameterValues membangunkan ONU lebih dulu.
+async function postWanTask(server, deviceId, body, {
+  genieTimeout = WAN_TASK_TIMEOUT_MS,
+  httpTimeout = WAN_HTTP_TIMEOUT_MS,
+  poll = true,
+  pollBudget = WAN_POLL_BUDGET_MS,
+  summon = true,
+} = {}) {
+  if (summon && (body?.name === 'addObject' || body?.name === 'setParameterValues')) {
+    await prepareWanPpp(server, deviceId, sessionModel(body));
+  }
+  const path = `/devices/${encodeURIComponent(deviceId)}/tasks?timeout=${genieTimeout}&connection_request`;
   let result;
   try {
-    result = await nbiRequest(server, 'POST', path, { body, timeout: TASK_TIMEOUT_MS });
+    result = await nbiRequest(server, 'POST', path, { body, timeout: httpTimeout });
   } catch (error) {
-    if (error.code === 'TIMEOUT') {
-      // Permintaan sudah terkirim; GenieACS biasanya sudah mengantrikan tugasnya sebelum menunggu ONU.
+    if (error instanceof NbiError && error.code === 'TIMEOUT') {
+      const faultText = await recentDeviceFault(server, deviceId);
+      if (commitLoopSeen(faultText)) {
+        await clearWanQueue(server, deviceId);
+        throw new NbiError(COMMIT_LOOP_MESSAGE, undefined, 'COMMIT_LOOP');
+      }
       throw new NbiError(
-        `GenieACS belum membalas dalam ${Math.round(TASK_TIMEOUT_MS / 1000)} detik (ONU mungkin tidak terjangkau dari ACS). Perintah kemungkinan sudah diantrikan; cek di GenieACS lalu coba lagi.`,
+        faultText
+          ? `GenieACS belum selesai, dan ONU mencatat fault TR-069. ${faultText}`
+          : `GenieACS belum membalas dalam ${Math.round(httpTimeout / 1000)} detik. Perintah kemungkinan masih antre.`,
         undefined,
-        'TIMEOUT',
+        faultText ? 'FAULT' : 'TIMEOUT',
       );
     }
     throw error;
@@ -381,7 +659,115 @@ async function postTask(server, deviceId, body) {
   if (result.status === 404) {
     throw new NbiError('Perangkat tidak ditemukan di GenieACS (coba SINKRON)', 404);
   }
+  if (commitLoopSeen(result.data?.fault)) {
+    await clearWanQueue(server, deviceId, result.data?._id);
+    throw new NbiError(COMMIT_LOOP_MESSAGE, undefined, 'COMMIT_LOOP');
+  }
+  if (isParamNode(result.data) && result.data.fault) {
+    await dropWanTask(server, deviceId, result.data._id);
+  }
+  throwTaskFault(result.data);
+  if (result.status === 202) {
+    if (!poll) {
+      return result;
+    }
+    const taskId = isParamNode(result.data) ? result.data._id : null;
+    if (!taskId) {
+      throw new NbiError('GenieACS mengantrikan perintah tanpa ID task, sehingga statusnya tidak bisa dipantau.', undefined, 'PENDING');
+    }
+    const polled = await pollWanTask(server, deviceId, String(taskId), pollBudget);
+    return { status: 200, data: polled };
+  }
   return result;
+}
+
+// Connection request singkat supaya ONU terbangun, lalu jeda sebelum AddObject / setParameterValues.
+async function prepareWanPpp(server, deviceId, model) {
+  const objectName = model === 'Device' ? 'Device.DeviceInfo' : 'InternetGatewayDevice.DeviceInfo';
+  try {
+    await postWanTask(
+      server,
+      deviceId,
+      { name: 'refreshObject', objectName },
+      { genieTimeout: WAN_WAKE_TIMEOUT_MS, httpTimeout: WAN_WAKE_HTTP_TIMEOUT_MS, poll: false, summon: false },
+    );
+  } catch (error) {
+    const unreachable = error instanceof NbiError && (error.status === 404 || (!error.status && !error.code));
+    if (unreachable) {
+      throw error;
+    }
+    console.warn(`[ACS wan-ppp] summon awal ${deviceId}: ${error.message}`);
+  }
+  await delay(WAN_WAKE_DELAY_MS);
+}
+
+async function sendWanSetParameterValues(server, deviceId, parameterValues) {
+  const payload = sanitizeParameterValues(parameterValues);
+  const logged = payload.map(([path, value, type]) => [
+    path,
+    /password/i.test(String(path).split('.').pop()) ? '***' : value,
+    type,
+  ]);
+  console.log('PAYLOAD TR-069:', JSON.stringify(logged, null, 2));
+  if (payload.length === 0) {
+    return { applied: true };
+  }
+  await postWanTask(server, deviceId, { name: 'setParameterValues', parameterValues: payload });
+  return { applied: true };
+}
+
+// Connection Name (Safe-Write): ditulis sebagai task terpisah setelah parameter utama berhasil.
+// Anggaran waktu dipendekkan karena kegagalan Name tidak boleh menahan respons ke user.
+async function sendWanConnectionName(server, deviceId, rows) {
+  const payload = sanitizeParameterValues(rows);
+  if (payload.length === 0) {
+    return { applied: true };
+  }
+  console.log('PAYLOAD TR-069 (Connection Name):', JSON.stringify(payload));
+  await postWanTask(server, deviceId, { name: 'setParameterValues', parameterValues: payload }, {
+    genieTimeout: WAN_ROLLBACK_TASK_TIMEOUT_MS,
+    httpTimeout: WAN_ROLLBACK_HTTP_TIMEOUT_MS,
+    pollBudget: WAN_ROLLBACK_POLL_BUDGET_MS,
+  });
+  return { applied: true };
+}
+
+async function sendWanAddObject(server, deviceId, objectName) {
+  const objectPath = normalizeAcsObjectName(objectName);
+  console.log('ADDOBJECT TR-069:', objectPath);
+  const { data } = await postWanTask(server, deviceId, { name: 'addObject', objectName: objectPath });
+  return { applied: true, instanceNumber: taskInstanceNumber(data) };
+}
+
+async function readWanChildIndexes(server, deviceId, wanDeviceIndex, connectionIndex, childName = 'WANPPPConnection') {
+  const base = `InternetGatewayDevice.WANDevice.${wanDeviceIndex}.WANConnectionDevice`;
+  const projection = connectionIndex ? `${base}.${connectionIndex}.${childName}` : base;
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: deviceId }),
+    projection,
+  });
+  const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
+  const doc = Array.isArray(data) ? data[0] : null;
+  const connectionNode = doc?.InternetGatewayDevice?.WANDevice?.[wanDeviceIndex]?.WANConnectionDevice;
+  if (connectionIndex) {
+    return numericInstanceKeys(connectionNode?.[connectionIndex]?.[childName]);
+  }
+  return numericInstanceKeys(connectionNode);
+}
+
+async function resolveNewIndex(readIndexes, previous) {
+  const known = new Set(previous);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0) {
+      await delay(1000);
+    }
+    const current = await readIndexes();
+    const added = current.filter((key) => !known.has(key)).sort((left, right) => Number(left) - Number(right));
+    if (added.length > 0) {
+      return added[added.length - 1];
+    }
+  }
+  return null;
 }
 
 // Konfigurasi WLAN saat ini dari ACS: { model, wlanNode }. model = 'InternetGatewayDevice' (TR-098)
@@ -435,16 +821,234 @@ async function sendSetParameterValues(server, deviceId, parameterValues) {
   return { applied: status !== 202 };
 }
 
-// Menghapus satu instance objek TR-069 (DeleteObject). objectName wajib berakhir titik.
-// Hasil: { applied: true } bila ONU sudah menghapus, { applied: false } bila hanya diantrikan.
-async function sendDeleteObject(server, deviceId, objectName) {
-  const objectPath = String(objectName).endsWith('.') ? String(objectName) : `${objectName}.`;
-  const { status, data } = await postTask(server, deviceId, { name: 'deleteObject', objectName: objectPath });
-  if (isParamNode(data) && data.fault) {
-    const detail = [data.fault.code, data.fault.message].filter(Boolean).join(': ');
-    throw new NbiError(`ONU menolak penghapusan${detail ? ` (${detail})` : ''}`, undefined, 'FAULT');
+function numericInstanceKeys(node) {
+  if (!isParamNode(node)) {
+    return [];
   }
-  return { applied: status !== 202 };
+  return Object.keys(node).filter((key) => /^\d+$/.test(key)).sort((left, right) => Number(left) - Number(right));
+}
+
+function manufacturerText(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return String(value).trim().slice(0, 200);
+}
+
+// Konteks WAN untuk membuat koneksi PPP: merek dari DeviceInfo.Manufacturer (cadangan _deviceId),
+// indeks WANDevice, dan WANConnectionDevice pertama bila sudah ada.
+async function readWanTarget(server, deviceId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: deviceId }),
+    projection: [
+      '_deviceId',
+      'InternetGatewayDevice.DeviceInfo.Manufacturer',
+      'InternetGatewayDevice.DeviceInfo.ModelName',
+      'InternetGatewayDevice.DeviceInfo.ProductClass',
+      'InternetGatewayDevice.WANDevice',
+      'Device.DeviceInfo.Manufacturer',
+      'Device.DeviceInfo.ModelName',
+      'Device.DeviceInfo.ProductClass',
+      'Device.PPP.Interface',
+    ].join(','),
+  });
+  const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
+  const doc = Array.isArray(data) ? data[0] : null;
+  if (!doc) {
+    return null;
+  }
+  const igd = isParamNode(doc.InternetGatewayDevice) ? doc.InternetGatewayDevice : null;
+  const tr181 = isParamNode(doc.Device) ? doc.Device : null;
+  const manufacturer = manufacturerText(
+    igd?.DeviceInfo?.Manufacturer?._value
+    ?? tr181?.DeviceInfo?.Manufacturer?._value
+    ?? doc._deviceId?._Manufacturer,
+  );
+  const productClass = manufacturerText(
+    igd?.DeviceInfo?.ProductClass?._value
+    ?? tr181?.DeviceInfo?.ProductClass?._value
+    ?? doc._deviceId?._ProductClass,
+  );
+  const productModel = manufacturerText(
+    igd?.DeviceInfo?.ModelName?._value
+    ?? tr181?.DeviceInfo?.ModelName?._value
+    ?? productClass,
+  );
+  const profile = vendorProfile(manufacturer);
+  const hasWan = numericInstanceKeys(igd?.WANDevice).length > 0;
+  const location = hasWan
+    ? selectWanLocation(igd.WANDevice, profile)
+    : selectTr181Location(tr181);
+  return {
+    model: hasWan ? 'InternetGatewayDevice' : (tr181 ? 'Device' : 'InternetGatewayDevice'),
+    manufacturer,
+    productModel,
+    productClass,
+    profile,
+    ...location,
+  };
+}
+
+// Membuat instance WANPPPConnection. Huawei menaruh VLAN di koneksi PPP, jadi instance baru
+// ditambahkan pada WANConnectionDevice yang sudah ada. Merek lain (VLAN di link GPON/EPON)
+// mendapat WANConnectionDevice baru lalu WANPPPConnection di bawahnya.
+async function readTr181PppIndexes(server, deviceId) {
+  const query = new URLSearchParams({
+    query: JSON.stringify({ _id: deviceId }),
+    projection: 'Device.PPP.Interface',
+  });
+  const { data } = await nbiRequest(server, 'GET', `/devices/?${query}`, { timeout: 8000 });
+  const doc = Array.isArray(data) ? data[0] : null;
+  return numericInstanceKeys(doc?.Device?.PPP?.Interface);
+}
+
+async function createTr181PppInstance(server, deviceId) {
+  const before = await readTr181PppIndexes(server, deviceId);
+  const created = await sendWanAddObject(server, deviceId, 'Device.PPP.Interface.');
+  const pppIndex = created.instanceNumber || await resolveNewIndex(
+    () => readTr181PppIndexes(server, deviceId),
+    before,
+  );
+  if (!pppIndex) {
+    throw new NbiError(
+      'AddObject Device.PPP.Interface selesai tanpa nomor instance. Path TR-181 ini mungkin tidak didukung model ONU.',
+      undefined,
+      'FAULT',
+    );
+  }
+  const pppPath = `Device.PPP.Interface.${pppIndex}.`;
+  return { connectionPath: pppPath, pppPath, rollbackPath: pppPath };
+}
+
+async function createWanPppInstance(server, deviceId, options) {
+  if (options.tr181 || options.profile === 'tr181') {
+    return createTr181PppInstance(server, deviceId);
+  }
+  const { wanDeviceIndex, createConnectionDevice } = options;
+  const createdConnectionDevice = Boolean(createConnectionDevice || !options.connectionIndex);
+  if (!wanDeviceIndex) {
+    throw new NbiError(
+      'Struktur WAN tidak ditemukan pada perangkat. Jalankan Summon lalu coba lagi.',
+      undefined,
+      'FAULT',
+    );
+  }
+  const deviceRoot = `InternetGatewayDevice.WANDevice.${wanDeviceIndex}.WANConnectionDevice`;
+  let connectionIndex = options.connectionIndex || null;
+  if (createdConnectionDevice || !connectionIndex) {
+    const before = await readWanChildIndexes(server, deviceId, wanDeviceIndex);
+    const created = await sendWanAddObject(server, deviceId, `${deviceRoot}.`);
+    connectionIndex = created.instanceNumber || await resolveNewIndex(
+      () => readWanChildIndexes(server, deviceId, wanDeviceIndex),
+      before,
+    );
+    if (!connectionIndex) {
+      throw new NbiError(
+        `AddObject ${deviceRoot}. selesai tanpa nomor instance. Path ini mungkin tidak ada pada model ONU.`,
+        undefined,
+        'FAULT',
+      );
+    }
+  }
+  const beforePpp = await readWanChildIndexes(server, deviceId, wanDeviceIndex, connectionIndex);
+  const createdPpp = await sendWanAddObject(server, deviceId, `${deviceRoot}.${connectionIndex}.WANPPPConnection.`);
+  const pppIndex = createdPpp.instanceNumber || await resolveNewIndex(
+    () => readWanChildIndexes(server, deviceId, wanDeviceIndex, connectionIndex),
+    beforePpp,
+  );
+  if (!pppIndex) {
+    throw new NbiError(
+      `AddObject ${deviceRoot}.${connectionIndex}.WANPPPConnection. selesai tanpa nomor instance. Path ini mungkin tidak ada pada model ONU.`,
+      undefined,
+      'FAULT',
+    );
+  }
+  const connectionPath = `${deviceRoot}.${connectionIndex}.`;
+  const pppPath = `${connectionPath}WANPPPConnection.${pppIndex}.`;
+  return {
+    connectionPath,
+    pppPath,
+    rollbackPath: createdConnectionDevice ? connectionPath : pppPath,
+  };
+}
+
+// Instance WANIPConnection pada WANConnectionDevice yang sama dengan koneksi yang sudah ada.
+// Indeks WANDevice tidak dikunci ke 1: ONU ZTE lain menaruh layanan di WANDevice yang lebih tinggi.
+async function createWanIpInstance(server, deviceId, options) {
+  if (options.tr181 || options.profile === 'tr181') {
+    throw new NbiError(
+      'Model TR-181 belum mendukung pembuatan WAN IP dari form ini.',
+      undefined,
+      'FAULT',
+    );
+  }
+  const { wanDeviceIndex, createConnectionDevice } = options;
+  const createdConnectionDevice = Boolean(createConnectionDevice || !options.connectionIndex);
+  if (!wanDeviceIndex) {
+    throw new NbiError(
+      'Struktur WAN tidak ditemukan pada perangkat. Jalankan Summon lalu coba lagi.',
+      undefined,
+      'FAULT',
+    );
+  }
+  const deviceRoot = `InternetGatewayDevice.WANDevice.${wanDeviceIndex}.WANConnectionDevice`;
+  let connectionIndex = options.connectionIndex || null;
+  if (createdConnectionDevice || !connectionIndex) {
+    const before = await readWanChildIndexes(server, deviceId, wanDeviceIndex);
+    const created = await sendWanAddObject(server, deviceId, `${deviceRoot}.`);
+    connectionIndex = created.instanceNumber || await resolveNewIndex(
+      () => readWanChildIndexes(server, deviceId, wanDeviceIndex),
+      before,
+    );
+    if (!connectionIndex) {
+      throw new NbiError(
+        `AddObject ${deviceRoot}. selesai tanpa nomor instance. Path ini mungkin tidak ada pada model ONU.`,
+        undefined,
+        'FAULT',
+      );
+    }
+  }
+  const beforeIp = await readWanChildIndexes(server, deviceId, wanDeviceIndex, connectionIndex, 'WANIPConnection');
+  const createdIp = await sendWanAddObject(server, deviceId, `${deviceRoot}.${connectionIndex}.WANIPConnection.`);
+  const ipIndex = createdIp.instanceNumber || await resolveNewIndex(
+    () => readWanChildIndexes(server, deviceId, wanDeviceIndex, connectionIndex, 'WANIPConnection'),
+    beforeIp,
+  );
+  if (!ipIndex) {
+    throw new NbiError(
+      `AddObject ${deviceRoot}.${connectionIndex}.WANIPConnection. selesai tanpa nomor instance. Path ini mungkin tidak ada pada model ONU.`,
+      undefined,
+      'FAULT',
+    );
+  }
+  const connectionPath = `${deviceRoot}.${connectionIndex}.`;
+  const ipPath = `${connectionPath}WANIPConnection.${ipIndex}.`;
+  return {
+    connectionPath,
+    ipPath,
+    rollbackPath: createdConnectionDevice ? connectionPath : ipPath,
+  };
+}
+
+// Menghapus satu instance objek TR-069 (DeleteObject). Titik di akhir path dibuang.
+// Hasil: { applied: true } bila ONU sudah menghapus, { applied: false } bila hanya diantrikan.
+async function sendWanDeleteObject(server, deviceId, objectName, { rollback = false } = {}) {
+  const objectPath = normalizeAcsObjectName(objectName);
+  console.log('DELETEOBJECT TR-069:', objectPath);
+  await postWanTask(
+    server,
+    deviceId,
+    { name: 'deleteObject', objectName: objectPath },
+    rollback
+      ? {
+        genieTimeout: WAN_ROLLBACK_TASK_TIMEOUT_MS,
+        httpTimeout: WAN_ROLLBACK_HTTP_TIMEOUT_MS,
+        pollBudget: WAN_ROLLBACK_POLL_BUDGET_MS,
+        summon: false,
+      }
+      : {},
+  );
+  return { applied: true };
 }
 
 async function deleteRemoteDevice(server, device) {
@@ -454,7 +1058,6 @@ async function deleteRemoteDevice(server, device) {
 
 module.exports = {
   DEFAULT_NBI_PORT,
-  TASK_TIMEOUT_MS,
   MAX_SERVER_NAME,
   MAX_HOST_LENGTH,
   ONLINE_WINDOW_MINUTES,
@@ -469,6 +1072,13 @@ module.exports = {
   readWlanTarget,
   readLanTarget,
   sendSetParameterValues,
+  sendWanSetParameterValues,
+  sendWanConnectionName,
+  sendWanDeleteObject,
   sendDeleteObject,
+  readWanTarget,
+  prepareWanPpp,
+  createWanPppInstance,
+  createWanIpInstance,
   deleteRemoteDevice,
 };

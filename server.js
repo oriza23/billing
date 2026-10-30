@@ -21,6 +21,7 @@ app.use('/api', requireAuth);
 app.use('/api/pppoe', require('./backend/routes/pppoe'));
 app.use('/api/hotspot', require('./backend/routes/hotspot'));
 app.use('/api/admins', require('./backend/routes/admins'));
+app.use('/api/users', require('./backend/routes/users'));
 app.use('/api/routers', require('./backend/routes/routers'));
 const outletsRouter = require('./backend/routes/outlets');
 app.use('/api/outlets', outletsRouter);

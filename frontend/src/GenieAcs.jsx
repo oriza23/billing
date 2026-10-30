@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Cable, Eye, EyeOff, Flag, Globe, KeyRound, Network, Pencil, Server, Trash2, TriangleAlert, X } from 'lucide-react'
+import { Eye, EyeOff, Flag, Globe, Network, Pencil, Server, Trash2, TriangleAlert, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import {
   createAcsServer,
@@ -10,6 +10,8 @@ import {
   getAcsDeviceHosts,
   getAcsDeviceLan,
   deleteAcsWan,
+  saveAcsWanPpp,
+  saveAcsWanIp,
   getAcsDeviceWans,
   getAcsDeviceWlans,
   getAcsDevices,
@@ -21,6 +23,21 @@ import {
   updateAcsLan,
   updateAcsWlan,
 } from './api/acs.js'
+import WanConfigModal, {
+  emptyWanForm,
+  emptyWanIpForm,
+  emptyWanPppForm,
+  isIpRoutedType,
+  orderedPorts,
+  resolveDeviceType,
+  wanFormFrom,
+} from './WanConfigModal.jsx'
+import {
+  boundPortKeys,
+  PortBindingStatus,
+  resolveSsidCount,
+  selectedPortsToLists,
+} from './PortBinding.jsx'
 import ServerPagination from './ServerPagination.jsx'
 
 const LIMIT_OPTIONS = [10, 50, 100]
@@ -619,12 +636,50 @@ function wanStatusClass(status) {
   return value === 'connected' || value === 'up' ? 'text-green-600' : 'text-red-500'
 }
 
-function WanField({ label, value, mono = false }) {
+const IPV4_ADDRESS = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/
+
+function WanIpValue({ value }) {
+  const text = value == null || value === '' ? '-' : String(value)
+  if (text === '-') {
+    return text
+  }
+  const tokens = text.split(/(\s*,\s*|\s+)/)
+  if (!tokens.some((token) => IPV4_ADDRESS.test(token))) {
+    return text
+  }
+  return tokens.map((token, index) => (
+    IPV4_ADDRESS.test(token) ? (
+      <a
+        key={`${token}-${index}`}
+        href={`http://${token}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="cursor-pointer text-blue-600 hover:text-blue-800 hover:underline dark:text-blue-400 dark:hover:text-blue-300"
+      >
+        {token}
+      </a>
+    ) : token
+  ))
+}
+
+function wanStateTone(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  if (text === 'enabled' || text === 'true' || text === 'connected' || text === 'up') {
+    return 'font-medium text-green-600 dark:text-green-400'
+  }
+  if (!text || text === '-') {
+    return 'font-medium text-gray-500 dark:text-gray-400'
+  }
+  return 'font-medium text-red-500 dark:text-red-400'
+}
+
+function WanField({ label, value, mono = false, ip = false, tone = '' }) {
+  const valueTone = tone || 'font-semibold text-slate-800 dark:text-gray-100'
   return (
     <div className="min-w-0">
       <p className="m-0 text-xs text-gray-500 dark:text-gray-400">{label}</p>
-      <p className={`m-0 mt-1 break-words font-semibold text-slate-800 dark:text-gray-100 ${mono ? 'font-mono text-xs' : 'text-sm'}`}>
-        {value || '-'}
+      <p className={`m-0 mt-1 break-words text-sm ${mono ? 'font-mono text-xs' : ''} ${valueTone}`}>
+        {ip ? <WanIpValue value={value} /> : (value || '-')}
       </p>
     </div>
   )
@@ -632,90 +687,84 @@ function WanField({ label, value, mono = false }) {
 
 const wanButtonClass = 'cursor-pointer rounded border-0 px-3 py-1.5 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60'
 
-const WAN_SERVICE_OPTIONS = ['INTERNET', 'TR069', 'VOIP', 'IPTV', 'OTHER']
-const WAN_CONNECTION_OPTIONS = ['IP_Routed', 'IP_Bridged', 'PPPoE_Bridged']
-const WAN_ADDRESSING_OPTIONS = ['DHCP', 'Static']
-const WAN_PORT_GROUPS = [
-  {
-    label: 'LAN',
-    ports: [
-      { key: 'lan1', label: 'LAN1' },
-      { key: 'lan2', label: 'LAN2' },
-      { key: 'lan3', label: 'LAN3' },
-      { key: 'lan4', label: 'LAN4' },
-    ],
-  },
-  {
-    label: 'SSID',
-    ports: [
-      { key: 'ssid1', label: 'SSID1' },
-      { key: 'ssid2', label: 'SSID2' },
-      { key: 'ssid3', label: 'SSID3' },
-      { key: 'ssid4', label: 'SSID4' },
-    ],
-  },
-]
-
-function emptyWanForm() {
-  return {
-    connectionName: '',
-    enableConnection: true,
-    natStatus: true,
-    serviceList: 'INTERNET',
-    connectionType: 'IP_Routed',
-    vlanStatus: false,
-    vlanId: '',
-    username: '',
-    password: '',
-    addressing: 'DHCP',
-    ipAddress: '',
-    subnetMask: '',
-    gateway: '',
-    dnsServer: '',
-    ports: { lan1: false, lan2: false, lan3: false, lan4: false, ssid1: false, ssid2: false, ssid3: false, ssid4: false },
-  }
-}
-
 function wanText(value) {
   return !value || value === '-' ? '' : String(value)
 }
 
-function wanFormFrom(wan) {
+
+function wanInstanceIndex(wan) {
+  const path = String(wan?.fullPath || '')
+  const indexed = path.match(/WAN(?:PPP|IP)Connection\.(\d+)/) || path.match(/(\d+)\.$/)
+  return indexed ? indexed[1] : '1'
+}
+
+function wanPppInitial(wan) {
+  const { lan, wlan } = selectedPortsToLists(boundPortKeys(wan.portBind))
+  const bridged = String(wan.connType || wan.ConnType || '').includes('Bridged')
+  const rawPassword = wanText(wan.password)
   return {
-    ...emptyWanForm(),
+    mode: bridged ? 'hotspot' : 'pppoe',
     connectionName: wanText(wan.name),
-    enableConnection: wan.status !== 'Disabled',
-    natStatus: wan.nat === 'Enabled',
-    serviceList: wanText(wan.service) || 'INTERNET',
-    connectionType: wan.transport === 'PPPoE' ? 'IP_Routed' : (wanText(wan.connType) || 'IP_Routed'),
-    vlanStatus: wan.vlanId !== '-',
-    vlanId: wan.vlanId !== '-' ? String(wan.vlanId) : '',
     username: wanText(wan.username),
-    password: '',
-    addressing: wan.ip !== '-' ? 'Static' : 'DHCP',
-    ipAddress: wanText(wan.ip),
-    gateway: wanText(wan.remoteIp),
-    dnsServer: wanText(wan.dns),
+    password: /^\*+$/.test(rawPassword) ? '' : rawPassword,
+    vlanEnabled: Boolean(wan.vlanId && wan.vlanId !== '-' && wan.vlanId !== '0'),
+    vlanId: wan.vlanId && wan.vlanId !== '-' ? String(wan.vlanId) : '',
+    lan,
+    wlan,
+    wanIndex: wanInstanceIndex(wan),
   }
 }
 
-function optionsWithCurrent(options, value) {
-  if (!value || options.includes(value)) {
-    return options
+function wanIpFormFrom(wan) {
+  const { lan, wlan } = selectedPortsToLists(boundPortKeys(wan.portBind))
+  const connectionType = String(wan.connType || wan.mode || '').includes('Bridged') ? 'IP_Bridged' : 'IP_Routed'
+  return {
+    connectionName: wanText(wan.name),
+    active: String(wan.status || '').trim().toLowerCase() !== 'disabled',
+    natEnabled: connectionType === 'IP_Routed',
+    serviceList: wanText(wan.service) || 'INTERNET',
+    connectionType,
+    vlanEnabled: Boolean(wan.vlanId && wan.vlanId !== '-' && wan.vlanId !== '0'),
+    vlanId: wan.vlanId && wan.vlanId !== '-' ? String(wan.vlanId) : '',
+    priority8021p: '0',
+    addressingType: 'DHCP',
+    wanIndex: wanInstanceIndex(wan),
+    lan,
+    wlan,
   }
-  return [value, ...options]
 }
 
-function WanPanel({ wans, loading, error, onOverlayChange, setWanToDelete, deletingWanPath }) {
-  const [isWanPppOpen, setIsWanPppOpen] = useState(false)
-  const [isWanIpOpen, setIsWanIpOpen] = useState(false)
+function WanPanel({
+  wans, loading, error, onOverlayChange, setWanToDelete, deletingWanPath,
+  manufacturer, ssidCount, tr069Ip, onSavePpp, onSaveIp, saving,
+  addWanOpen, addWanIpOpen, onCloseAddWan, onCloseAddWanIp,
+}) {
   const [editingWanPath, setEditingWanPath] = useState(null)
+  const [editKind, setEditKind] = useState(null)
   const [wanForm, setWanForm] = useState(emptyWanForm)
   const hasWans = Array.isArray(wans) && wans.length > 0
+  const showPpp = addWanOpen || editKind === 'ppp'
+  const showIp = addWanIpOpen || editKind === 'ip'
 
   useEffect(() => {
-    onOverlayChange(isWanPppOpen || isWanIpOpen)
-  }, [isWanPppOpen, isWanIpOpen, onOverlayChange])
+    onOverlayChange(showPpp || showIp)
+  }, [showPpp, showIp, onOverlayChange])
+
+  useEffect(() => {
+    if (addWanOpen) {
+      setEditKind(null)
+      setEditingWanPath(null)
+      setWanForm(emptyWanPppForm())
+    }
+  }, [addWanOpen])
+
+  useEffect(() => {
+    if (addWanIpOpen) {
+      setEditKind(null)
+      setEditingWanPath(null)
+      setWanForm(emptyWanIpForm())
+    }
+  }, [addWanIpOpen])
 
   useEffect(() => () => onOverlayChange(false), [onOverlayChange])
 
@@ -723,46 +772,62 @@ function WanPanel({ wans, loading, error, onOverlayChange, setWanToDelete, delet
     setWanForm((current) => ({ ...current, [key]: value }))
   }
 
-  function updateWanPort(key, checked) {
-    setWanForm((current) => ({
-      ...current,
-      ports: { ...current.ports, [key]: checked },
-    }))
+  function updateWanFields(patch) {
+    setWanForm((current) => ({ ...current, ...patch }))
+  }
+
+  function updateWanPort(label, checked) {
+    setWanForm((current) => {
+      const currentPorts = Array.isArray(current.selectedPorts) ? current.selectedPorts : []
+      const next = checked
+        ? [...currentPorts, label]
+        : currentPorts.filter((item) => item !== label)
+      return { ...current, selectedPorts: orderedPorts(next) }
+    })
   }
 
   function closeWanModal() {
-    setIsWanPppOpen(false)
-    setIsWanIpOpen(false)
+    if (saving) {
+      return
+    }
+    setEditKind(null)
     setEditingWanPath(null)
     setWanForm(emptyWanForm())
-  }
-
-  function openAddWan(kind) {
-    setEditingWanPath(null)
-    setWanForm(emptyWanForm())
-    setIsWanPppOpen(kind === 'ppp')
-    setIsWanIpOpen(kind === 'ip')
+    onCloseAddWan()
+    onCloseAddWanIp()
   }
 
   function openEditWan(wan) {
+    const ppp = wan.type === 'PPP' || wan.transport === 'PPPoE'
     setEditingWanPath(wan.fullPath || null)
     setWanForm(wanFormFrom(wan))
-    const ppp = wan.type === 'PPP' || wan.transport === 'PPPoE'
-    setIsWanPppOpen(ppp)
-    setIsWanIpOpen(!ppp)
+    setEditKind(ppp ? 'ppp' : 'ip')
+    onCloseAddWan()
+    onCloseAddWanIp()
+  }
+
+  function handlePppSubmit() {
+    return onSavePpp(wanForm, {
+      editingPath: editingWanPath,
+      rememberPath: setEditingWanPath,
+    })
+  }
+
+  function handleIpSubmit() {
+    return onSaveIp({
+      ...wanForm,
+      username: undefined,
+      password: undefined,
+      natStatus: isIpRoutedType(wanForm.connectionType),
+      ports: orderedPorts(wanForm.selectedPorts),
+    }, {
+      editingPath: editingWanPath,
+      rememberPath: setEditingWanPath,
+    })
   }
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap justify-end gap-2">
-        <button type="button" className={`${wanButtonClass} bg-green-500 hover:bg-green-600`} onClick={() => openAddWan('ip')}>
-          Add WAN IP
-        </button>
-        <button type="button" className={`${wanButtonClass} bg-cyan-500 hover:bg-cyan-600`} onClick={() => openAddWan('ppp')}>
-          Add WAN PPP
-        </button>
-      </div>
-
       {hasWans ? (
         wans.map((wan) => (
           <article key={wan.id} className="mb-4 overflow-hidden rounded border border-gray-200 bg-white shadow-sm dark:border-slate-600 dark:bg-slate-900">
@@ -795,30 +860,31 @@ function WanPanel({ wans, loading, error, onOverlayChange, setWanToDelete, delet
             </header>
             <div className="grid grid-cols-1 gap-4 p-4 text-sm md:grid-cols-4">
               <div className="grid gap-3">
-                <WanField label="Status" value={wan.status} />
-                <WanField label="IPAddress" value={wan.ip} />
+                <WanField label="Status" value={wan.status} tone={wanStateTone(wan.status)} />
+                <WanField label="IPAddress" value={wan.ip} ip />
                 <WanField label="Username" value={wan.username} />
-                <WanField label="VLANStatus" value={wan.vlanStatus} />
+                <WanField label="VLANStatus" value={wan.vlanStatus} tone={wanStateTone(wan.vlanStatus)} />
               </div>
               <div className="grid gap-3">
                 <WanField label="ConnName" value={wan.name} />
-                <WanField label="RemoteAddress" value={wan.remoteIp} />
+                <WanField label="IP TR069" value={tr069Ip} ip />
                 <WanField label="Password" value={wan.password} />
                 <WanField label="VLANID" value={wan.vlanId} />
               </div>
               <div className="grid gap-3">
-                <WanField label="Service" value={wan.service} />
-                <WanField label="DNSServer" value={wan.dns} />
-                <WanField label="ConnectionTrigger" value={wan.connTrigger} />
-                <WanField label="NAT" value={wan.nat} />
+                <WanField label="Service" value={wan.service} tone="font-medium text-green-600 dark:text-green-400" />
+                <WanField label="DNSServer" value={wan.dns} ip />
+                <WanField label="ConnectionTrigger" value={wan.connTrigger} tone="font-medium text-blue-600 dark:text-blue-400" />
+                <WanField label="NAT" value={wan.nat} tone={wanStateTone(wan.nat)} />
               </div>
               <div className="grid gap-3">
                 <WanField label="TransportType" value={wan.transport} />
                 <WanField label="MACAddress" value={wan.mac} mono />
-                <WanField label="ConnType" value={wan.connType} />
-                <WanField label="Uptime" value={formatUptime(wan.uptime)} />
+                <WanField label="ConnType" value={wan.connType} tone="font-semibold text-gray-800 dark:text-gray-200" />
+                <WanField label="Uptime" value={formatUptime(wan.uptime)} tone="font-medium text-red-500 dark:text-red-400" />
               </div>
             </div>
+            <PortBindingStatus bind={wan.portBind} ssidCount={ssidCount} />
           </article>
         ))
       ) : (
@@ -829,24 +895,34 @@ function WanPanel({ wans, loading, error, onOverlayChange, setWanToDelete, delet
         </p>
       )}
 
-      {isWanPppOpen && (
-        <WanConfigModal
-          variant="ppp"
-          editing={Boolean(editingWanPath)}
-          form={wanForm}
-          onChange={updateWanField}
-          onPortChange={updateWanPort}
-          onClose={closeWanModal}
-        />
-      )}
-      {isWanIpOpen && (
+      {showIp && (
         <WanConfigModal
           variant="ip"
           editing={Boolean(editingWanPath)}
+          manufacturer={manufacturer}
+          saving={saving}
           form={wanForm}
+          ssidCount={ssidCount}
           onChange={updateWanField}
+          onPatch={updateWanFields}
           onPortChange={updateWanPort}
           onClose={closeWanModal}
+          onSave={handleIpSubmit}
+        />
+      )}
+      {showPpp && (
+        <WanConfigModal
+          variant="ppp"
+          editing={Boolean(editingWanPath)}
+          manufacturer={manufacturer}
+          saving={saving}
+          form={wanForm}
+          ssidCount={ssidCount}
+          onChange={updateWanField}
+          onPatch={updateWanFields}
+          onPortChange={updateWanPort}
+          onClose={closeWanModal}
+          onSave={handlePppSubmit}
         />
       )}
     </div>
@@ -861,319 +937,6 @@ const EMPTY_LAN_FORM = {
 const IPV4_FORM_PATTERN = '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
 const IPV4_FORM_HINT = 'Format IPv4, contoh 192.168.1.1'
 
-const wanFieldLabel = 'mb-1.5 block text-xs font-semibold text-gray-600 dark:text-gray-300'
-
-function WanFieldCaption({ children }) {
-  return <span className={wanFieldLabel}>{children}</span>
-}
-
-function WanTextControl({ label, className = '', ...props }) {
-  return (
-    <label className={`block min-w-0 ${className}`}>
-      <WanFieldCaption>{label}</WanFieldCaption>
-      <input className={formInput} {...props} />
-    </label>
-  )
-}
-
-function WanSelectControl({ label, value, options, onChange, className = '', disabled = false }) {
-  return (
-    <label className={`block min-w-0 ${className}`}>
-      <WanFieldCaption>{label}</WanFieldCaption>
-      <select className={formInput} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => (
-          <option key={option} value={option}>{option}</option>
-        ))}
-      </select>
-    </label>
-  )
-}
-
-function WanCheckControl({ label, checked, onChange, accentClass, className = '' }) {
-  return (
-    <label className={`flex h-10 cursor-pointer items-center gap-2.5 rounded-lg border border-gray-300 bg-white px-3 text-sm font-medium whitespace-nowrap text-gray-800 select-none dark:border-slate-600 dark:bg-slate-900 dark:text-gray-100 ${className}`}>
-      <input
-        type="checkbox"
-        className={`h-4 w-4 shrink-0 cursor-pointer ${accentClass}`}
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      {label}
-    </label>
-  )
-}
-
-function WanSection({ icon: Icon, title, iconClass, children }) {
-  return (
-    <section className="grid gap-3">
-      <div className="flex items-center gap-2.5 border-b border-gray-100 pb-2.5 dark:border-slate-700">
-        <span className={`grid h-7 w-7 place-items-center rounded-md ${iconClass}`}>
-          <Icon size={15} />
-        </span>
-        <h3 className="m-0 text-xs font-bold tracking-wider text-gray-700 uppercase dark:text-gray-200">{title}</h3>
-      </div>
-      {children}
-    </section>
-  )
-}
-
-// Form tambah koneksi WAN. Penyimpanan ke ONU belum dihubungkan.
-function WanConfigModal({ variant, editing = false, form, onChange, onPortChange, onClose }) {
-  const isPpp = variant === 'ppp'
-  const dhcp = form.addressing === 'DHCP'
-  const accentClass = isPpp ? 'accent-cyan-600' : 'accent-blue-600'
-  const iconClass = isPpp
-    ? 'bg-cyan-50 text-cyan-600 dark:bg-cyan-950/50 dark:text-cyan-300'
-    : 'bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-300'
-  const saveClass = isPpp ? 'bg-cyan-500 hover:bg-cyan-600' : 'bg-blue-500 hover:bg-blue-600'
-  const [showPassword, setShowPassword] = useState(false)
-
-  useEffect(() => {
-    function onKeyDown(event) {
-      if (event.key === 'Escape') {
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
-
-  const ipField = (field, label) => (
-    <WanTextControl
-      label={label}
-      type="text"
-      inputMode="decimal"
-      placeholder="0.0.0.0"
-      pattern={IPV4_FORM_PATTERN}
-      title={IPV4_FORM_HINT}
-      autoComplete="off"
-      disabled={dhcp}
-      readOnly={dhcp}
-      required={!dhcp}
-      value={form[field]}
-      onChange={(event) => onChange(field, event.target.value.trim())}
-    />
-  )
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose()
-        }
-      }}
-    >
-      <form
-        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-xl dark:bg-slate-800"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="wan-config-title"
-        autoComplete="off"
-        onSubmit={(event) => {
-          event.preventDefault()
-          onClose()
-        }}
-      >
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-gray-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-800">
-          <div>
-            <h2 id="wan-config-title" className="m-0 text-base font-bold text-gray-900 dark:text-gray-100">
-              {isPpp ? 'Konfigurasi WAN PPP Connection' : 'Konfigurasi WAN IP'}
-            </h2>
-            <p className="m-0 mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-              {editing
-                ? 'Ubah koneksi yang sudah ada. Sandi dikosongkan; isi ulang hanya bila ingin diganti.'
-                : isPpp
-                  ? 'Atur autentikasi PPPoE, VLAN, dan port binding koneksi baru.'
-                  : 'Atur pengalamatan IP, VLAN, dan port binding koneksi baru.'}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
-            aria-label="Tutup"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto px-6 py-5">
-          <div className="grid grid-cols-1 items-end gap-4 sm:grid-cols-3">
-            <WanTextControl
-              label="Connection Name"
-              type="text"
-              name="connectionName"
-              placeholder="Nama koneksi"
-              maxLength={128}
-              required
-              autoFocus
-              value={form.connectionName}
-              onChange={(event) => onChange('connectionName', event.target.value)}
-            />
-            <WanCheckControl
-              label="Active"
-              checked={form.enableConnection}
-              accentClass={accentClass}
-              onChange={(checked) => onChange('enableConnection', checked)}
-            />
-            <WanCheckControl
-              label="Enable NAT"
-              checked={form.natStatus}
-              accentClass={accentClass}
-              onChange={(checked) => onChange('natStatus', checked)}
-            />
-          </div>
-
-          <div className={`grid grid-cols-1 items-end gap-4 sm:grid-cols-2 ${isPpp ? 'md:grid-cols-4' : 'md:grid-cols-[minmax(0,1.15fr)_minmax(0,1.4fr)_auto_minmax(0,0.85fr)_minmax(0,1fr)]'}`}>
-            <WanSelectControl
-              label="Service List"
-              value={form.serviceList}
-              options={optionsWithCurrent(WAN_SERVICE_OPTIONS, form.serviceList)}
-              onChange={(value) => onChange('serviceList', value)}
-            />
-            <WanSelectControl
-              label="Connection Type"
-              value={form.connectionType}
-              options={optionsWithCurrent(WAN_CONNECTION_OPTIONS, form.connectionType)}
-              onChange={(value) => onChange('connectionType', value)}
-            />
-            <WanCheckControl
-              label="VLAN Tagging"
-              checked={form.vlanStatus}
-              accentClass={accentClass}
-              onChange={(checked) => onChange('vlanStatus', checked)}
-            />
-            <WanTextControl
-              label="VLAN ID"
-              type="number"
-              name="vlanId"
-              inputMode="numeric"
-              min={1}
-              max={4094}
-              placeholder="1-4094"
-              disabled={!form.vlanStatus}
-              required={form.vlanStatus}
-              value={form.vlanId}
-              onChange={(event) => onChange('vlanId', event.target.value)}
-            />
-            {!isPpp && (
-              <WanSelectControl
-                label="Addressing"
-                value={form.addressing}
-                options={WAN_ADDRESSING_OPTIONS}
-                onChange={(value) => onChange('addressing', value)}
-              />
-            )}
-          </div>
-
-          {isPpp ? (
-            <WanSection icon={KeyRound} title="PPPoE Authentication" iconClass={iconClass}>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <WanTextControl
-                  label="Username"
-                  type="text"
-                  name="username"
-                  autoComplete="off"
-                  required
-                  value={form.username}
-                  onChange={(event) => onChange('username', event.target.value)}
-                />
-                <label className="block min-w-0">
-                  <WanFieldCaption>Password</WanFieldCaption>
-                  <div className="relative">
-                    <input
-                      className={`${formInput} pr-10`}
-                      type={showPassword ? 'text' : 'password'}
-                      name="password"
-                      autoComplete="new-password"
-                      required={!editing}
-                      placeholder={editing ? 'Kosongkan jika tidak diubah' : undefined}
-                      value={form.password}
-                      onChange={(event) => onChange('password', event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="absolute top-1/2 right-1.5 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded border-0 bg-transparent text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-700"
-                      aria-label={showPassword ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
-                      onClick={() => setShowPassword((current) => !current)}
-                    >
-                      {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                    </button>
-                  </div>
-                </label>
-              </div>
-            </WanSection>
-          ) : (
-            <WanSection icon={Network} title="IP Addressing Details" iconClass={iconClass}>
-              {dhcp && (
-                <p className="m-0 text-xs text-gray-500 dark:text-gray-400">
-                  Mode DHCP aktif. Alamat IP, subnet, gateway, dan DNS diisi otomatis.
-                </p>
-              )}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {ipField('ipAddress', 'IP Address')}
-                {ipField('subnetMask', 'Subnet Mask')}
-                {ipField('gateway', 'Gateway')}
-                {ipField('dnsServer', 'DNS Server')}
-              </div>
-            </WanSection>
-          )}
-
-          <WanSection icon={Cable} title="Port Binding" iconClass={iconClass}>
-            <div className="grid gap-4">
-              {WAN_PORT_GROUPS.map((group) => (
-                <div key={group.label}>
-                  <p className="m-0 mb-2 text-[11px] font-bold tracking-wider text-gray-400 uppercase">{group.label}</p>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    {group.ports.map((port) => {
-                      const checked = Boolean(form.ports[port.key])
-                      return (
-                        <label
-                          key={port.key}
-                          className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-semibold transition-colors ${checked
-                            ? isPpp
-                              ? 'border-cyan-500 bg-cyan-50 text-cyan-800 dark:border-cyan-500 dark:bg-cyan-950/40 dark:text-cyan-100'
-                              : 'border-blue-500 bg-blue-50 text-blue-800 dark:border-blue-500 dark:bg-blue-950/40 dark:text-blue-100'
-                            : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 dark:border-slate-600 dark:bg-slate-900 dark:text-gray-200 dark:hover:border-slate-500'}`}
-                        >
-                          <input
-                            type="checkbox"
-                            className={`h-4 w-4 shrink-0 cursor-pointer ${accentClass}`}
-                            checked={checked}
-                            onChange={(event) => onPortChange(port.key, event.target.checked)}
-                          />
-                          {port.label}
-                        </label>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </WanSection>
-        </div>
-
-        <div className="flex shrink-0 justify-end gap-2 border-t border-gray-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-800">
-          <button
-            type="button"
-            className="cursor-pointer rounded-lg border border-gray-300 bg-white px-5 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50 dark:border-slate-600 dark:bg-slate-900 dark:text-gray-200 dark:hover:bg-slate-700"
-            onClick={onClose}
-          >
-            Batal
-          </button>
-          <button
-            type="submit"
-            className={`cursor-pointer rounded-lg border-0 px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors ${saveClass}`}
-          >
-            Simpan Konfigurasi
-          </button>
-        </div>
-      </form>
-    </div>,
-    document.body,
-  )
-}
 
 // Backend memakai '-' untuk nilai yang tidak ada; di form itu harus menjadi isian kosong.
 function blankIfDash(value) {
@@ -1381,9 +1144,11 @@ function DetailIndicator({ label, children }) {
 // Modal detail satu ONU. Data diambil dari baris yang diklik (sudah bersih dari backend).
 // Info pelanggan / host LAN belum punya sumber data, jadi memakai placeholder.
 function DeviceDetailModal({
-  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, lanLoading, lanError, wansLoading, wansError, onEditWlan, onEditLan, editOpen, renderRx, renderTemp, setWanToDelete, deletingWanPath, deleteConfirmOpen,
+  device, activeTab, onTabChange, onClose, onSummon, summoning, hostsLoading, hostsError, wlansLoading, wlansError, lanLoading, lanError, wansLoading, wansError, onEditWlan, onEditLan, editOpen, renderRx, renderTemp, setWanToDelete, deletingWanPath, deleteConfirmOpen, onSavePpp, onSaveIp, savingWan,
 }) {
   const [wanOverlayOpen, setWanOverlayOpen] = useState(false)
+  const [addWanOpen, setAddWanOpen] = useState(false)
+  const [addWanIpOpen, setAddWanIpOpen] = useState(false)
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -1396,6 +1161,14 @@ function DeviceDetailModal({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose, editOpen, wanOverlayOpen, deleteConfirmOpen])
 
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+
   const badge = STATUS_BADGE[device.status] || STATUS_BADGE.off24plus
   const hasHosts = Boolean(device?.connected_hosts && device.connected_hosts.length > 0)
   const hasWlans = Boolean(device?.wlans && device.wlans.length > 0)
@@ -1403,7 +1176,7 @@ function DeviceDetailModal({
 
   return (
     <div
-      className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose()
@@ -1411,12 +1184,12 @@ function DeviceDetailModal({
       }}
     >
       <div
-        className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-white shadow-xl dark:bg-slate-800"
+        className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-lg bg-white shadow-xl md:max-w-5xl dark:bg-slate-800"
         role="dialog"
         aria-modal="true"
         aria-labelledby="acs-detail-title"
       >
-        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-800">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
           <h2 id="acs-detail-title" className="m-0 text-base font-bold tracking-wide text-gray-900 dark:text-gray-100">
             DETAIL PERANGKAT
           </h2>
@@ -1430,7 +1203,7 @@ function DeviceDetailModal({
           </button>
         </div>
 
-        <div className="grid gap-6 p-6">
+        <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto p-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <DetailIndicator label="REDAMAN ONU">{renderRx(device.rx_onu)}</DetailIndicator>
             <DetailIndicator label="TEMPERATURE">{renderTemp(device.temp)}</DetailIndicator>
@@ -1458,7 +1231,7 @@ function DeviceDetailModal({
           </div>
 
           <div>
-            <div className="flex items-end justify-between gap-3 border-b border-gray-200 dark:border-slate-700">
+            <div className="border-b border-gray-200 dark:border-slate-700">
               <div className="flex flex-wrap gap-1" role="tablist">
                 {DETAIL_TABS.map((tab) => (
                   <button
@@ -1467,20 +1240,38 @@ function DeviceDetailModal({
                     role="tab"
                     aria-selected={activeTab === tab}
                     className={`-mb-px cursor-pointer border-0 border-b-2 bg-transparent px-4 py-2.5 text-[13px] font-bold tracking-wide transition-colors ${activeTab === tab ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}
-                    onClick={() => onTabChange(tab)}
+                    onClick={() => {
+                      if (tab !== 'WAN') {
+                        setAddWanOpen(false)
+                        setAddWanIpOpen(false)
+                      }
+                      onTabChange(tab)
+                    }}
                   >
                     {tab}
                   </button>
                 ))}
               </div>
-              <button
-                type="button"
-                className="mb-1.5 cursor-pointer rounded-md border-0 bg-red-600 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={summoning}
-                onClick={onSummon}
-              >
-                {summoning ? 'Memanggil...' : 'Summon'}
-              </button>
+              <div className="flex flex-wrap justify-start gap-2 py-3">
+                <button
+                  type="button"
+                  className={`${wanButtonClass} bg-red-600 hover:bg-red-700`}
+                  disabled={summoning}
+                  onClick={onSummon}
+                >
+                  {summoning ? 'Memanggil...' : 'Summon'}
+                </button>
+                {activeTab === 'WAN' && (
+                  <>
+                    <button type="button" className={`${wanButtonClass} bg-blue-600 hover:bg-blue-700`} onClick={() => setAddWanIpOpen(true)}>
+                      Add WAN IP Config
+                    </button>
+                    <button type="button" className={`${wanButtonClass} bg-indigo-600 hover:bg-indigo-700`} onClick={() => setAddWanOpen(true)}>
+                      Add WAN Config
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="pt-4">
@@ -1629,6 +1420,16 @@ function DeviceDetailModal({
                   onOverlayChange={setWanOverlayOpen}
                   setWanToDelete={setWanToDelete}
                   deletingWanPath={deletingWanPath}
+                  tr069Ip={device?.ip_tr069 || '-'}
+                  manufacturer={device?.manufaktur || device?.manufacturer || ''}
+                  onSavePpp={onSavePpp}
+                  onSaveIp={onSaveIp}
+                  saving={savingWan}
+                  ssidCount={resolveSsidCount(device?.wlans, device?.ssidCount)}
+                  addWanOpen={addWanOpen}
+                  addWanIpOpen={addWanIpOpen}
+                  onCloseAddWan={() => setAddWanOpen(false)}
+                  onCloseAddWanIp={() => setAddWanIpOpen(false)}
                 />
               ) : (
                 <p className="m-0 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -1676,6 +1477,7 @@ function GenieAcs() {
   const [isUpdating, setIsUpdating] = useState(false)
   const [isEditLanOpen, setIsEditLanOpen] = useState(false)
   const [isUpdatingLan, setIsUpdatingLan] = useState(false)
+  const [isSavingWan, setIsSavingWan] = useState(false)
   const [lanForm, setLanForm] = useState(EMPTY_LAN_FORM)
   const [isSummoning, setIsSummoning] = useState(false)
   const summonWaitRef = useRef(null)
@@ -1938,7 +1740,8 @@ function GenieAcs() {
           return
         }
         const wans = Array.isArray(result?.wans) ? result.wans : []
-        setSelectedDevice((current) => (current && current.id === selectedDeviceId ? { ...current, wans } : current))
+        const ssidCount = Number(result?.ssidCount) || 0
+        setSelectedDevice((current) => (current && current.id === selectedDeviceId ? { ...current, wans, ssidCount } : current))
         setWansState({ loading: false, error: '' })
       } catch (requestError) {
         if (controller.signal.aborted) {
@@ -2230,6 +2033,7 @@ function GenieAcs() {
       const result = await updateAcsWlan({
         server_id: selectedServer,
         deviceId: selectedDevice.id,
+        manufacturer: selectedDevice.manufaktur || '',
         wlanId: editingWlan.id,
         ssid: wlanForm.ssid,
         security: wlanForm.security,
@@ -2254,6 +2058,84 @@ function GenieAcs() {
       Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(requestError, 'Gagal mengirim perubahan WLAN.') })
     } finally {
       setIsUpdating(false)
+    }
+  }
+
+  async function handleSaveWanPpp(form, { editingPath, rememberPath }) {
+    if (!requireServer() || !selectedDevice || isSavingWan) {
+      return { cancelled: true }
+    }
+
+    setIsSavingWan(true)
+    try {
+      const manufacturer = selectedDevice.manufaktur || selectedDevice.manufacturer || ''
+      const deviceType = resolveDeviceType(form.deviceType, manufacturer)
+      const result = await saveAcsWanPpp({
+        server_id: selectedServer,
+        deviceId: selectedDevice.id,
+        wanPath: editingPath || undefined,
+        manufacturer,
+        ...form,
+        deviceType,
+        // Fiberhome: nama dibuat ONT, backend tidak mengirim parameter Name.
+        connectionName: deviceType === 'Fiberhome' ? '' : form.connectionName,
+        ports: orderedPorts(form.selectedPorts),
+      })
+      setTimeout(() => setWansReloadKey((key) => key + 1), 2500)
+      return { ok: true, partial: Boolean(result.partial), message: result.message }
+    } catch (requestError) {
+      const wanPath = requestError?.response?.data?.wanPath
+      if (wanPath) {
+        rememberPath(wanPath)
+      }
+      return { ok: false, message: errorMessage(requestError, 'Gagal mengirim koneksi WAN PPP.') }
+    } finally {
+      setIsSavingWan(false)
+    }
+  }
+
+  async function handleSaveWanIp(form, { editingPath, rememberPath }) {
+    if (!requireServer() || !selectedDevice || isSavingWan) {
+      return { cancelled: true }
+    }
+    const routed = form.connectionType === 'IP_Routed'
+    const staticIp = routed && form.addressing === 'Static'
+
+    setIsSavingWan(true)
+    try {
+      const manufacturer = selectedDevice.manufaktur || selectedDevice.manufacturer || ''
+      const deviceType = resolveDeviceType(form.deviceType, manufacturer)
+      const result = await saveAcsWanIp({
+        server_id: selectedServer,
+        deviceId: selectedDevice.id,
+        wanPath: editingPath || undefined,
+        manufacturer,
+        modelName: selectedDevice.tipe || '',
+        deviceType,
+        connectionName: deviceType === 'Fiberhome' ? '' : form.connectionName,
+        enableConnection: Boolean(form.enableConnection),
+        serviceList: form.serviceList,
+        connectionType: form.connectionType,
+        vlanStatus: Boolean(form.vlanStatus),
+        vlanId: form.vlanId,
+        priority: form.priority,
+        addressing: routed ? form.addressing : 'DHCP',
+        ipAddress: staticIp ? form.ipAddress : '',
+        subnetMask: staticIp ? form.subnetMask : '',
+        gateway: staticIp ? form.gateway : '',
+        dnsServer: staticIp ? form.dnsServer : '',
+        ports: orderedPorts(form.ports ?? form.selectedPorts),
+      })
+      setTimeout(() => setWansReloadKey((key) => key + 1), 2500)
+      return { ok: true, partial: Boolean(result.partial), message: result.message }
+    } catch (requestError) {
+      const wanPath = requestError?.response?.data?.wanPath
+      if (wanPath) {
+        rememberPath(wanPath)
+      }
+      return { ok: false, message: errorMessage(requestError, 'Gagal mengirim koneksi WAN IP.') }
+    } finally {
+      setIsSavingWan(false)
     }
   }
 
@@ -2618,6 +2500,9 @@ function GenieAcs() {
           setWanToDelete={setWanToDelete}
           deletingWanPath={deletingWanPath}
           deleteConfirmOpen={Boolean(wanToDelete)}
+          onSavePpp={handleSaveWanPpp}
+          onSaveIp={handleSaveWanIp}
+          savingWan={isSavingWan}
           renderRx={renderRx}
           renderTemp={renderTemp}
         />

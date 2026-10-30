@@ -70,3 +70,11 @@ export const updateAcsLan = (payload) => api.post(`${BASE}/update-lan`, payload)
 // payload: { server_id, deviceId (_id GenieACS), wanPath }
 // -> { success, applied, message }
 export const deleteAcsWan = (payload) => api.post(`${BASE}/delete-wan`, payload).then((res) => res.data)
+
+// Buat atau ubah koneksi WAN PPP (AddObject + setParameterValues). Hanya admin.
+export const saveAcsWanPpp = (payload) =>
+  api.post(`${BASE}/wan-ppp`, payload, { timeout: 600000 }).then((res) => res.data)
+
+// Buat atau ubah koneksi WAN IP (AddObject WANIPConnection + setParameterValues). Hanya admin.
+export const saveAcsWanIp = (payload) =>
+  api.post(`${BASE}/wan-ip`, payload, { timeout: 600000 }).then((res) => res.data)

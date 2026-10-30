@@ -513,6 +513,10 @@ function extractLanConfig(item) {
 const WANS_PROJECTION = [
   `${IGD}.WANDevice.1.WANConnectionDevice`,
   `${IGD}.WANDevice.2.WANConnectionDevice`,
+  `${IGD}.LANDevice.1.WLANConfigurationNumberOfEntries`,
+  `${IGD}.LANDevice.1.WLANConfiguration`,
+  'Device.WiFi.SSIDNumberOfEntries',
+  'Device.WiFi.SSID',
   'Device.PPP.Interface',
   'Device.IP.Interface',
   'Device.Ethernet.VLANTermination',
@@ -527,6 +531,17 @@ const SERVICE_KEYS = [
   'X_HW_SERVICELIST',
   'X_BROADCOM_COM_ServiceName',
   'X_BROADCOM_COM_IfName',
+];
+
+const BIND_KEYS = [
+  'X_CT-COM_LanInterface',
+  'X_CMCC_LanInterface',
+  'X_CU_LanInterface',
+  'X_ZTE-COM_LanInterface',
+  'X_FH_LanInterface',
+  'X_HW_LanInterface',
+  'X_BROADCOM_COM_LanInterface',
+  'PortMapping',
 ];
 
 const VLAN_KEYS = [
@@ -617,6 +632,51 @@ function vlanStatusOf(data, vlanId) {
   return '-';
 }
 
+function huaweiBindString(node) {
+  if (!isNode(node)) {
+    return '';
+  }
+  const parts = [];
+  for (let index = 1; index <= 4; index += 1) {
+    if (hostIsActive(node[`Lan${index}Enable`]?._value)) {
+      parts.push(`LAN${index}`);
+    }
+  }
+  for (let index = 1; index <= 8; index += 1) {
+    if (hostIsActive(node[`SSID${index}Enable`]?._value)) {
+      parts.push(`SSID${index}`);
+    }
+  }
+  return parts.join(',');
+}
+
+function bindingStringOf(data) {
+  const direct = firstLeaf(data, BIND_KEYS);
+  if (direct) {
+    return direct;
+  }
+  return huaweiBindString(data?.X_HW_LANBIND);
+}
+
+function highestIndex(node) {
+  return numericKeys(node).reduce((max, key) => Math.max(max, parseInt(key, 10) || 0), 0);
+}
+
+// Jumlah SSID untuk checkbox binding: NumberOfEntries, atau hitungan instance WLAN/SSID.
+// 0 bila perangkat tidak melaporkan WLAN (pemanggil UI memakai 4 sebagai bawaan).
+function ssidCountOf(item) {
+  const lan = item?.InternetGatewayDevice?.LANDevice?.[1];
+  const reported = toNumber(lan?.WLANConfigurationNumberOfEntries?._value) || 0;
+  const fromObjects = highestIndex(lan?.WLANConfiguration);
+  const wifiReported = toNumber(item?.Device?.WiFi?.SSIDNumberOfEntries?._value) || 0;
+  const fromWifi = highestIndex(item?.Device?.WiFi?.SSID);
+  const count = Math.max(reported, fromObjects, wifiReported, fromWifi);
+  if (count <= 0) {
+    return 0;
+  }
+  return Math.min(8, count);
+}
+
 function hasConnectionData(data) {
   return isNode(data) && Boolean(
     data.Name || data.ConnectionStatus || data.ExternalIPAddress || data.Username
@@ -647,6 +707,7 @@ function connectionRecord(id, kind, data, parent, fullPath) {
     mac: leafText(data, 'MACAddress') || '-',
     connType: leafText(data, 'ConnectionType') || (ppp ? 'PPPoE' : 'IP_Routed'),
     uptime: leafText(data, 'Uptime') || '0',
+    portBind: bindingStringOf(data),
   };
 }
 
@@ -823,6 +884,7 @@ module.exports = {
   extractHosts,
   extractWlans,
   extractWans,
+  ssidCountOf,
   RX_PATHS,
   TEMP_PATHS,
   readPath,

@@ -148,6 +148,41 @@ test('planWlanUpdate: mode tidak dikenal yang berbeda dari ONU ditolak', () => {
   assert.equal(plan.error, 'Mode keamanan tidak didukung');
 });
 
+test('planWlanUpdate: Fiberhome 11i mengirim Password(WPA) dan Password(WPA2)', () => {
+  const node = {
+    SSID: v('Rumah'), Enable: v(true), BeaconType: v('11i'),
+    PreSharedKey: { 1: { PreSharedKey: v('lama12345') } },
+  };
+  const plan = planWlanUpdate({
+    wlanId: '1',
+    wlanNode: node,
+    ssid: 'Rumah',
+    password: 'baru12345',
+    status: true,
+    security: 'WPA2-PSK',
+    manufacturer: 'FiberHome',
+  });
+  assert.deepEqual(plan.vendorPasswordValues, [
+    [`${BASE}.Password(WPA)`, 'baru12345', 'xsd:string'],
+    [`${BASE}.Password(WPA2)`, 'baru12345', 'xsd:string'],
+  ]);
+  const mixed = planWlanUpdate({
+    wlanId: '1',
+    wlanNode: node,
+    ssid: 'Rumah',
+    password: 'baru12345',
+    status: true,
+    security: 'WPAand11i',
+    manufacturer: 'HG6145D2 Fiberhome',
+  });
+  assert.equal(mixed.vendorPasswordValues[0][0], `${BASE}.Password(WPA)`);
+  assert.equal(mixed.vendorPasswordValues[1][0], `${BASE}.Password(WPA2)`);
+  const other = planWlanUpdate({
+    wlanId: '1', wlanNode: node, ssid: 'Rumah', password: 'baru12345', status: true, manufacturer: 'ZTE',
+  });
+  assert.equal(other.vendorPasswordValues, undefined);
+});
+
 test('passwordPathFor: memilih path sandi yang ada di ONU', () => {
   assert.equal(passwordPathFor('1', { PreSharedKey: { 1: { PreSharedKey: v('x') } } }), `${BASE}.PreSharedKey.1.PreSharedKey`);
   assert.equal(passwordPathFor('1', { PreSharedKey: { 1: { PreSharedKey: v('x'), KeyPassphrase: v('y') } } }), `${BASE}.PreSharedKey.1.PreSharedKey`);

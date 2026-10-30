@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Swal from 'sweetalert2'
-import { Menu } from 'lucide-react'
-import { clearSession } from './api/auth.js'
+import { KeyRound, LogOut, Menu, User } from 'lucide-react'
+import { clearSession, getUsername } from './api/auth.js'
+import ChangePasswordModal from './ChangePasswordModal.jsx'
 import ServerClock from './ServerClock.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 
@@ -82,6 +83,86 @@ function MenuGroup({ label, items, open, onToggle }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ProfileMenu({ username, onLogout }) {
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const menuRef = useRef(null)
+  const label = username || 'Pengguna'
+
+  useEffect(() => {
+    if (!isProfileMenuOpen) {
+      return undefined
+    }
+    function onPointerDown(event) {
+      if (!menuRef.current?.contains(event.target)) {
+        setIsProfileMenuOpen(false)
+      }
+    }
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        setIsProfileMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [isProfileMenuOpen])
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        type="button"
+        className="flex h-10 max-w-[16rem] cursor-pointer items-center gap-2 rounded-xl border border-gray-200 bg-white px-2.5 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+        aria-expanded={isProfileMenuOpen}
+        aria-haspopup="menu"
+        onClick={() => setIsProfileMenuOpen((open) => !open)}
+      >
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-cyan-700 text-white" aria-hidden="true">
+          <User size={16} />
+        </span>
+        <span className="truncate">{label}</span>
+      </button>
+
+      {isProfileMenuOpen && (
+        <div
+          className="absolute top-full right-0 z-40 mt-2 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-600 dark:bg-gray-800"
+          role="menu"
+        >
+          <button
+            type="button"
+            className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-2.5 text-left text-sm font-semibold text-gray-800 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700"
+            role="menuitem"
+            onClick={() => {
+              setIsProfileMenuOpen(false)
+              setPasswordOpen(true)
+            }}
+          >
+            <KeyRound size={16} aria-hidden="true" />
+            Profil / Ubah Password
+          </button>
+          <button
+            type="button"
+            className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-2.5 text-left text-sm font-semibold text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950"
+            role="menuitem"
+            onClick={() => {
+              setIsProfileMenuOpen(false)
+              onLogout()
+            }}
+          >
+            <LogOut size={16} aria-hidden="true" />
+            Logout
+          </button>
+        </div>
+      )}
+
+      {passwordOpen && <ChangePasswordModal onClose={() => setPasswordOpen(false)} />}
     </div>
   )
 }
@@ -198,20 +279,23 @@ function Dashboard() {
       </aside>
 
       <main className="min-w-0 flex-1 bg-gray-50 p-6 text-gray-900 transition-colors duration-300 md:px-10 md:py-9 dark:bg-gray-900 dark:text-gray-100">
-        <header className="sticky top-0 z-30 -mx-6 -mt-6 mb-5 flex h-14 items-center gap-3 border-b border-gray-200 bg-white/95 px-3 backdrop-blur-sm md:hidden dark:border-gray-700 dark:bg-gray-900/95">
-          <button
-            type="button"
-            className="grid h-10 w-10 cursor-pointer place-items-center rounded-xl border-0 bg-transparent text-gray-800 transition-colors duration-300 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-800"
-            aria-label="Buka menu"
-            aria-controls="app-sidebar"
-            aria-expanded={isSidebarOpen}
-            onClick={() => setIsSidebarOpen(true)}
-          >
-            <Menu size={22} strokeWidth={2.2} />
-          </button>
-          <span className="text-sm font-bold tracking-[0.08em] text-gray-900 uppercase dark:text-gray-100">
-            Sistem Billing
-          </span>
+        <header className="sticky top-0 z-30 -mx-6 -mt-6 mb-5 flex h-14 items-center justify-between gap-3 border-b border-gray-200 bg-white/95 px-3 backdrop-blur-sm md:-mx-10 md:-mt-9 md:px-6 dark:border-gray-700 dark:bg-gray-900/95">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              className="grid h-10 w-10 cursor-pointer place-items-center rounded-xl border-0 bg-transparent text-gray-800 transition-colors duration-300 hover:bg-gray-100 md:hidden dark:text-gray-100 dark:hover:bg-gray-800"
+              aria-label="Buka menu"
+              aria-controls="app-sidebar"
+              aria-expanded={isSidebarOpen}
+              onClick={() => setIsSidebarOpen(true)}
+            >
+              <Menu size={22} strokeWidth={2.2} />
+            </button>
+            <span className="truncate text-sm font-bold tracking-[0.08em] text-gray-900 uppercase md:hidden dark:text-gray-100">
+              Sistem Billing
+            </span>
+          </div>
+          <ProfileMenu username={getUsername()} onLogout={handleLogout} />
         </header>
         <Outlet />
       </main>

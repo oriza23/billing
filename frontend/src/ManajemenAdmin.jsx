@@ -79,12 +79,13 @@ function ManajemenAdmin() {
 
   async function handleDelete(targetUsername) {
     const result = await Swal.fire({
-      title: 'Apakah Anda yakin?',
-      text: 'Data ini akan dihapus permanen!',
+      title: 'Hapus admin?',
+      text: 'Apakah Anda yakin ingin menghapus admin ini? Tindakan ini tidak dapat dibatalkan.',
       icon: 'warning',
       showCancelButton: true,
       confirmButtonText: 'Ya, Hapus!',
       cancelButtonText: 'Batal',
+      confirmButtonColor: '#dc2626',
     })
     if (!result.isConfirmed) {
       return

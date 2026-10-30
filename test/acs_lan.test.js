@@ -104,9 +104,12 @@ test('planLanUpdate: IPRouters ikut IP gateway, dan tetap dikirim bila gateway D
     IPRouters: v('192.168.0.1'),
     DHCPServerEnable: v(true), MinAddress: v('192.168.1.2'), MaxAddress: v('192.168.1.254'), DHCPLeaseTime: v(86400), DNSServers: v('8.8.8.8,1.1.1.1'),
   };
-  assert.deepEqual(planLanUpdate({ lanNode: sameIp, values: parseLanUpdate(ok).value }).parameterValues, [
+  const stale = planLanUpdate({ lanNode: sameIp, values: parseLanUpdate(ok).value });
+  assert.deepEqual(stale.parameterValues, [
+    [`${B}.IPInterface.1.IPInterfaceIPAddress`, '192.168.1.1', 'xsd:string'],
     [`${B}.IPRouters`, '192.168.1.1', 'xsd:string'],
   ]);
+  assert.deepEqual(stale.changed, ['ipRouters']);
 
   const already = { ...sameIp, IPRouters: v('192.168.1.1') };
   assert.deepEqual(planLanUpdate({ lanNode: already, values: parseLanUpdate(ok).value }), { parameterValues: [], changed: [] });

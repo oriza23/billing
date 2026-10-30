@@ -471,7 +471,7 @@ test('extractLanConfig: cadangan TR-181 dan projection LAN terpisah dari daftar 
   assert.ok(!LIVE_PROJECTION.includes('LANHostConfigManagement'));
 });
 
-const { extractWans, WANS_PROJECTION } = require('../backend/acs_summary');
+const { extractWans, WANS_PROJECTION, ssidCountOf } = require('../backend/acs_summary');
 
 test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
   const item = {
@@ -540,6 +540,7 @@ test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
     mac: 'AA:BB:CC:DD:EE:FF',
     connType: 'IP_Routed',
     uptime: '3660',
+    portBind: '',
   });
   assert.equal(wans[1].type, 'IP');
   assert.equal(wans[1].id, '1.1.ip.2');
@@ -611,6 +612,52 @@ test('extractWans: TR-181 hanya PPP dan IP upstream, LAN tidak ikut', () => {
   assert.equal(wans[1].nat, 'Enabled');
   assert.equal(wans[1].mac, '22:22:22:22:22:22');
   assert.ok(!wans.some((wan) => wan.ip === '192.168.1.1'));
+});
+
+test('extractWans: port binding ZTE dan Huawei dibaca, jumlah SSID dari NumberOfEntries', () => {
+  const item = {
+    InternetGatewayDevice: {
+      LANDevice: {
+        1: { WLANConfigurationNumberOfEntries: { _value: 8 } },
+      },
+      WANDevice: {
+        1: {
+          WANConnectionDevice: {
+            1: {
+              WANPPPConnection: {
+                1: {
+                  Name: { _value: 'inet' },
+                  Enable: { _value: true },
+                  'X_ZTE-COM_LanInterface': { _value: 'LAN1,SSID1,WAN_PPP_1' },
+                },
+              },
+              WANIPConnection: {
+                1: {
+                  Name: { _value: 'bridge' },
+                  Enable: { _value: true },
+                  X_HW_LANBIND: {
+                    Lan2Enable: { _value: true },
+                    SSID5Enable: { _value: '1' },
+                    SSID6Enable: { _value: false },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(wans[0].portBind, 'LAN1,SSID1,WAN_PPP_1');
+  assert.equal(wans[1].portBind, 'LAN2,SSID5');
+  assert.equal(ssidCountOf(item), 8);
+  assert.equal(ssidCountOf({
+    InternetGatewayDevice: {
+      LANDevice: { 1: { WLANConfiguration: { 1: { SSID: { _value: 'a' } }, 4: { SSID: { _value: 'd' } } } } },
+    },
+  }), 4);
+  assert.equal(ssidCountOf({}), 0);
 });
 
 test('extractWans: data kosong dan projection tidak ikut daftar ONU', () => {

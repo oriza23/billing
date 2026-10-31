@@ -548,9 +548,9 @@ export function WanConfigModal({
             />
             <WanCheckControl
               label="Enable NAT"
-              checked={isPpp ? form.natStatus : ipRouted}
+              checked={isPpp ? form.natStatus && form.connectionType !== 'pppoe_bridged' : ipRouted}
               accentClass={accentClass}
-              disabled={!isPpp || busy}
+              disabled={!isPpp || form.connectionType === 'pppoe_bridged' || busy}
               onChange={(checked) => onChange('natStatus', checked)}
             />
           </div>
@@ -569,11 +569,12 @@ export function WanConfigModal({
               options={optionsWithCurrent(connectionOptions, form.connectionType)}
               onChange={(value) => {
                 if (isPpp) {
-                  onChange('connectionType', value)
-                  if (value === 'pppoe_bridged') {
-                    onChange('username', '')
-                    onChange('password', '')
-                  }
+                  const bridgedPpp = value === 'pppoe_bridged'
+                  onPatch({
+                    connectionType: value,
+                    natStatus: !bridgedPpp,
+                    ...(bridgedPpp ? { username: '', password: '' } : {}),
+                  })
                   return
                 }
                 const routed = value === 'IP_Routed'

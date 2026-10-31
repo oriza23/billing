@@ -1,6 +1,8 @@
 // Merangkum dokumen perangkat GenieACS (NBI) menjadi objek ONU yang bersih dan standar.
 // Seluruh ekstraksi path TR-069 dan konversi satuan dilakukan di sini, bukan di frontend.
 
+const { normalizeWanStatus, resolveWanStatus, detectLegacyWanFirmware } = require('./acs_wan_status');
+
 // ---- Projection NBI ---------------------------------------------------------
 // Hanya path yang dipakai ringkasan di bawah (balasan tetap kecil). Projection NBI tidak
 // mendukung wildcard, jadi instance 1-4 ditulis eksplisit.
@@ -511,6 +513,10 @@ function extractLanConfig(item) {
 // Tidak ikut LIVE_PROJECTION: subtree WANConnectionDevice besar. Diambil per perangkat
 // saat tab WAN dibuka. Sandi PPPoE tidak pernah dikirim apa adanya.
 const WANS_PROJECTION = [
+  '_lastInform',
+  `${IGD}.DeviceInfo.Manufacturer`,
+  `${IGD}.DeviceInfo.ProductClass`,
+  `${IGD}.DeviceInfo.ModelName`,
   `${IGD}.WANDevice.1.WANConnectionDevice`,
   `${IGD}.WANDevice.2.WANConnectionDevice`,
   `${IGD}.LANDevice.1.WLANConfigurationNumberOfEntries`,
@@ -679,7 +685,7 @@ function ssidCountOf(item) {
 
 function hasConnectionData(data) {
   return isNode(data) && Boolean(
-    data.Name || data.ConnectionStatus || data.ExternalIPAddress || data.Username
+    data.Name || data.ConnectionStatus || data.Status || data.ExternalIPAddress || data.Username
     || data.Enable || data.ConnectionType || data.TransportType || data.DNSServers,
   );
 }
@@ -687,12 +693,14 @@ function hasConnectionData(data) {
 function connectionRecord(id, kind, data, parent, fullPath) {
   const ppp = kind === 'PPP';
   const vlanId = vlanIdOf(data, parent);
+  const { status, source } = resolveWanStatus(data);
   return {
     id,
     fullPath,
     type: kind,
     name: leafText(data, 'Name') || '-',
-    status: leafText(data, 'ConnectionStatus') || '-',
+    status: status || '-',
+    statusSource: source,
     ip: leafText(data, 'ExternalIPAddress') || '-',
     remoteIp: leafText(data, 'RemoteIPAddress') || leafText(data, 'DefaultGateway') || '-',
     username: ppp ? (leafText(data, 'Username') || '-') : '-',
@@ -812,7 +820,7 @@ function wansTr181(device) {
       fullPath: `Device.PPP.Interface.${key}.`,
       type: 'PPP',
       name: leafText(data, 'Name') || '-',
-      status: leafText(data, 'ConnectionStatus') || leafText(data, 'Status') || '-',
+      status: normalizeWanStatus(leafText(data, 'ConnectionStatus') || leafText(data, 'Status')) || '-',
       ip,
       remoteIp: '-',
       username: leafText(data, 'Username') || '-',
@@ -845,7 +853,7 @@ function wansTr181(device) {
       fullPath: `Device.IP.Interface.${key}.`,
       type: 'IP',
       name: leafText(iface, 'Name') || '-',
-      status: leafText(iface, 'Status') || '-',
+      status: normalizeWanStatus(leafText(iface, 'Status')) || '-',
       ip: ipv4Of(iface) || '-',
       remoteIp: '-',
       username: '-',
@@ -863,6 +871,52 @@ function wansTr181(device) {
     });
   }
   return wans;
+}
+
+// Nama leaf di seluruh subtree WANDevice (batas kedalaman), untuk mendeteksi firmware X_CT-COM_ / X_CMCC_.
+function collectWanLeafNames(igd, limit = 400) {
+  const names = [];
+  const walk = (node, depth) => {
+    if (!isNode(node) || depth > 6 || names.length >= limit) {
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (key.startsWith('_')) {
+        continue;
+      }
+      names.push(key);
+      walk(node[key], depth + 1);
+    }
+  };
+  walk(igd?.WANDevice, 0);
+  return names;
+}
+
+// Identitas ONU untuk keputusan force refresh: { kind, manufacturer, modelName, productClass, online }.
+// kind = 'china-carrier' | 'huawei-legacy' | ''.
+function wanFirmwareProfile(item) {
+  const info = item?.InternetGatewayDevice?.DeviceInfo;
+  const manufacturer = leafText(info, 'Manufacturer') || '';
+  const productClass = leafText(info, 'ProductClass') || '';
+  const modelName = leafText(info, 'ModelName') || '';
+  const kind = detectLegacyWanFirmware({
+    manufacturer,
+    productClass,
+    modelName,
+    leafNames: collectWanLeafNames(item?.InternetGatewayDevice),
+  });
+  return { kind, manufacturer, productClass, modelName };
+}
+
+// Node WAN (tanpa titik di akhir) yang statusnya masih kosong: target refreshObject.
+function wanStatusRefreshTargets(wans, limit = 8) {
+  const targets = [];
+  for (const wan of Array.isArray(wans) ? wans : []) {
+    if (wan?.fullPath && (!wan.status || wan.status === '-')) {
+      targets.push(String(wan.fullPath).replace(/\.$/, ''));
+    }
+  }
+  return [...new Set(targets)].slice(0, limit);
 }
 
 function extractWans(item) {
@@ -884,6 +938,8 @@ module.exports = {
   extractHosts,
   extractWlans,
   extractWans,
+  wanFirmwareProfile,
+  wanStatusRefreshTargets,
   ssidCountOf,
   RX_PATHS,
   TEMP_PATHS,

@@ -911,7 +911,10 @@ function coreParameters(pppPath, values) {
       push(list, `${pppPath}Password`, values.password, 'xsd:string');
     }
   }
-  push(list, `${pppPath}NATEnabled`, values.natStatus === true, 'xsd:boolean');
+  // ONU menolak NAT pada koneksi bridge dengan CWMP 9003 (Invalid arguments). Koneksi bridged bawaan
+  // ONU (mis. ZTE "hotspot") selalu NATEnabled=false, jadi nilainya dipaksa false walau form mencentang NAT.
+  const nat = isBridgedConnection(values.connectionType) ? false : values.natStatus === true;
+  push(list, `${pppPath}NATEnabled`, nat, 'xsd:boolean');
   return list;
 }
 
@@ -1382,6 +1385,47 @@ function zteVlanFallbackPayloads(plan) {
   return (plan?.fallbackPayloads || []).filter((item) => Array.isArray(item?.parameterValues) && item.parameterValues.length > 0);
 }
 
+// Parameter yang sering ditolak/read-only di firmware tertentu (CWMP 9002/9003/9008). Di arsitektur
+// Queue-and-Fire ketiganya dikirim sebagai task SetParameterValues TERPISAH (satu task per parameter),
+// sehingga penolakan ONU hanya menggagalkan task itu dan tidak menahan Username/Password/VLAN.
+const RISKY_LEAF = /^(?:connectiontype|name|[a-z0-9_-]*servicelist)$/i;
+// Mode atomik: tidak ada parameter yang diisolasi; seluruh konfigurasi (ConnectionType, ServiceList, VLAN,
+// LanInterface, Name) dikirim dalam satu RPC dan Enable ditaruh paling akhir. ZTE F609 memvalidasi seluruh
+// konfigurasi instance baru saat Enable=true: Enable tanpa Name terisi / ServiceList / ConnectionType yang
+// ikut dalam RPC yang sama menghasilkan CWMP 9003 (terukur di lab).
+function isRiskyParameter(path, { atomic = false } = {}) {
+  return !atomic && RISKY_LEAF.test(String(path).split('.').pop());
+}
+
+// Profil yang sudah terverifikasi membutuhkan mode atomik.
+function prefersAtomicWan(profile) {
+  return String(profile || '').toLowerCase() === 'zte';
+}
+
+// Pisahkan satu daftar [path, value, type] menjadi { core, risky }. risky = array berisi satu baris
+// per task (ConnectionType, ServiceList, Name).
+function splitWanParameters(parameterValues, options = {}) {
+  const rows = Array.isArray(parameterValues) ? parameterValues : [];
+  const core = [];
+  const riskyRows = [];
+  for (const row of rows) {
+    (isRiskyParameter(row[0], options) ? riskyRows : core).push(row);
+  }
+  if (options.atomic) {
+    const isEnable = (row) => String(row[0]).split('.').pop() === 'Enable';
+    core.sort((left, right) => Number(isEnable(left)) - Number(isEnable(right)));
+  }
+  const rank = (row) => {
+    const leaf = String(row[0]).split('.').pop().toLowerCase();
+    if (leaf === 'connectiontype') {
+      return 0;
+    }
+    return leaf === 'name' ? 2 : 1;
+  };
+  riskyRows.sort((left, right) => rank(left) - rank(right));
+  return { core, risky: riskyRows.map((row) => [row]) };
+}
+
 // Seluruh parameter WAN dikirim dalam satu setParameterValues.
 function batchWanParameters(plan) {
   const byPath = new Map();
@@ -1446,6 +1490,9 @@ module.exports = {
   normalizeAcsObjectName,
   sanitizeParameterValues,
   batchWanParameters,
+  splitWanParameters,
+  isRiskyParameter,
+  prefersAtomicWan,
   ctcomFallbackPayload,
   zteVlanFallbackPayloads,
   detectZteVlanLink,

@@ -161,3 +161,10 @@ test('WAN IP: Fiberhome tanpa Name, merek lain membawa Name terpisah', () => {
     assert.equal(hasName(batchWanParameters(plan)), false);
   }
 });
+
+test('9003: koneksi bridged selalu NATEnabled=false walau form mencentang NAT', () => {
+  const natOf = (extra) => batchWanParameters(planPpp({ natStatus: true, ...extra }, 'ZTE'))
+    .find(([path]) => path.endsWith('.NATEnabled'))[1];
+  assert.equal(natOf({ connectionType: 'PPPoE_Bridged' }), false);
+  assert.equal(natOf({ connectionType: 'ip-routed' }), true);
+});

@@ -526,6 +526,7 @@ test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
     type: 'PPP',
     name: 'pppoe_internet',
     status: 'Connected',
+    statusSource: 'ConnectionStatus',
     ip: '100.64.1.9',
     remoteIp: '100.64.0.1',
     username: 'budi@isp',

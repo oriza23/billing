@@ -6,12 +6,12 @@ const requireRole = require('../middleware/requireRole');
 const acs = require('../acs');
 const { parseWlanUpdate, planWlanUpdate } = require('../acs_wlan');
 const { parseLanUpdate, planLanUpdate } = require('../acs_lan');
-const {
-  parseWanPpp, planWanPpp, parseWanIp, planWanIp, connectionTypeError, connectionPathOf, vendorProfile, batchWanParameters, connectionLeavesFor, readOnlyLeavesFor, ctcomWanIndexGuard, cmccGuard, zteVlanFallbackPayloads, isStructuralRejection, isCommitLoopFault, omitBridgeAuth,
-} = require('../acs_wan');
+const { parseWanPpp, parseWanIp, isCommitLoopFault } = require('../acs_wan');
+const { WanFlowError, addWanPpp, addWanIp } = require('../acs_wan_flow');
 const {
   LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, LAN_PROJECTION, WANS_PROJECTION,
   extractHosts, extractWlans, extractWans, extractLanConfig, ssidCountOf, summarizeDevice,
+  wanFirmwareProfile, wanStatusRefreshTargets,
 } = require('../acs_summary');
 
 const router = express.Router();
@@ -193,7 +193,9 @@ router.get('/devices', async (req, res) => {
 // Endpoint per perangkat (GET ...?server_id=..&id=<_id GenieACS>): mengambil subtree tertentu satu ONU
 // langsung dari NBI, lalu merangkumnya di backend. Dipanggil saat modal detail / tab dibuka,
 // bukan di daftar ONU (subtree-nya terlalu berat bila diambil untuk semua perangkat).
-function deviceDetailRoute(path, { projection, build, label, middlewares = [] }) {
+//   prepare (opsional): async ({ item, req, serverId, deviceId, reload }) => ({ item, extra }). Dipakai untuk
+//   langkah yang perlu menyentuh ONU sebelum membangun respons; `reload()` membaca ulang dokumen dari NBI.
+function deviceDetailRoute(path, { projection, build, label, middlewares = [], prepare = null }) {
   router.get(path, ...middlewares, async (req, res) => {
     const serverId = readId(req.query.server_id);
     const deviceId = typeof req.query.id === 'string' ? req.query.id.trim() : '';
@@ -210,15 +212,24 @@ function deviceDetailRoute(path, { projection, build, label, middlewares = [] })
         return fail(res, 404, 'Server ACS tidak ditemukan');
       }
 
-      const response = await axios.get(`${baseUrl}/devices/`, {
-        params: { query: JSON.stringify({ _id: deviceId }), projection },
-        timeout: LIVE_TIMEOUT_MS,
-      });
-      const item = Array.isArray(response.data) ? response.data[0] : null;
+      const readItem = async () => {
+        const response = await axios.get(`${baseUrl}/devices/`, {
+          params: { query: JSON.stringify({ _id: deviceId }), projection },
+          timeout: LIVE_TIMEOUT_MS,
+        });
+        return Array.isArray(response.data) ? response.data[0] : null;
+      };
+      let item = await readItem();
       if (!item) {
         return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
       }
-      return res.json(build(item));
+      let extra = {};
+      if (prepare) {
+        const prepared = await prepare({ item, req, serverId, deviceId, reload: readItem });
+        item = prepared.item || item;
+        extra = prepared.extra || {};
+      }
+      return res.json({ ...build(item), ...extra });
     } catch (error) {
       console.error(`Gagal mengambil ${label} dari GenieACS:`, error.code || error.message);
       return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
@@ -241,10 +252,66 @@ deviceDetailRoute('/devices/lan', {
 });
 
 // Daftar koneksi WAN -> { wans: [...] }. Sandi PPPoE disamarkan di ekstraksi.
+// Status koneksi sering kosong di cache GenieACS untuk Huawei lama dan firmware China Mobile/Telecom
+// (X_CT-COM / X_CMCC). Untuk perangkat itu, node WAN yang statusnya kosong dipaksa refreshObject dulu
+// sebelum respons dibangun. ?refresh=0 menonaktifkan, ?refresh=1 memaksa refresh semua node WAN.
+const WAN_REFRESH_COOLDOWN_MS = 60 * 1000;
+const WAN_REFRESH_BUDGET_MS = 8000;
+const wanRefreshedAt = new Map();
+
+function wanRefreshTargets(item, mode) {
+  const wans = extractWans(item);
+  if (mode === 'force') {
+    return wans.map((wan) => String(wan.fullPath || '').replace(/\.$/, '')).filter(Boolean).slice(0, 8);
+  }
+  return wanStatusRefreshTargets(wans);
+}
+
+async function prepareWanStatus({ item, req, serverId, deviceId, reload }) {
+  const flag = String(req.query.refresh ?? '');
+  if (flag === '0') {
+    return { item, extra: {} };
+  }
+  const mode = flag === '1' ? 'force' : 'auto';
+  const profile = wanFirmwareProfile(item);
+  if (mode === 'auto' && !profile.kind) {
+    return { item, extra: {} };
+  }
+  const targets = wanRefreshTargets(item, mode);
+  if (targets.length === 0) {
+    return { item, extra: {} };
+  }
+  const lastInform = item._lastInform ? new Date(item._lastInform) : null;
+  const online = Boolean(lastInform && lastInform >= acs.statusCutoffs().online);
+  const recent = Date.now() - (wanRefreshedAt.get(`${serverId}:${deviceId}`) || 0) < WAN_REFRESH_COOLDOWN_MS;
+  if (!online || (mode === 'auto' && recent)) {
+    return { item, extra: { statusRefresh: { attempted: false, reason: online ? 'cooldown' : 'offline' } } };
+  }
+
+  const server = await findServer(serverId).catch(() => null);
+  if (!server) {
+    return { item, extra: {} };
+  }
+  wanRefreshedAt.set(`${serverId}:${deviceId}`, Date.now());
+  try {
+    const refresh = await acs.refreshDeviceObjects(server, deviceId, targets, { budgetMs: WAN_REFRESH_BUDGET_MS });
+    const fresh = refresh.refreshed.length > 0 ? await reload() : null;
+    return {
+      item: fresh || item,
+      extra: { statusRefresh: { attempted: true, kind: profile.kind || 'manual', ...refresh } },
+    };
+  } catch (error) {
+    // Refresh hanya pemulus: kegagalannya tidak boleh menggagalkan pembacaan detail WAN.
+    console.warn(`[ACS wan-status] refresh ${deviceId}: ${error.message}`);
+    return { item, extra: { statusRefresh: { attempted: true, kind: profile.kind || 'manual', error: error.message } } };
+  }
+}
+
 deviceDetailRoute('/devices/wans', {
   projection: WANS_PROJECTION,
   build: (item) => ({ wans: extractWans(item), ssidCount: ssidCountOf(item) }),
   label: 'WAN',
+  prepare: prepareWanStatus,
 });
 
 // Daftar WiFi -> { wlans: [...] }. Memuat sandi WiFi pelanggan, jadi hanya untuk admin.
@@ -382,354 +449,48 @@ router.post('/update-lan', requireAdmin, async (req, res) => {
 // Hanya instance koneksi WAN yang boleh dihapus, bukan objek TR-069 lain.
 const WAN_DELETE_PATH = /^(?:InternetGatewayDevice\.WANDevice\.\d+\.WANConnectionDevice\.\d+\.WAN(?:PPP|IP)Connection\.\d+\.|Device\.PPP\.Interface\.\d+\.|Device\.IP\.Interface\.\d+\.)$/;
 
-async function rollbackNewWan(server, deviceId, rollbackPath, label) {
+// Terjemahkan hasil/error alur WAN (acs_wan_flow.js) ke respons HTTP.
+function wanErrorResponse(res, error, fallbackMessage) {
+  if (error instanceof WanFlowError) {
+    return fail(res, error.status, error.message);
+  }
+  if (isCommitLoopFault(error)) {
+    return res.status(502).json({ success: false, message: error.message });
+  }
+  const isNbiError = error instanceof acs.NbiError;
+  return res.status(isNbiError ? 502 : 500).json({
+    success: false,
+    message: isNbiError ? `${error.message}${error.rollbackNote || ''}` : fallbackMessage,
+    ...(error.wanPath ? { wanPath: error.wanPath } : {}),
+  });
+}
+
+async function handleAddWan(req, res, parse, run, fallbackMessage) {
+  const parsed = parse(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
   try {
-    await acs.sendWanDeleteObject(server, deviceId, rollbackPath, { rollback: true });
-    console.log(`[ACS ${label}] rollback ${deviceId} ${rollbackPath}`);
-    return { removed: true, note: '' };
-  } catch (rollbackError) {
-    const timedOut = rollbackError?.code === 'TIMEOUT' || rollbackError?.code === 'PENDING';
-    if (timedOut) {
-      console.warn(`[ACS ${label}] rollback ${deviceId} ${rollbackPath} diabaikan karena timeout`);
-      return { removed: false, note: '' };
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
     }
-    console.warn(`[ACS ${label}] rollback ${deviceId} ${rollbackPath}: ${rollbackError.message}`);
-    return { removed: false, note: ` Instance baru gagal dihapus (${rollbackError.message}).` };
-  }
-}
-
-async function pushWanBatch(server, deviceId, parameterValues) {
-  if (!parameterValues || parameterValues.length === 0) {
-    return { applied: true };
-  }
-  return acs.sendWanSetParameterValues(server, deviceId, parameterValues);
-}
-
-// Safe-Write Connection Name. Mandiri dari batch utama: Name yang read-only atau ditolak ONU
-// hanya menjadi catatan di respons, tidak membatalkan WAN yang sudah berhasil dibuat.
-// plan.connectionName kosong bila merek Fiberhome (ONT membuat namanya sendiri).
-async function writeConnectionName(server, deviceId, plan, label) {
-  const rows = plan?.connectionName;
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return { ok: true, note: 'Nama koneksi dibuat otomatis oleh ONU' };
-  }
-  try {
-    await acs.sendWanConnectionName(server, deviceId, rows);
-    return { ok: true, note: '' };
+    const result = await run({ server, values: parsed.value, username: req.user?.username });
+    return res.json({ success: true, ...result });
   } catch (error) {
-    console.warn(`[ACS ${label}] Connection Name dilewati ${deviceId}: ${error.message}`);
-    return { ok: false, note: `Connection Name tidak diterapkan (${error.message})` };
+    return wanErrorResponse(res, error, fallbackMessage);
   }
-}
-
-async function pushWanWithCtFallback(server, deviceId, plan, payload, label, prepare = (rows) => rows) {
-  const queue = [
-    { kind: plan?.vlanKind || 'awal', parameterValues: payload },
-    ...zteVlanFallbackPayloads(plan).map((item) => ({
-      kind: item.kind,
-      parameterValues: prepare(item.parameterValues),
-    })),
-  ];
-  let lastError = null;
-  for (let index = 0; index < queue.length; index += 1) {
-    const item = queue[index];
-    try {
-      if (index > 0) {
-        console.log(`[ACS ${label}] path VLAN ditolak (${lastError.message}). Mencoba struktur ${item.kind}.`);
-      }
-      return await pushWanBatch(server, deviceId, item.parameterValues);
-    } catch (error) {
-      lastError = error;
-      const more = index < queue.length - 1;
-      const retry = more
-        && !plan?.singleAttempt
-        && !plan?.vlanBlocked
-        && !isStructuralRejection(error);
-      if (!retry) {
-        throw error;
-      }
-    }
-  }
-  throw lastError;
 }
 
 // Buat atau ubah koneksi WAN PPP. Body = isian form (nama, NAT, service, connection type,
 // VLAN, 802.1p, username, password, MTU, port binding) + server_id + deviceId.
-// wanPath kosong membuat instance baru (AddObject) lalu setParameterValues.
+// wanPath kosong membuat instance baru (AddObject) lalu setParameterValues (Queue-and-Fire, acs_wan_flow.js).
 // Hanya admin. Sandi tidak dicatat di log.
-router.post('/wan-ppp', requireAdmin, async (req, res) => {
-  const parsed = parseWanPpp(req.body);
-  if (parsed.error) {
-    return fail(res, 400, parsed.error);
-  }
-  const values = parsed.value;
-  let pppPath = values.wanPath;
-  let rollbackPath = null;
-  let server = null;
-
-  try {
-    server = await findServer(req.body?.server_id);
-    if (!server) {
-      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
-    }
-
-    const target = await acs.readWanTarget(server, values.deviceId);
-    if (!target) {
-      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
-    }
-
-    const manufacturer = target.manufacturer || values.manufacturer;
-    const typeError = connectionTypeError(manufacturer, values.connectionType);
-    if (typeError) {
-      return fail(res, 400, typeError);
-    }
-    if (!target.tr181 && !target.wanDeviceIndex) {
-      return fail(res, 400, 'Struktur WAN tidak ditemukan pada perangkat. Jalankan Summon lalu coba lagi.');
-    }
-    console.log(`[ACS wan-ppp] pohon ${values.deviceId}: model=${target.model} WANDevice=${target.wanDeviceIndex || '-'} WANConnectionDevice=${target.connectionIndex || 'baru'}`);
-    const earlyCmcc = cmccGuard({
-      knownLeaves: target.knownLeaves,
-      deviceLeaves: target.deviceLeaves,
-      readOnlyLeaves: target.readOnlyLeaves,
-      manufacturer,
-      productModel: target.productModel,
-      productClass: target.productClass,
-    });
-    if (earlyCmcc.blocked) {
-      return fail(res, 409, earlyCmcc.message);
-    }
-    const earlyGuard = ctcomWanIndexGuard({
-      knownLeaves: target.knownLeaves,
-      readOnlyLeaves: target.readOnlyLeaves,
-      wanIndexValues: target.wanIndexValues,
-      vlanRequested: values.vlanStatus === true,
-    });
-    if (earlyGuard.blocked) {
-      return fail(res, 409, earlyGuard.message);
-    }
-
-    await acs.prepareWanPpp(server, values.deviceId, target.model);
-
-    if (!pppPath) {
-      const created = await acs.createWanPppInstance(server, values.deviceId, {
-        profile: target.tr181 ? 'tr181' : vendorProfile(manufacturer),
-        tr181: target.tr181,
-        wanDeviceIndex: target.wanDeviceIndex,
-        connectionIndex: target.connectionIndex,
-        createConnectionDevice: target.createConnectionDevice,
-      });
-      pppPath = created.pppPath;
-      rollbackPath = created.rollbackPath || created.pppPath;
-    }
-
-    // Baca ulang pohon setelah AddObject supaya VLAN/MTU hanya memakai parameter yang ada.
-    const fresh = await acs.readWanTarget(server, values.deviceId);
-    const connectionPath = connectionPathOf(pppPath);
-    const freshLeaves = connectionLeavesFor(fresh, connectionPath);
-    const knownLeaves = freshLeaves.length ? freshLeaves : connectionLeavesFor(target, connectionPath);
-    const freshReadOnly = readOnlyLeavesFor(fresh, connectionPath);
-    const readOnlyLeaves = freshReadOnly.length ? freshReadOnly : readOnlyLeavesFor(target, connectionPath);
-    const plan = planWanPpp({
-      values,
-      manufacturer,
-      productModel: fresh?.productModel || target.productModel,
-      productClass: fresh?.productClass || target.productClass,
-      accessType: fresh?.accessType || target.accessType,
-      pppPath,
-      connectionPath,
-      knownLeaves,
-      deviceLeaves: fresh?.deviceLeaves?.length ? fresh.deviceLeaves : target.deviceLeaves,
-      readOnlyLeaves,
-      wanIndexValues: fresh?.wanIndexValues?.length ? fresh.wanIndexValues : target.wanIndexValues,
-      dataModel: target.tr181 ? 'Device' : target.model,
-    });
-    if (plan.vlanBlocked) {
-      throw new acs.NbiError(plan.blockedMessage, undefined, 'READONLY');
-    }
-    const payload = omitBridgeAuth(batchWanParameters(plan), values.connectionType);
-    const result = await pushWanWithCtFallback(
-      server,
-      values.deviceId,
-      plan,
-      payload,
-      'wan-ppp',
-      (rows) => omitBridgeAuth(rows, values.connectionType),
-    );
-    const applied = result.applied;
-    const nameResult = await writeConnectionName(server, values.deviceId, plan, 'wan-ppp');
-
-    console.log(`[ACS wan-ppp] ${req.user?.username || '-'} ${server.host}:${server.port} ${values.deviceId} ${plan.profile} ${pppPath} ${plan.fields.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
-    return res.json({
-      success: true,
-      applied,
-      partial: !nameResult.ok,
-      wanPath: pppPath,
-      message: [
-        applied ? 'Koneksi WAN PPP diterapkan ke ONU' : 'Koneksi WAN PPP masuk antrean dan diterapkan saat ONU terhubung',
-        nameResult.note,
-      ].filter(Boolean).join('. '),
-    });
-  } catch (error) {
-    console.error(`[ACS wan-ppp] ${values.deviceId} ${pppPath || '-'}: ${error.message}`);
-    if (isCommitLoopFault(error)) {
-      return res.status(502).json({ success: false, message: error.message });
-    }
-    let rollbackNote = '';
-    let leftoverPath = null;
-    if (server && rollbackPath && !values.wanPath) {
-      const rollback = await rollbackNewWan(server, values.deviceId, rollbackPath, 'wan-ppp');
-      rollbackNote = rollback.note;
-      if (rollback.removed) {
-        pppPath = null;
-      } else {
-        leftoverPath = pppPath;
-      }
-    }
-    const isNbiError = error instanceof acs.NbiError;
-    return res.status(isNbiError ? 502 : 500).json({
-      success: false,
-      message: isNbiError ? `${error.message}${rollbackNote}` : 'Gagal mengirim koneksi WAN PPP',
-      ...(leftoverPath ? { wanPath: leftoverPath } : {}),
-    });
-  }
-});
+router.post('/wan-ppp', requireAdmin, (req, res) => handleAddWan(req, res, parseWanPpp, addWanPpp, 'Gagal mengirim koneksi WAN PPP'));
 
 // Buat atau ubah koneksi WAN IP (WANIPConnection). IP_Routed memakai DHCP atau Static.
 // IP_Bridged tidak mengirim alamat IP. Gagal setParameterValues menghapus instance baru.
-async function saveWanIp(req, res) {
-  const parsed = parseWanIp(req.body);
-  if (parsed.error) {
-    return fail(res, 400, parsed.error);
-  }
-  const values = parsed.value;
-  let ipPath = values.wanPath;
-  let rollbackPath = null;
-  let server = null;
-
-  try {
-    server = await findServer(req.body?.server_id);
-    if (!server) {
-      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
-    }
-
-    const target = await acs.readWanTarget(server, values.deviceId);
-    if (!target) {
-      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
-    }
-    if (target.tr181) {
-      return fail(res, 400, 'Model TR-181 belum mendukung pembuatan WAN IP dari form ini.');
-    }
-    if (!target.wanDeviceIndex) {
-      return fail(res, 400, 'Struktur WAN tidak ditemukan pada perangkat. Jalankan Summon lalu coba lagi.');
-    }
-
-    const manufacturer = target.manufacturer || values.manufacturer;
-    const modelName = target.productModel || values.modelName;
-    console.log(`[ACS wan-ip] pohon ${values.deviceId}: model=${modelName || '-'} WANDevice=${target.wanDeviceIndex} WANConnectionDevice=${target.connectionIndex || 'baru'}`);
-    const earlyCmcc = cmccGuard({
-      knownLeaves: target.knownLeaves,
-      deviceLeaves: target.deviceLeaves,
-      readOnlyLeaves: target.readOnlyLeaves,
-      manufacturer,
-      productModel: target.productModel,
-      productClass: target.productClass,
-      modelName,
-    });
-    if (earlyCmcc.blocked) {
-      return fail(res, 409, earlyCmcc.message);
-    }
-    const earlyGuard = ctcomWanIndexGuard({
-      knownLeaves: target.knownLeaves,
-      readOnlyLeaves: target.readOnlyLeaves,
-      wanIndexValues: target.wanIndexValues,
-      vlanRequested: values.vlanStatus === true,
-    });
-    if (earlyGuard.blocked) {
-      return fail(res, 409, earlyGuard.message);
-    }
-
-    await acs.prepareWanPpp(server, values.deviceId, target.model);
-
-    if (!ipPath) {
-      const created = await acs.createWanIpInstance(server, values.deviceId, {
-        profile: vendorProfile(manufacturer),
-        tr181: false,
-        wanDeviceIndex: target.wanDeviceIndex,
-        connectionIndex: target.connectionIndex,
-        createConnectionDevice: target.createConnectionDevice,
-      });
-      ipPath = created.ipPath;
-      rollbackPath = created.rollbackPath || created.ipPath;
-    }
-
-    const fresh = await acs.readWanTarget(server, values.deviceId);
-    const connectionPath = connectionPathOf(ipPath);
-    const freshLeaves = connectionLeavesFor(fresh, connectionPath);
-    const knownLeaves = freshLeaves.length ? freshLeaves : connectionLeavesFor(target, connectionPath);
-    const freshReadOnly = readOnlyLeavesFor(fresh, connectionPath);
-    const readOnlyLeaves = freshReadOnly.length ? freshReadOnly : readOnlyLeavesFor(target, connectionPath);
-    const plan = planWanIp({
-      values,
-      manufacturer,
-      modelName,
-      productModel: fresh?.productModel || target.productModel,
-      productClass: fresh?.productClass || target.productClass,
-      accessType: fresh?.accessType || target.accessType,
-      ipPath,
-      connectionPath,
-      knownLeaves,
-      deviceLeaves: fresh?.deviceLeaves?.length ? fresh.deviceLeaves : target.deviceLeaves,
-      readOnlyLeaves,
-      wanIndexValues: fresh?.wanIndexValues?.length ? fresh.wanIndexValues : target.wanIndexValues,
-      dataModel: target.model,
-    });
-    if (plan.vlanBlocked) {
-      throw new acs.NbiError(plan.blockedMessage, undefined, 'READONLY');
-    }
-    const stripAuth = (rows) => rows.filter(([path]) => {
-      const leaf = String(path).split('.').pop();
-      return leaf !== 'Username' && leaf !== 'Password';
-    });
-    const payload = stripAuth(batchWanParameters(plan));
-    const result = await pushWanWithCtFallback(server, values.deviceId, plan, payload, 'wan-ip', stripAuth);
-    const applied = result.applied;
-    const nameResult = await writeConnectionName(server, values.deviceId, plan, 'wan-ip');
-
-    console.log(`[ACS wan-ip] ${req.user?.username || '-'} ${server.host}:${server.port} ${values.deviceId} ${plan.profile} ${ipPath} ${plan.fields.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
-    return res.json({
-      success: true,
-      applied,
-      partial: !nameResult.ok,
-      wanPath: ipPath,
-      message: [
-        applied ? 'Koneksi WAN IP diterapkan ke ONU' : 'Koneksi WAN IP masuk antrean dan diterapkan saat ONU terhubung',
-        nameResult.note,
-      ].filter(Boolean).join('. '),
-    });
-  } catch (error) {
-    console.error(`[ACS wan-ip] ${values.deviceId} ${ipPath || '-'}: ${error.message}`);
-    if (isCommitLoopFault(error)) {
-      return res.status(502).json({ success: false, message: error.message });
-    }
-    let rollbackNote = '';
-    let leftoverPath = null;
-    if (server && rollbackPath && !values.wanPath) {
-      const rollback = await rollbackNewWan(server, values.deviceId, rollbackPath, 'wan-ip');
-      rollbackNote = rollback.note;
-      if (rollback.removed) {
-        ipPath = null;
-      } else {
-        leftoverPath = ipPath;
-      }
-    }
-    const isNbiError = error instanceof acs.NbiError;
-    return res.status(isNbiError ? 502 : 500).json({
-      success: false,
-      message: isNbiError ? `${error.message}${rollbackNote}` : 'Gagal mengirim koneksi WAN IP',
-      ...(leftoverPath ? { wanPath: leftoverPath } : {}),
-    });
-  }
-}
+const saveWanIp = (req, res) => handleAddWan(req, res, parseWanIp, addWanIp, 'Gagal mengirim koneksi WAN IP');
 
 router.post('/wan-ip', requireAdmin, saveWanIp);
 router.post('/add-wan-ip', requireAdmin, saveWanIp);

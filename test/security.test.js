@@ -38,6 +38,7 @@ const WRITE_ENDPOINTS = [
   ['PUT', '/api/routers/1'],
   ['DELETE', '/api/routers/1'],
   ['POST', '/api/routers/1/servers'],
+  ['PUT', '/api/routers/servers/1'],
   ['DELETE', '/api/routers/servers/1'],
   ['POST', '/api/settings/timezone'],
 ];

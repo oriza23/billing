@@ -27,6 +27,15 @@
   box-shadow: 0 18px 40px rgba(8, 40, 68, 0.08);
 }
 
+.admin-form--modal {
+  margin-top: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .admin-form-heading p {
   margin: 0 0 4px;
   color: #0e7490;

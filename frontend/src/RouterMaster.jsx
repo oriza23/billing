@@ -4,8 +4,8 @@ import Swal from 'sweetalert2'
 import './PppoeProfil.css'
 import './RouterMaster.css'
 
-const API_URL = '/api/routers'
-const SERVER_URL = '/api/routers/servers'
+const API_URL = '/routers'
+const SERVER_URL = '/routers/servers'
 const JENIS_LABEL = { hotspot: 'Hotspot', pppoe: 'PPPoE' }
 
 const MODAL_OVERLAY =

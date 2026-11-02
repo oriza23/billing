@@ -1,21 +1,36 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const pool = require('./database');
+const { ensureWebAdminColumns } = require('./backend/web_admins');
 const requireAuth = require('./backend/middleware/auth');
 const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
 const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
 const { startIsolirEnforcement } = require('./backend/langganan_isolir');
+const { ensurePppoeIsolirSchema } = require('./backend/pppoe_isolir/schema');
+const { startCron } = require('./utils/cron');
 const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
 const { ensureTables: ensureAcsTables } = require('./backend/acs');
+const { mountFrontend } = require('./backend/serve_frontend');
+const { ensurePaymentSchema } = require('./backend/payment/schema');
 
 const app = express();
-const PORT = 5000;
+const PORT = Number(process.env.PORT) || 5000;
+
+// Hanya aktifkan bila ada reverse proxy (Nginx, Caddy, Cloudflare Tunnel, dll).
+// Tanpa proxy: biarkan mati — IP pelanggan diambil dari koneksi TCP langsung.
+if (String(process.env.TRUST_PROXY || '') === '1') {
+  app.set('trust proxy', true);
+}
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '3mb' }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Login bersifat publik; semua route /api lainnya wajib membawa token JWT.
+// Login & portal isolir / webhook pembayaran bersifat publik (dilindungi secret/IP, bukan JWT).
 app.use('/api/auth', require('./backend/routes/auth'));
+app.use('/api/isolir', require('./backend/routes/isolir_portal'));
+app.use('/api/payment', require('./backend/routes/payment'));
 app.use('/api', requireAuth);
 
 app.use('/api/pppoe', require('./backend/routes/pppoe'));
@@ -29,6 +44,11 @@ const langgananProfilRouter = require('./backend/routes/langganan_profil');
 app.use('/api/langganan/profil', langgananProfilRouter);
 const langgananDataRouter = require('./backend/routes/langganan_data');
 app.use('/api/langganan/data', langgananDataRouter);
+const pppoeIsolirRoutes = require('./backend/routes/pppoe_isolir');
+const isolirMikrotikRoutes = require('./backend/routes/isolir');
+app.use('/api/langganan/isolir', pppoeIsolirRoutes);
+app.use('/api/isolir', isolirMikrotikRoutes);
+app.use('/api/buka-isolir', isolirMikrotikRoutes.bukaIsolirRouter);
 app.use('/api/wilayah', require('./backend/routes/wilayah'));
 app.use('/api/langganan/online', require('./backend/routes/langganan_online'));
 const pelangganRouter = require('./backend/routes/pelanggan');
@@ -38,8 +58,13 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
 app.use('/api/acs', require('./backend/routes/acs'));
 
+// Produksi: sajikan hasil `npm run build` (frontend/dist) di port yang sama dengan API.
+// Letakkan paling akhir agar tidak menimpa route /api.
+const frontendServed = mountFrontend(app);
+
 async function ensureAdminTable() {
   await ensureBootstrapAdmin(pool);
+  await ensureWebAdminColumns(pool);
 }
 
 async function ensureHotspotProfilesTable() {
@@ -85,6 +110,8 @@ async function ensureDataWilayahTable() {
 
 async function start() {
   await ensureAdminTable();
+  await ensurePppoeIsolirSchema(pool);
+  await ensurePaymentSchema(pool);
   await ensureHotspotProfilesTable();
   await ensureHotspotVouchersTable();
   await ensureRoutersTable();
@@ -117,7 +144,8 @@ async function start() {
     // Penjadwal hanya dijalankan setelah port benar-benar terbuka, supaya tidak ada cron ganda.
     startExpiredVoucherEnforcement();
     startIsolirEnforcement();
-    console.log(`Server berjalan di http://localhost:${PORT}`);
+    startCron();
+    console.log(`Server berjalan di http://localhost:${PORT}${frontendServed ? ' (API + frontend dist)' : ' (hanya API; frontend/dist belum dibuild)'}`);
   });
 }
 

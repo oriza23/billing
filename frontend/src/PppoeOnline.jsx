@@ -4,7 +4,7 @@ import ServerPagination from './ServerPagination.jsx'
 import useDebouncedValue from './useDebouncedValue.js'
 import './PppoeOnline.css'
 
-const ONLINE_URL = '/api/langganan/online'
+const ONLINE_URL = '/langganan/online'
 
 function formatLoginTime(value) {
   if (!value) {
@@ -97,7 +97,7 @@ function PppoeOnline() {
     setActionError('')
 
     api
-      .post('/api/pppoe/disconnect', {
+      .post('/pppoe/disconnect', {
         username: session.username,
         ip_address: session.ip_address,
       })

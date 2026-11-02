@@ -15,6 +15,7 @@ function ManajemenAdmin() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('admin')
+  const [email, setEmail] = useState('')
   const [saving, setSaving] = useState(false)
   const [deletingUsername, setDeletingUsername] = useState('')
   const [formError, setFormError] = useState('')
@@ -23,7 +24,7 @@ function ManajemenAdmin() {
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false)
 
   async function fetchAdmins() {
-    const response = await api.get('/api/admins')
+    const response = await api.get('/admins')
     setAdmins(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -33,7 +34,7 @@ function ManajemenAdmin() {
 
     async function loadAdmins() {
       try {
-        const response = await api.get('/api/admins')
+        const response = await api.get('/admins')
         if (!ignore) {
           setAdmins(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -62,6 +63,7 @@ function ManajemenAdmin() {
     setUsername('')
     setPassword('')
     setRole('admin')
+    setEmail('')
   }
 
   function closeAdminModal() {
@@ -82,6 +84,7 @@ function ManajemenAdmin() {
     setUsername(item.username)
     setPassword('')
     setRole(item.role || 'admin')
+    setEmail(item.email || '')
     setFormError('')
     setIsAdminModalOpen(true)
   }
@@ -115,7 +118,7 @@ function ManajemenAdmin() {
 
     try {
       await api.delete(
-        `/api/admins/${encodeURIComponent(targetUsername)}`,
+        `/admins/${encodeURIComponent(targetUsername)}`,
       )
       if (selectedUsername === targetUsername) {
         closeAdminModal()
@@ -150,14 +153,15 @@ function ManajemenAdmin() {
     try {
       if (editMode) {
         await api.put(
-          `/api/admins/${encodeURIComponent(selectedUsername)}`,
-          { password, role },
+          `/admins/${encodeURIComponent(selectedUsername)}`,
+          { password, role, email: email.trim() },
         )
       } else {
-        await api.post('/api/admins', {
+        await api.post('/admins', {
           username,
           password,
           role,
+          email: email.trim(),
         })
       }
       resetForm()
@@ -203,6 +207,7 @@ function ManajemenAdmin() {
                 <tr>
                   <th>No</th>
                   <th>Username</th>
+                  <th>Email</th>
                   <th>Role</th>
                   <th>Aksi</th>
                 </tr>
@@ -210,7 +215,7 @@ function ManajemenAdmin() {
               <tbody>
                 {admins.length === 0 ? (
                   <tr>
-                    <td colSpan="4" className="admin-empty">
+                    <td colSpan="5" className="admin-empty">
                       Belum ada data admin.
                     </td>
                   </tr>
@@ -222,6 +227,7 @@ function ManajemenAdmin() {
                     >
                       <td>{index + 1}</td>
                       <td>{item.username}</td>
+                      <td>{item.email || '-'}</td>
                       <td>
                         <span className="admin-role">{item.role}</span>
                       </td>
@@ -288,6 +294,19 @@ function ManajemenAdmin() {
                     onChange={(event) => setPassword(event.target.value)}
                     autoComplete="new-password"
                     required={!editMode}
+                  />
+                </label>
+
+                <label className="admin-field">
+                  <span>Alamat Email</span>
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="admin@contoh.com"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    required
+                    autoComplete="email"
                   />
                 </label>
 

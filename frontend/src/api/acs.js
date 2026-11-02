@@ -1,7 +1,8 @@
 import api from './axios.js'
 
 // Semua request memakai instance axios bersama (token JWT ditempel otomatis).
-const BASE = '/api/acs'
+// Relatif ke axios baseURL (.../api); jangan pakai '/api/acs' — axios jadi /api/api/acs/...
+const BASE = '/acs'
 
 // ---- Server ACS ----
 export const getAcsServers = () => api.get(`${BASE}/server`).then((res) => res.data)

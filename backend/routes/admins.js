@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const { hashPassword } = require('../password');
+const { readEmail, isValidEmail, publicAdminRow } = require('../web_admins');
 
 const router = express.Router();
 const requireAdmin = requireRole('admin');
@@ -13,9 +14,9 @@ function readText(value) {
 router.get('/', async (req, res) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT id, username, role FROM web_admins ORDER BY id ASC',
+      'SELECT id, username, role, email, foto_profil FROM web_admins ORDER BY id ASC',
     );
-    res.json(rows.map(({ id, username, role }) => ({ id, username, role })));
+    res.json(rows.map(publicAdminRow));
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -29,6 +30,7 @@ router.post('/', requireAdmin, async (req, res) => {
   const username = readText(req.body?.username);
   const password = readText(req.body?.password);
   const role = readText(req.body?.role) || 'admin';
+  const email = readEmail(req.body?.email);
 
   if (!username || !password) {
     return res.status(400).json({
@@ -36,11 +38,17 @@ router.post('/', requireAdmin, async (req, res) => {
       message: 'Username dan password wajib diisi',
     });
   }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Alamat email wajib diisi dan harus valid',
+    });
+  }
 
   try {
     await pool.execute(
-      'INSERT INTO web_admins (username, password, role) VALUES (?, ?, ?)',
-      [username, await hashPassword(password), role],
+      'INSERT INTO web_admins (username, password, role, email) VALUES (?, ?, ?, ?)',
+      [username, await hashPassword(password), role, email],
     );
 
     return res.json({
@@ -67,6 +75,7 @@ router.put('/:username', requireAdmin, async (req, res) => {
   const username = readText(req.params.username);
   const password = readText(req.body?.password);
   const role = readText(req.body?.role) || 'admin';
+  const email = readEmail(req.body?.email);
 
   if (!username) {
     return res.status(400).json({
@@ -74,16 +83,22 @@ router.put('/:username', requireAdmin, async (req, res) => {
       message: 'Username wajib diisi',
     });
   }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Alamat email wajib diisi dan harus valid',
+    });
+  }
 
   try {
     const [result] = password
       ? await pool.execute(
-        'UPDATE web_admins SET password = ?, role = ? WHERE username = ?',
-        [await hashPassword(password), role, username],
+        'UPDATE web_admins SET password = ?, role = ?, email = ? WHERE username = ?',
+        [await hashPassword(password), role, email, username],
       )
       : await pool.execute(
-        'UPDATE web_admins SET role = ? WHERE username = ?',
-        [role, username],
+        'UPDATE web_admins SET role = ?, email = ? WHERE username = ?',
+        [role, email, username],
       );
 
     if (result.affectedRows === 0) {

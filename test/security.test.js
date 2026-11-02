@@ -163,14 +163,18 @@ test('role selain admin ditolak saat menulis dan tetap boleh membaca', async () 
   const calls = installPool({
     execute: async (sql) => {
       if (sql.includes('FROM web_admins')) {
-        return [[{ id: 1, username: 'ada', role: 'admin', password: 'bocor-rahasia' }]];
+        return [[{
+          id: 1, username: 'ada', role: 'admin', password: 'bocor-rahasia', email: 'ada@test.com', foto_profil: '',
+        }]];
       }
       return [[]];
     },
   });
   const admins = await call('GET', '/api/admins', { token });
   assert.equal(admins.status, 200);
-  assert.deepEqual(admins.body, [{ id: 1, username: 'ada', role: 'admin' }]);
+  assert.deepEqual(admins.body, [{
+    id: 1, username: 'ada', role: 'admin', email: 'ada@test.com', foto_profil: '',
+  }]);
   const packed = JSON.stringify(admins.body);
   assert.equal(packed.includes('password'), false);
   assert.equal(packed.includes('bocor-rahasia'), false);

@@ -59,7 +59,7 @@ function HotspotProfil() {
   const [form, setForm] = useState(emptyForm)
 
   async function fetchProfil() {
-    const response = await api.get('/api/hotspot/profil')
+    const response = await api.get('/hotspot/profil')
     return Array.isArray(response.data) ? response.data : []
   }
 
@@ -242,9 +242,9 @@ function HotspotProfil() {
     setSaving(true)
     try {
       if (editingGroup) {
-        await api.put(`/api/hotspot/profil/${encodeURIComponent(editingGroup)}`, payload)
+        await api.put(`/hotspot/profil/${encodeURIComponent(editingGroup)}`, payload)
       } else {
-        await api.post('/api/hotspot/profil', payload)
+        await api.post('/hotspot/profil', payload)
       }
       setIsModalOpen(false)
       setEditingGroup('')
@@ -285,7 +285,7 @@ function HotspotProfil() {
     }
 
     try {
-      await api.post('/api/hotspot/profil/delete-massal', {
+      await api.post('/hotspot/profil/delete-massal', {
         groupnames: selectedProfiles,
       })
       const rows = await fetchProfil()

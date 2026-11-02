@@ -55,7 +55,10 @@ const HUAWEI_BIND = {
   ssid8: 'SSID8Enable',
 };
 
-function supportsPppoeRouted(manufacturer) {
+function supportsPppoeRouted(manufacturer, deviceType = '') {
+  if (normalizeDeviceType(deviceType) === 'fiberhome') {
+    return true;
+  }
   const name = String(manufacturer || '').toLowerCase();
   const compact = name.replace(/[^a-z0-9]+/g, '');
   return name.includes('fiberhome')
@@ -63,8 +66,8 @@ function supportsPppoeRouted(manufacturer) {
     || PPP_ROUTED_BRANDS.some((brand) => name.includes(brand) || compact.includes(brand.replace(/-/g, '')));
 }
 
-function connectionTypeError(manufacturer, connectionType) {
-  if (connectionType === 'pppoe_routed' && !supportsPppoeRouted(manufacturer)) {
+function connectionTypeError(manufacturer, connectionType, deviceType = '') {
+  if (connectionType === 'pppoe_routed' && !supportsPppoeRouted(manufacturer, deviceType)) {
     return 'Connection Type pppoe_routed tidak didukung merek modem ini';
   }
   return null;

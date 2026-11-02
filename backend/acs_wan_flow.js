@@ -185,7 +185,7 @@ const WAN_KINDS = {
     pathKey: 'pppPath',
     filterRows: (rows, values) => omitBridgeAuth(rows, values.connectionType),
     precheck(target, values, manufacturer) {
-      const typeError = connectionTypeError(manufacturer, values.connectionType);
+      const typeError = connectionTypeError(manufacturer, values.connectionType, values.deviceType);
       if (typeError) {
         throw new WanFlowError(400, typeError);
       }

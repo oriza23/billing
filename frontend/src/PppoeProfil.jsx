@@ -16,7 +16,7 @@ function PppoeProfil() {
   const [selectedGroup, setSelectedGroup] = useState('')
 
   async function fetchProfil() {
-    const response = await api.get('/api/pppoe/profil')
+    const response = await api.get('/pppoe/profil')
     setProfil(Array.isArray(response.data) ? response.data : [])
     setError('')
   }
@@ -26,7 +26,7 @@ function PppoeProfil() {
 
     async function loadProfil() {
       try {
-        const response = await api.get('/api/pppoe/profil')
+        const response = await api.get('/pppoe/profil')
         if (!ignore) {
           setProfil(Array.isArray(response.data) ? response.data : [])
           setError('')
@@ -96,11 +96,11 @@ function PppoeProfil() {
     try {
       if (editMode) {
         await api.put(
-          `/api/pppoe/profil/${encodeURIComponent(selectedGroup)}`,
+          `/pppoe/profil/${encodeURIComponent(selectedGroup)}`,
           { rate_limit: rateLimit },
         )
       } else {
-        await api.post('/api/pppoe/profil', {
+        await api.post('/pppoe/profil', {
           groupname,
           rate_limit: rateLimit,
         })
@@ -136,7 +136,7 @@ function PppoeProfil() {
 
     try {
       await api.delete(
-        `/api/pppoe/profil/${encodeURIComponent(targetGroup)}`,
+        `/pppoe/profil/${encodeURIComponent(targetGroup)}`,
       )
       if (selectedGroup === targetGroup) {
         resetForm()

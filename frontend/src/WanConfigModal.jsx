@@ -42,12 +42,13 @@ const WAN_IP_CONNECTION_OPTIONS = ['IP_Routed', 'IP_Bridged']
 // FiberHome serta merek sejenis (firmware yang memajang PPPoE_Routed) menambah pppoe_routed.
 const PPP_ROUTED_BRANDS = ['fhtt', 'cdata', 'c-data', 'vsol', 'hioso', 'optilink', 'bdcom']
 
-function pppConnectionOptions(manufacturer) {
+function pppConnectionOptions(manufacturer, deviceType = '') {
   const name = String(manufacturer || '').toLowerCase()
   const compact = name.replace(/[^a-z0-9]+/g, '')
   const options = ['ip-routed', 'pppoe_bridged']
   const similar = PPP_ROUTED_BRANDS.some((brand) => name.includes(brand) || compact.includes(brand.replace(/-/g, '')))
-  if (name.includes('fiberhome') || compact.includes('fiberhome') || similar) {
+  const pickedFiberhome = String(deviceType || '').toLowerCase() === 'fiberhome'
+  if (pickedFiberhome || name.includes('fiberhome') || compact.includes('fiberhome') || similar) {
     options.push('pppoe_routed')
   }
   return options
@@ -373,8 +374,8 @@ export function WanConfigModal({
   const [isLoading, setIsLoading] = useState(false)
   const formAlive = useRef(true)
   const submitLock = useRef(false)
-  const connectionOptions = isPpp ? pppConnectionOptions(manufacturer) : WAN_IP_CONNECTION_OPTIONS
   const deviceType = resolveDeviceType(form.deviceType, manufacturer)
+  const connectionOptions = isPpp ? pppConnectionOptions(manufacturer, deviceType) : WAN_IP_CONNECTION_OPTIONS
   const autoName = deviceType === 'Fiberhome'
   const busy = isLoading || saving
 
@@ -524,7 +525,19 @@ export function WanConfigModal({
               label="Tipe Perangkat"
               value={deviceType}
               options={WAN_DEVICE_TYPES}
-              onChange={(value) => onChange('deviceType', value)}
+              onChange={(value) => {
+                if (!isPpp) {
+                  onChange('deviceType', value)
+                  return
+                }
+                const nextOptions = pppConnectionOptions(manufacturer, value)
+                const patch = { deviceType: value }
+                if (!nextOptions.includes(form.connectionType)) {
+                  patch.connectionType = 'ip-routed'
+                  patch.natStatus = true
+                }
+                onPatch(patch)
+              }}
               disabled={busy}
             />
             <WanTextControl

@@ -73,7 +73,7 @@ function ChangePasswordModal({ onClose }) {
     setSubmitting(true)
     setError('')
     try {
-      const response = await api.post('/api/users/change-password', {
+      const response = await api.post('/users/change-password', {
         currentPassword,
         newPassword,
         confirmPassword,

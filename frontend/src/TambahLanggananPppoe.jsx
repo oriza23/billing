@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Plus, Search, Trash2 } from 'lucide-react'
 import L from 'leaflet'
 import { MapContainer, Marker, TileLayer, useMap } from 'react-leaflet'
@@ -30,12 +30,12 @@ const markerPinIcon = L.icon({
 })
 
 const REFERENCE_SOURCES = [
-  { key: 'pelanggan', url: '/api/pelanggan', label: 'pelanggan' },
-  { key: 'profiles', url: '/api/langganan/profil', label: 'profile langganan' },
-  { key: 'routers', url: '/api/routers', label: 'router' },
-  { key: 'outlets', url: '/api/outlets', label: 'mitra reseller' },
-  { key: 'wilayah', url: '/api/wilayah', label: 'wilayah' },
-  { key: 'servers', url: '/api/routers/servers', label: 'server' },
+  { key: 'pelanggan', url: '/pelanggan', label: 'pelanggan' },
+  { key: 'profiles', url: '/langganan/profil', label: 'profile langganan' },
+  { key: 'routers', url: '/routers', label: 'router' },
+  { key: 'outlets', url: '/outlets', label: 'mitra reseller' },
+  { key: 'wilayah', url: '/wilayah', label: 'wilayah' },
+  { key: 'servers', url: '/routers/servers', label: 'server' },
 ]
 
 const KATEGORI_OPTIONS = ['PPP', 'Hotspot', 'Static', 'DHCP']
@@ -329,6 +329,8 @@ function ToggleSwitch({ id, checked, onChange, label }) {
 
 function TambahLanggananPppoe() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const returnTo = location.state?.returnTo
   const [form, setForm] = useState(emptyForm)
   const [items, setItems] = useState([])
   const [reference, setReference] = useState({ pelanggan: [], profiles: [], routers: [], outlets: [], wilayah: [], servers: [] })
@@ -410,7 +412,7 @@ function TambahLanggananPppoe() {
   }
 
   async function fetchWilayah() {
-    const response = await api.get('/api/wilayah')
+    const response = await api.get('/wilayah')
     const rows = Array.isArray(response.data) ? response.data : []
     setReference((current) => ({ ...current, wilayah: rows }))
     return rows
@@ -435,7 +437,7 @@ function TambahLanggananPppoe() {
       return
     }
     try {
-      const { data } = await api.post('/api/wilayah', { nama_wilayah: nama })
+      const { data } = await api.post('/wilayah', { nama_wilayah: nama })
       await fetchWilayah()
       update('wilayah', data.nama_wilayah || nama)
       await Swal.fire({
@@ -608,7 +610,7 @@ function TambahLanggananPppoe() {
 
     setSaving(true)
     try {
-      await api.post('/api/langganan/data', buildPayload())
+      await api.post('/langganan/data', buildPayload())
       await Swal.fire({
         icon: 'success',
         title: 'Berhasil',
@@ -616,7 +618,11 @@ function TambahLanggananPppoe() {
         timer: 1500,
         showConfirmButton: false,
       })
-      navigate('/langganan/data')
+      if (returnTo) {
+        navigate(returnTo, { replace: true })
+      } else {
+        navigate('/langganan/data')
+      }
     } catch (requestError) {
       Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal disimpan.', 'error')
     } finally {

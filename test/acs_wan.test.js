@@ -16,7 +16,9 @@ const {
 test('FiberHome dan merek sejenis boleh pppoe_routed', () => {
   assert.equal(supportsPppoeRouted('FiberHome'), true);
   assert.equal(supportsPppoeRouted('ZTE'), false);
+  assert.equal(supportsPppoeRouted('ZTE', 'Fiberhome'), true);
   assert.equal(connectionTypeError('ZTE', 'pppoe_routed'), 'Connection Type pppoe_routed tidak didukung merek modem ini');
+  assert.equal(connectionTypeError('ZTE', 'pppoe_routed', 'Fiberhome'), null);
   assert.equal(connectionTypeError('FiberHome', 'pppoe_routed'), null);
 });
 

@@ -4,13 +4,15 @@ import Swal from 'sweetalert2'
 import { KeyRound, LogOut, Menu, User } from 'lucide-react'
 import { clearSession, getUsername } from './api/auth.js'
 import ChangePasswordModal from './ChangePasswordModal.jsx'
+import AdminProfileModal from './AdminProfileModal.jsx'
+import api from './api/axios.js'
 import ServerClock from './ServerClock.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 
 const langgananMenu = [
   { to: '/langganan/profil', label: 'Profil Langganan' },
   // Form tambah dibuka dari tombol TAMBAH di Data Langganan, jadi menu ini tetap aktif di sana.
-  { to: '/langganan/data', label: 'Data Langganan', alsoActive: ['/langganan/tambah'] },
+  { to: '/langganan/data', label: 'Data Langganan', alsoActive: ['/langganan/tambah', '/langganan/registrasi'] },
   { to: '/langganan/online', label: 'Langganan Online' },
 ]
 
@@ -24,6 +26,7 @@ const hotspotMenu = [
 const sistemMenu = [
   { to: '/manajemen-admin', label: 'Manajemen Admin' },
   { to: '/sistem/pengaturan', label: 'Pengaturan' },
+  { to: '/sistem/payment-gateway', label: 'Payment Gateway' },
 ]
 
 const navLinkClass = ({ isActive }) =>
@@ -87,11 +90,38 @@ function MenuGroup({ label, items, open, onToggle }) {
   )
 }
 
+function profilePhotoUrl(path) {
+  if (!path) {
+    return ''
+  }
+  if (/^https?:\/\//i.test(path)) {
+    return path
+  }
+  const base = api.defaults.baseURL || ''
+  return `${base.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`
+}
+
 function ProfileMenu({ username, onLogout }) {
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [avatarUrl, setAvatarUrl] = useState('')
   const menuRef = useRef(null)
   const label = username || 'Pengguna'
+
+  useEffect(() => {
+    let ignore = false
+    api.get('/users/profile')
+      .then((response) => {
+        if (!ignore && response.data?.foto_profil) {
+          setAvatarUrl(profilePhotoUrl(response.data.foto_profil))
+        }
+      })
+      .catch(() => {})
+    return () => {
+      ignore = true
+    }
+  }, [username])
 
   useEffect(() => {
     if (!isProfileMenuOpen) {
@@ -124,8 +154,12 @@ function ProfileMenu({ username, onLogout }) {
         aria-haspopup="menu"
         onClick={() => setIsProfileMenuOpen((open) => !open)}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-cyan-700 text-white" aria-hidden="true">
-          <User size={16} />
+        <span className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-full bg-cyan-700 text-white" aria-hidden="true">
+          {avatarUrl ? (
+            <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <User size={16} />
+          )}
         </span>
         <span className="truncate">{label}</span>
       </button>
@@ -141,12 +175,25 @@ function ProfileMenu({ username, onLogout }) {
             role="menuitem"
             onClick={() => {
               setIsProfileMenuOpen(false)
+              setProfileOpen(true)
+            }}
+          >
+            <User size={16} aria-hidden="true" />
+            Profil Saya
+          </button>
+          <button
+            type="button"
+            className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-2.5 text-left text-sm font-semibold text-gray-800 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700"
+            role="menuitem"
+            onClick={() => {
+              setIsProfileMenuOpen(false)
               setPasswordOpen(true)
             }}
           >
             <KeyRound size={16} aria-hidden="true" />
-            Profil / Ubah Password
+            Ubah Password
           </button>
+          <div className="my-1 border-t border-gray-200 dark:border-gray-700" role="separator" />
           <button
             type="button"
             className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-2.5 text-left text-sm font-semibold text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950"
@@ -162,6 +209,15 @@ function ProfileMenu({ username, onLogout }) {
         </div>
       )}
 
+      {profileOpen && (
+        <AdminProfileModal
+          username={username}
+          onClose={() => setProfileOpen(false)}
+          onSaved={(profile) => {
+            setAvatarUrl(profile?.foto_profil ? profilePhotoUrl(profile.foto_profil) : '')
+          }}
+        />
+      )}
       {passwordOpen && <ChangePasswordModal onClose={() => setPasswordOpen(false)} />}
     </div>
   )

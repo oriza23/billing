@@ -5,7 +5,7 @@ import { Menu, Pencil, Plus, Search, Trash, X } from 'lucide-react'
 import './HotspotStok.css'
 import './LanggananProfil.css'
 
-const API = '/api/langganan/profil'
+const API = '/langganan/profil'
 const TIPE_OPTIONS = ['Rumahan', 'Bisnis', 'Kantor', 'Sekolah']
 const MEDIA_OPTIONS = ['Fiber Optic', 'Wireless', 'LAN', 'Radio']
 const HARGA_PALET = [

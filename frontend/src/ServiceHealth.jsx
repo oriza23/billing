@@ -61,7 +61,7 @@ function ServiceHealth() {
     async function check() {
       setChecking(true)
       try {
-        const response = await api.get('/api/system/health')
+        const response = await api.get('/system/health')
         if (!ignore) {
           setHealth(response.data)
           setUnreachable(false)

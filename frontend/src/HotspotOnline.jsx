@@ -7,7 +7,7 @@ import { RefreshCw, Search, Trash, UserX } from 'lucide-react'
 import './HotspotStok.css'
 import './HotspotOnline.css'
 
-const API = '/api/hotspot'
+const API = '/hotspot'
 
 function formatBytes(bytes) {
   const value = Math.max(0, Number(bytes) || 0)

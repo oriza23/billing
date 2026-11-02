@@ -5,7 +5,7 @@ import Swal from 'sweetalert2'
 import { TIMEZONE_CHANGED_EVENT } from './ServerClock.jsx'
 import ServiceHealth from './ServiceHealth.jsx'
 
-const API = '/api/settings'
+const API = '/settings'
 const DEFAULT_TIMEZONE = 'Asia/Makassar'
 
 const TIMEZONE_OPTIONS = [

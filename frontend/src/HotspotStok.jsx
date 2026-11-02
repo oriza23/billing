@@ -176,7 +176,7 @@ function HotspotStok() {
 
   // Muat ulang halaman tertentu (mis. halaman 1 setelah generate) dengan filter aktif.
   async function fetchVouchers(targetPage = currentPage) {
-    const response = await api.get('/api/hotspot/voucher', {
+    const response = await api.get('/hotspot/voucher', {
       params: { page: targetPage, limit: itemsPerPage, q: searchTerm.trim() },
     })
     applyVoucherResponse(response.data)
@@ -190,7 +190,7 @@ function HotspotStok() {
     async function loadPage() {
       setFetching(true)
       try {
-        const response = await api.get('/api/hotspot/voucher', {
+        const response = await api.get('/hotspot/voucher', {
           params: { page: currentPage, limit: itemsPerPage, q: debouncedSearch },
         })
         if (ignore) {
@@ -224,8 +224,8 @@ function HotspotStok() {
     async function loadData() {
       try {
         const [profilResponse, outletResponse] = await Promise.all([
-          api.get('/api/hotspot/profil'),
-          api.get('/api/outlets').catch(() => ({ data: [] })),
+          api.get('/hotspot/profil'),
+          api.get('/outlets').catch(() => ({ data: [] })),
         ])
         if (ignore) {
           return
@@ -255,7 +255,7 @@ function HotspotStok() {
 
     async function loadRouters() {
       try {
-        const response = await api.get('/api/routers')
+        const response = await api.get('/routers')
         if (!ignore) {
           setDaftarRouter(Array.isArray(response.data) ? response.data : [])
         }
@@ -266,7 +266,7 @@ function HotspotStok() {
       }
       // Server Hotspot yang diinput admin di menu Router.
       try {
-        const response = await api.get('/api/routers/servers', { params: { jenis: 'hotspot' } })
+        const response = await api.get('/routers/servers', { params: { jenis: 'hotspot' } })
         if (!ignore) {
           setDaftarServer(Array.isArray(response.data) ? response.data : [])
         }
@@ -319,7 +319,7 @@ function HotspotStok() {
     async function loadOutlets() {
       setOutletLoading(true)
       try {
-        const response = await api.get('/api/outlets')
+        const response = await api.get('/outlets')
         if (!ignore) {
           setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
         }
@@ -453,7 +453,7 @@ function HotspotStok() {
     }
 
     try {
-      await api.post('/api/hotspot/voucher/delete-massal', {
+      await api.post('/hotspot/voucher/delete-massal', {
         usernames: selectedVouchers,
       })
       setIsMenuOpen(false)
@@ -511,7 +511,7 @@ function HotspotStok() {
     })
 
     try {
-      await api.post('/api/hotspot/voucher/generate', payload)
+      await api.post('/hotspot/voucher/generate', payload)
     } catch (requestError) {
       Swal.close()
       Swal.fire(
@@ -674,7 +674,7 @@ function HotspotStok() {
   }
 
   async function fetchOutlets() {
-    const response = await api.get('/api/outlets')
+    const response = await api.get('/outlets')
     setDaftarOutlet(Array.isArray(response.data) ? response.data : [])
   }
 
@@ -705,11 +705,11 @@ function HotspotStok() {
 
     try {
       if (isDelete) {
-        await api.post('/api/outlets/delete-massal', {
+        await api.post('/outlets/delete-massal', {
           ids: selectedOutlets,
         })
       } else {
-        await api.post('/api/outlets/set-status-massal', {
+        await api.post('/outlets/set-status-massal', {
           ids: selectedOutlets,
           status,
         })
@@ -749,7 +749,7 @@ function HotspotStok() {
     })
 
     try {
-      await api.post('/api/outlets', {
+      await api.post('/outlets', {
         nama_outlet: formOutlet.nama_outlet.trim(),
         pemilik: formOutlet.pemilik.trim(),
         phone: formOutlet.phone.trim(),

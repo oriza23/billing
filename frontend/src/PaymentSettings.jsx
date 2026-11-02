@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { CreditCard, QrCode, Save } from 'lucide-react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 
 const API = '/settings/payment'
 
@@ -106,15 +107,9 @@ function PaymentSettings() {
       setPrivateKeyHint(data.tripay?.private_key_preview || '')
       setQrisImageUrl(data.qris?.qris_image_url || '')
       setQrisFile(null)
-      Swal.fire({
-        icon: 'success',
-        title: 'Berhasil',
-        text: data.message || 'Pengaturan pembayaran disimpan.',
-        timer: 2000,
-        showConfirmButton: false,
-      })
+      await fireSuccess({ title: 'Berhasil', text: data.message || 'Pengaturan pembayaran disimpan.' }, false)
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Pengaturan gagal disimpan.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Pengaturan gagal disimpan.' })
     } finally {
       setSaving(false)
     }

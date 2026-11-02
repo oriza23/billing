@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Eye, EyeOff, X } from 'lucide-react'
 import Swal from 'sweetalert2'
+import { fireSuccess } from './swals.js'
 import api from './api/axios.js'
 
 const MIN_PASSWORD = 6
@@ -78,14 +79,10 @@ function ChangePasswordModal({ onClose }) {
         newPassword,
         confirmPassword,
       })
-      await Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Password diubah',
         text: response.data?.message || 'Password berhasil diubah',
-        timer: 2200,
-        showConfirmButton: false,
-      })
-      onClose()
+      }, () => { onClose() })
     } catch (requestError) {
       setError(errorMessage(requestError, 'Gagal mengubah password.'))
     } finally {

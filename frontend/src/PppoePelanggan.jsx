@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireSuccess } from './swals.js'
 import './PppoePelanggan.css'
 
 function PppoePelanggan() {
@@ -100,14 +101,8 @@ function PppoePelanggan() {
     setFormError('')
   }
 
-  function notifySuccess() {
-    Swal.fire({
-      icon: 'success',
-      title: 'Berhasil!',
-      text: 'Data sukses diperbarui',
-      timer: 1500,
-      showConfirmButton: false,
-    })
+  function notifySuccess(refresh) {
+    return fireSuccess({ title: 'Berhasil!', text: 'Data sukses diperbarui' }, refresh)
   }
 
   async function handleDelete(targetUsername) {
@@ -133,8 +128,7 @@ function PppoePelanggan() {
       if (selectedUsername === targetUsername) {
         resetForm()
       }
-      await fetchPelanggan()
-      notifySuccess()
+      await notifySuccess(() => { void fetchPelanggan() })
     } catch {
       setFormError('Gagal menghapus pelanggan.')
     } finally {
@@ -174,8 +168,7 @@ function PppoePelanggan() {
         })
       }
       resetForm()
-      await fetchPelanggan()
-      notifySuccess()
+      await notifySuccess(() => { void fetchPelanggan() })
     } catch {
       setFormError(editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan pelanggan.')
     } finally {

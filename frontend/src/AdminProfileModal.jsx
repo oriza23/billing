@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { User, X } from 'lucide-react'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import api from './api/axios.js'
 
 function errorMessage(error, fallback) {
@@ -117,17 +118,15 @@ export default function AdminProfileModal({ username, onClose, onSaved }) {
         payload.foto_profil_base64 = photoDataUrl
       }
       const response = await api.put('/users/profile', payload)
-      Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Berhasil',
         text: response.data?.message || 'Profil berhasil disimpan',
-        timer: 1500,
-        showConfirmButton: false,
+      }, () => {
+        onSaved?.(response.data?.profile)
+        onClose()
       })
-      onSaved?.(response.data?.profile)
-      onClose()
     } catch (error) {
-      Swal.fire({ icon: 'error', title: 'Gagal', text: errorMessage(error, 'Profil gagal disimpan.') })
+      fireError({ title: 'Gagal', text: errorMessage(error, 'Profil gagal disimpan.') })
     } finally {
       setSaving(false)
     }

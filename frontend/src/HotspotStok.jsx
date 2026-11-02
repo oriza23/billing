@@ -3,6 +3,7 @@ import api from './api/axios.js'
 import ServerPagination from './ServerPagination.jsx'
 import useDebouncedValue from './useDebouncedValue.js'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import {
   Banknote,
   Calendar,
@@ -284,14 +285,8 @@ function HotspotStok() {
     }
   }, [])
 
-  function notifySuccess(text) {
-    Swal.fire({
-      icon: 'success',
-      title: 'Berhasil!',
-      text,
-      timer: 1500,
-      showConfirmButton: false,
-    })
+  function notifySuccess(text, refresh) {
+    return fireSuccess({ title: 'Berhasil!', text }, refresh)
   }
 
   useEffect(() => {
@@ -458,11 +453,9 @@ function HotspotStok() {
       })
       setIsMenuOpen(false)
       setSelectedMap({})
-      await fetchVouchers()
-      notifySuccess('Data sukses diperbarui')
+      await notifySuccess('Data sukses diperbarui', () => { void fetchVouchers() })
     } catch (requestError) {
-      Swal.fire({
-        icon: 'error',
+      fireError({
         title: 'Gagal',
         text: requestError.response?.data?.message || 'Gagal menghapus voucher.',
       })
@@ -514,26 +507,27 @@ function HotspotStok() {
       await api.post('/hotspot/voucher/generate', payload)
     } catch (requestError) {
       Swal.close()
-      Swal.fire(
-        'Gagal!',
-        requestError.response?.data?.message || 'Terjadi kesalahan saat generate voucher. Silakan coba lagi.',
-        'error',
-      )
+      fireError({
+        title: 'Gagal!',
+        text: requestError.response?.data?.message || 'Terjadi kesalahan saat generate voucher. Silakan coba lagi.',
+      })
       generatingRef.current = false
       setSaving(false)
       return
     }
 
-    // Generate sukses: kosongkan form, lalu muat ulang tabel agar voucher baru tampil.
     resetVoucherForm()
-    try {
-      await fetchVouchers(1)
-    } catch {
-      setError('Voucher berhasil dibuat, tetapi tabel gagal dimuat ulang. Muat ulang halaman.')
-    }
-
     Swal.close()
-    Swal.fire('Berhasil!', 'Voucher sukses dibuat dan dimasukkan ke database.', 'success')
+    await fireSuccess({
+      title: 'Berhasil!',
+      text: 'Voucher sukses dibuat dan dimasukkan ke database.',
+    }, async () => {
+      try {
+        await fetchVouchers(1)
+      } catch {
+        setError('Voucher berhasil dibuat, tetapi tabel gagal dimuat ulang. Muat ulang halaman.')
+      }
+    })
     generatingRef.current = false
     setSaving(false)
   }
@@ -716,11 +710,12 @@ function HotspotStok() {
       }
       setIsOutletMenuOpen(false)
       setSelectedOutlets([])
-      await fetchOutlets()
-      notifySuccess(isDelete ? 'Outlet terpilih berhasil dihapus' : 'Status outlet berhasil diperbarui')
+      await notifySuccess(
+        isDelete ? 'Outlet terpilih berhasil dihapus' : 'Status outlet berhasil diperbarui',
+        () => { void fetchOutlets() },
+      )
     } catch (requestError) {
-      Swal.fire({
-        icon: 'error',
+      fireError({
         title: 'Gagal',
         text: requestError.response?.data?.message || 'Gagal memproses outlet terpilih.',
       })
@@ -759,11 +754,9 @@ function HotspotStok() {
       setIsModalTambahOutletOpen(false)
       setFormOutlet(emptyFormOutlet())
       setOutletPage(1)
-      await fetchOutlets()
-      notifySuccess('Outlet berhasil disimpan')
+      await notifySuccess('Outlet berhasil disimpan', () => { void fetchOutlets() })
     } catch (requestError) {
-      Swal.fire({
-        icon: 'error',
+      fireError({
         title: 'Gagal',
         text: requestError.response?.data?.message || 'Gagal menyimpan outlet.',
       })

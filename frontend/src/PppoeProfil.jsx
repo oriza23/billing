@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireSuccess } from './swals.js'
 import './PppoeProfil.css'
 
 function PppoeProfil() {
@@ -65,14 +66,8 @@ function PppoeProfil() {
     setFormError('')
   }
 
-  function notifySuccess() {
-    Swal.fire({
-      icon: 'success',
-      title: 'Berhasil!',
-      text: 'Data sukses diperbarui',
-      timer: 1500,
-      showConfirmButton: false,
-    })
+  function notifySuccess(refresh) {
+    return fireSuccess({ title: 'Berhasil!', text: 'Data sukses diperbarui' }, refresh)
   }
 
   async function handleSubmit(event) {
@@ -106,8 +101,7 @@ function PppoeProfil() {
         })
       }
       resetForm()
-      await fetchProfil()
-      notifySuccess()
+      await notifySuccess(() => { void fetchProfil() })
     } catch (requestError) {
       setFormError(
         requestError.response?.data?.message
@@ -141,8 +135,7 @@ function PppoeProfil() {
       if (selectedGroup === targetGroup) {
         resetForm()
       }
-      await fetchProfil()
-      notifySuccess()
+      await notifySuccess(() => { void fetchProfil() })
     } catch (requestError) {
       setFormError(requestError.response?.data?.message || 'Gagal menghapus profil.')
     } finally {

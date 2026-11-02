@@ -8,6 +8,7 @@ import markerIcon from 'leaflet/dist/images/marker-icon.png'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import api from './api/axios.js'
 import useDebouncedValue from './useDebouncedValue.js'
 
@@ -438,17 +439,13 @@ function TambahLanggananPppoe() {
     }
     try {
       const { data } = await api.post('/wilayah', { nama_wilayah: nama })
-      await fetchWilayah()
       update('wilayah', data.nama_wilayah || nama)
-      await Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Berhasil',
         text: `Wilayah "${data.nama_wilayah || nama}" ditambahkan dan dipilih.`,
-        timer: 1800,
-        showConfirmButton: false,
-      })
+      }, () => { void fetchWilayah() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Wilayah gagal disimpan.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Wilayah gagal disimpan.' })
     }
   }
 
@@ -611,20 +608,15 @@ function TambahLanggananPppoe() {
     setSaving(true)
     try {
       await api.post('/langganan/data', buildPayload())
-      await Swal.fire({
-        icon: 'success',
-        title: 'Berhasil',
-        text: 'Data langganan berhasil disimpan.',
-        timer: 1500,
-        showConfirmButton: false,
+      await fireSuccess({ title: 'Berhasil', text: 'Data langganan berhasil disimpan.' }, () => {
+        if (returnTo) {
+          navigate(returnTo, { replace: true })
+        } else {
+          navigate('/langganan/data')
+        }
       })
-      if (returnTo) {
-        navigate(returnTo, { replace: true })
-      } else {
-        navigate('/langganan/data')
-      }
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal disimpan.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Data langganan gagal disimpan.' })
     } finally {
       setSaving(false)
     }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Save } from 'lucide-react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import { TIMEZONE_CHANGED_EVENT } from './ServerClock.jsx'
 import ServiceHealth from './ServiceHealth.jsx'
 
@@ -101,15 +102,12 @@ function SistemPengaturan() {
       if (response.data?.status) {
         setStatus(response.data.status)
       }
-      Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Berhasil',
         text: 'Zona waktu berhasil diterapkan ke Web, OS, Database, dan FreeRADIUS.',
-        timer: 2000,
-        showConfirmButton: false,
-      })
+      }, () => { loadStatus() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Pengaturan gagal disimpan.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Pengaturan gagal disimpan.' })
       loadStatus()
     } finally {
       setSaving(false)

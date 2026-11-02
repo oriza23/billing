@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireSuccess } from './swals.js'
 import './ManajemenAdmin.css'
 
 const MODAL_OVERLAY =
@@ -89,14 +90,8 @@ function ManajemenAdmin() {
     setIsAdminModalOpen(true)
   }
 
-  function notifySuccess() {
-    Swal.fire({
-      icon: 'success',
-      title: 'Berhasil!',
-      text: 'Data sukses diperbarui',
-      timer: 1500,
-      showConfirmButton: false,
-    })
+  function notifySuccess(refresh) {
+    return fireSuccess({ title: 'Berhasil!', text: 'Data sukses diperbarui' }, refresh)
   }
 
   async function handleDelete(targetUsername) {
@@ -123,8 +118,7 @@ function ManajemenAdmin() {
       if (selectedUsername === targetUsername) {
         closeAdminModal()
       }
-      await fetchAdmins()
-      notifySuccess()
+      await notifySuccess(() => { void fetchAdmins() })
     } catch (error) {
       setFormError(error.response?.data?.message || 'Gagal menghapus admin.')
     } finally {
@@ -166,8 +160,7 @@ function ManajemenAdmin() {
       }
       resetForm()
       setIsAdminModalOpen(false)
-      await fetchAdmins()
-      notifySuccess()
+      await notifySuccess(() => { void fetchAdmins() })
     } catch (error) {
       setFormError(
         error.response?.data?.message

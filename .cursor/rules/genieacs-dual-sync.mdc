@@ -1,0 +1,50 @@
+---
+description: Sinkronisasi dua arah GenieACS antara billing dan acs-standalone
+globs: backend/acs*.js,backend/routes/acs.js,frontend/src/GenieAcs.jsx,frontend/src/Wan*.jsx,frontend/src/acs.js,frontend/src/api/acs.js,frontend/src/PortBinding.jsx,test/acs*.test.js
+alwaysApply: false
+---
+
+# GenieACS: billing ↔ acs-standalone (wajib)
+
+## Dua aplikasi terpisah (bukan satu backend, dua frontend)
+
+Billing dan acs-standalone adalah **dua stack lengkap**, masing-masing punya `server.js`, backend Node sendiri, frontend React sendiri, dan akan **di-deploy ke server berbeda** dengan fungsi masing-masing.
+
+**Dilarang:** menggabungkan jadi satu backend yang melayani dua frontend, symlink backend bersama, atau arsitektur monolith GenieACS shared runtime.
+
+**Yang dilakukan:** **salin/mirror** kode modul GenieACS (file backend + UI ACS) antar pohon supaya fitur ACS tetap sama versinya, tanpa mengubah pemisahan deploy.
+
+| Billing (full app) | ACS standalone (portal ACS saja) |
+|--------------------|----------------------------------|
+| `/var/www/billing` | `/var/www/acs-standalone` |
+
+Hasdin: **setiap perubahan GenieACS** disamakan di **dua** pohon ini (dua arah).
+
+## Arah dua arah
+
+- Ubah di **billing** → terapkan juga ke **acs-standalone** (sebelum selesai task).
+- Ubah di **acs-standalone** → terapkan juga ke **billing**.
+
+Tidak menunggu diminta ulang: sinkronisasi bagian GenieACS adalah bagian dari definisi selesai.
+
+## Cakupan file (mirror path relatif)
+
+**Backend:** `backend/acs.js`, `acs_wan.js`, `acs_wan_flow.js`, `acs_zte_wan.js`, `acs_wlan.js`, `acs_lan.js`, `acs_summary.js`, `acs_wan_status.js`, `acs_service.js`, `backend/routes/acs.js`
+
+**Frontend:** `GenieAcs.jsx`, `WanConfigModal.jsx`, `WanIpModal.jsx`, `PortBinding.jsx`, `swals.js` (alert ACS/form terkait), dan helper ACS lain jika ada.
+
+**Tes:** `test/acs*.test.js` — salin ke standalone bila folder `test/` dipakai di sana.
+
+**Build:** setelah ubah frontend, jalankan `npm run build` di masing-masing `frontend/` bila deploy memakai `dist/`.
+
+## Pengecualian yang disengaja
+
+`frontend/src/api/acs.js`: **BASE URL axios** boleh beda (`/acs` di billing vs `/api/acs` di standalone). Sinkronkan endpoint, fungsi, dan payload — **jangan** menimpa konstanta BASE tanpa sengaja.
+
+Fitur **non-GenieACS** (isolir, payment, hotspot penuh, dll.) **tidak** wajib disamakan ke standalone.
+
+## Verifikasi sebelum lapor selesai
+
+1. `diff -q` pasangan file GenieACS yang disentuh (kecuali pengecualian di atas).
+2. Backend: `node --check` / `npm test` di billing; di standalone minimal `npm test` untuk tes ACS jika ada.
+3. Sebutkan di ringkasan: file apa yang disinkronkan ke pohon mana.

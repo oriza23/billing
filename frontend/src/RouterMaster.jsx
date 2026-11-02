@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import './PppoeProfil.css'
 import './RouterMaster.css'
 
@@ -108,19 +109,12 @@ function RouterMaster() {
     setIsRouterModalOpen(true)
   }
 
-  function notifySuccess(text) {
-    Swal.fire({
-      icon: 'success',
-      title: 'Berhasil!',
-      text,
-      timer: 1500,
-      showConfirmButton: false,
-    })
+  function notifySuccess(text, refresh) {
+    return fireSuccess({ title: 'Berhasil!', text }, refresh)
   }
 
   function notifyError(errorResponse, fallback) {
-    Swal.fire({
-      icon: 'error',
+    return fireError({
       title: 'Gagal',
       text: errorResponse?.response?.data?.message || fallback,
     })
@@ -157,8 +151,7 @@ function RouterMaster() {
       }
       resetForm()
       setIsRouterModalOpen(false)
-      await fetchRouters()
-      notifySuccess('Data sukses diperbarui')
+      await notifySuccess('Data sukses diperbarui', () => { void fetchRouters() })
     } catch (requestError) {
       notifyError(requestError, editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan router.')
     } finally {
@@ -186,8 +179,7 @@ function RouterMaster() {
         resetForm()
         setIsRouterModalOpen(false)
       }
-      await Promise.all([fetchRouters(), fetchServers()])
-      notifySuccess('Data sukses diperbarui')
+      await notifySuccess('Data sukses diperbarui', () => { void Promise.all([fetchRouters(), fetchServers()]) })
     } catch (requestError) {
       notifyError(requestError, 'Gagal menghapus router.')
     } finally {
@@ -239,8 +231,7 @@ function RouterMaster() {
       })
       // Router dan jenis dipertahankan supaya beberapa server bisa diinput berurutan.
       setServerForm((current) => ({ ...current, nama: '' }))
-      await fetchServers()
-      notifySuccess('Server berhasil disimpan')
+      await notifySuccess('Server berhasil disimpan', () => { void fetchServers() })
     } catch (requestError) {
       notifyError(requestError, 'Gagal menyimpan server.')
     } finally {
@@ -272,8 +263,7 @@ function RouterMaster() {
         nama,
       })
       closeEditServerModal()
-      await fetchServers()
-      notifySuccess('Server berhasil diperbarui')
+      await notifySuccess('Server berhasil diperbarui', () => { void fetchServers() })
     } catch (requestError) {
       notifyError(requestError, 'Gagal menyimpan perubahan server.')
     } finally {
@@ -297,8 +287,7 @@ function RouterMaster() {
     setDeletingServerId(item.id)
     try {
       await api.delete(`${SERVER_URL}/${item.id}`)
-      await fetchServers()
-      notifySuccess('Server berhasil dihapus')
+      await notifySuccess('Server berhasil dihapus', () => { void fetchServers() })
     } catch (requestError) {
       notifyError(requestError, 'Gagal menghapus server.')
     } finally {

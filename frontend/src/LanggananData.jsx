@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import {
   Ban,
   CalendarPlus,
@@ -422,23 +423,16 @@ function LanggananData() {
     try {
       const payload = payloadFromForm()
       await api.put(`${API}/${encodeURIComponent(editingId)}`, payload)
-      await loadData()
       setSelectedIds([])
-      Swal.fire({
-        icon: 'success',
-        title: 'Berhasil',
-        text: 'Data langganan berhasil diperbarui.',
-        timer: 1500,
-        showConfirmButton: false,
-      })
       if (returnTo) {
         navigate(returnTo, { replace: true })
       } else {
         setIsModalOpen(false)
         resetForm()
       }
+      await fireSuccess({ title: 'Berhasil', text: 'Data langganan berhasil diperbarui.' }, () => { void loadData() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal diperbarui.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Data langganan gagal diperbarui.' })
     } finally {
       setSaving(false)
     }
@@ -469,17 +463,10 @@ function LanggananData() {
     })
     try {
       await Promise.all(selectedRows.map((item) => api.delete(`${API}/${encodeURIComponent(item.id)}`)))
-      await loadData()
       setSelectedIds([])
-      Swal.fire({
-        icon: 'success',
-        title: 'Terhapus',
-        text: 'Data langganan berhasil dihapus.',
-        timer: 1500,
-        showConfirmButton: false,
-      })
+      await fireSuccess({ title: 'Terhapus', text: 'Data langganan berhasil dihapus.' }, () => { void loadData() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data langganan gagal dihapus.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Data langganan gagal dihapus.' })
     }
   }
 
@@ -508,17 +495,12 @@ function LanggananData() {
         ? `/buka-isolir/${encodeURIComponent(item.id)}`
         : `/isolir/${encodeURIComponent(item.id)}`
       const response = await api.post(path)
-      void Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Berhasil',
         text: response.data?.message || 'Status pelanggan diperbarui.',
-        timer: 1500,
-        showConfirmButton: false,
-      })
-      await loadData()
+      }, () => { void loadData() })
     } catch (requestError) {
-      Swal.fire({
-        icon: 'error',
+      fireError({
         title: 'Gagal',
         text: errorMessage(requestError, 'Gagal mengubah status isolir pelanggan.'),
       })
@@ -548,17 +530,10 @@ function LanggananData() {
         `${API}/${encodeURIComponent(item.id)}`,
         { ...formFromRow(item), status, profil_id: item.profil_id || null },
       )))
-      await loadData()
       setSelectedIds([])
-      Swal.fire({
-        icon: 'success',
-        title: 'Berhasil',
-        text: `Status diubah menjadi ${status}.`,
-        timer: 1500,
-        showConfirmButton: false,
-      })
+      await fireSuccess({ title: 'Berhasil', text: `Status diubah menjadi ${status}.` }, () => { void loadData() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Status gagal diubah.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Status gagal diubah.' })
     }
   }
 

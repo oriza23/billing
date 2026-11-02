@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import api from './api/axios.js'
 import ServerPagination from './ServerPagination.jsx'
 import Swal from 'sweetalert2'
+import { fireError, fireSuccess } from './swals.js'
 import * as XLSX from 'xlsx'
 import { Download, KeyRound, LogIn, Menu, Plus, Search, X } from 'lucide-react'
 
@@ -298,16 +299,9 @@ function DataPelanggan({ open, onClose, variant = 'overlay' }) {
     }
     try {
       await api.put(`${API}/bulk-status`, { ids: selectedRows, status })
-      await refreshRows()
-      Swal.fire({
-        icon: 'success',
-        title: 'Berhasil',
-        text: `Status diubah menjadi ${status}.`,
-        timer: 1500,
-        showConfirmButton: false,
-      })
+      await fireSuccess({ title: 'Berhasil', text: `Status diubah menjadi ${status}.` }, () => { void refreshRows() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Status gagal diubah.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Status gagal diubah.' })
     }
   }
 
@@ -331,16 +325,9 @@ function DataPelanggan({ open, onClose, variant = 'overlay' }) {
     }
     try {
       await api.delete(`${API}/bulk-delete`, { data: { ids: selectedRows } })
-      await refreshRows()
-      Swal.fire({
-        icon: 'success',
-        title: 'Terhapus',
-        text: 'Pelanggan terpilih sudah dihapus.',
-        timer: 1500,
-        showConfirmButton: false,
-      })
+      await fireSuccess({ title: 'Terhapus', text: 'Pelanggan terpilih sudah dihapus.' }, () => { void refreshRows() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Pelanggan gagal dihapus.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Pelanggan gagal dihapus.' })
     }
   }
 
@@ -414,18 +401,14 @@ function DataPelanggan({ open, onClose, variant = 'overlay' }) {
       setForm(emptyForm())
       setIsFormOpen(false)
       setCurrentPage(1)
-      await loadData()
-      Swal.fire({
-        icon: 'success',
+      await fireSuccess({
         title: 'Berhasil',
         text: response.data?.user_id
           ? `Pelanggan disimpan dengan User ID ${response.data.user_id}.`
           : 'Data pelanggan berhasil disimpan.',
-        timer: 1600,
-        showConfirmButton: false,
-      })
+      }, () => { void loadData() })
     } catch (requestError) {
-      Swal.fire('Gagal', requestError.response?.data?.message || 'Data pelanggan gagal disimpan.', 'error')
+      fireError({ title: 'Gagal', text: requestError.response?.data?.message || 'Data pelanggan gagal disimpan.' })
     } finally {
       setSaving(false)
     }

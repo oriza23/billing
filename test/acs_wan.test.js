@@ -137,8 +137,106 @@ test('WAN PPP: Fiberhome tidak mengirim ...WANPPPConnection.{i}.Name sama sekali
   assert.equal(plan.fields.includes('connectionName'), false);
   const userPicked = planPpp({ deviceType: 'Fiberhome', connectionName: '' }, 'ZTE');
   assert.deepEqual(userPicked.connectionName, []);
-  const detected = planPpp({ deviceType: 'ZTE', connectionName: 'x' }, 'FiberHome');
+  const detected = planPpp({ deviceType: 'ZTE', connectionName: 'Otomatis' }, 'FiberHome');
   assert.deepEqual(detected.connectionName, []);
+});
+
+// Aturan TR-098 Fiberhome HG6145D2 (diverifikasi pada pohon 19 ONU asli di GenieACS).
+const FH_CONN = 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.';
+// Pohon instance baru yang masih sparse: hanya link config, belum ada leaf PPP.
+const FH_SPARSE = ['WANPPPConnection', 'X_FH_WANGponLinkConfig', 'X_FH_WANGponLinkConfig.VLANID', 'VLANID', 'Mode', 'Enable'];
+// Pohon penuh: PPP sudah punya VLANID di level PPP.
+const FH_FULL = ['WANPPPConnection.Username', 'WANPPPConnection.ConnectionType', 'WANPPPConnection.VLANID',
+  'WANPPPConnection.VLANEnable', 'WANPPPConnection.X_FH_LanInterface', 'X_FH_WANGponLinkConfig.VLANID'];
+// Firmware Fiberhome lama: PPP terisi tetapi VLAN hanya ada di link config.
+const FH_LEGACY = ['WANPPPConnection.Username', 'WANPPPConnection.ConnectionType', 'X_FH_WANGponLinkConfig.VLANID'];
+
+function planFh(extra, knownLeaves, manufacturer = 'FiberHome') {
+  const parsed = parseWanPpp(pppBody({ deviceType: 'Fiberhome', connectionName: '', vlanStatus: true, vlanId: 2033, ports: ['LAN1', 'SSID1'], ...extra }));
+  assert.equal(parsed.error, undefined);
+  return planWanPpp({
+    values: parsed.value,
+    manufacturer,
+    pppPath: PPP_PATH,
+    connectionPath: FH_CONN,
+    accessType: 'GPON',
+    knownLeaves,
+    dataModel: 'InternetGatewayDevice',
+  });
+}
+
+const valueOf = (plan, leaf) => (batchWanParameters(plan).find(([path]) => path === `${PPP_PATH}${leaf}`) || [])[1];
+
+test('Fiberhome: pppoe_routed -> IP_Routed, pppoe_bridged -> PPPoE_Bridged', () => {
+  assert.equal(valueOf(planFh({ connectionType: 'pppoe_routed' }, FH_SPARSE), 'ConnectionType'), 'IP_Routed');
+  assert.equal(valueOf(planFh({ connectionType: 'pppoe_bridged' }, FH_SPARSE), 'ConnectionType'), 'PPPoE_Bridged');
+  // Pilihan user menang atas merek ONU yang terbaca.
+  assert.equal(valueOf(planFh({ connectionType: 'pppoe_routed' }, FH_SPARSE, 'ZTE'), 'ConnectionType'), 'IP_Routed');
+  // Merek lain tidak berubah.
+  const cdata = planPpp({ connectionType: 'pppoe_routed' }, 'C-Data');
+  assert.equal(valueOf(cdata, 'ConnectionType'), 'PPPoE_Routed');
+});
+
+test('Fiberhome PPP: parameter wajib (Enable, Username, Password, NAT) dan NAT hanya untuk routed', () => {
+  const routed = planFh({ connectionType: 'pppoe_routed', natStatus: true }, FH_SPARSE);
+  assert.equal(valueOf(routed, 'Enable'), true);
+  assert.equal(valueOf(routed, 'Username'), 'budi@net');
+  assert.equal(valueOf(routed, 'Password'), 'rahasia');
+  assert.equal(valueOf(routed, 'NATEnabled'), true);
+  const bridged = planFh({ connectionType: 'pppoe_bridged', natStatus: true }, FH_SPARSE);
+  assert.equal(valueOf(bridged, 'NATEnabled'), false);
+  // Bridge tidak punya autentikasi PPPoE.
+  assert.equal(valueOf(bridged, 'Username'), undefined);
+});
+
+test('Fiberhome PPP: VLAN ditulis di WANPPPConnection, bukan link config / X_FH_VLANID', () => {
+  for (const leaves of [FH_SPARSE, FH_FULL]) {
+    const plan = planFh({ connectionType: 'pppoe_routed', priority: 3 }, leaves);
+    assert.equal(valueOf(plan, 'VLANEnable'), true);
+    assert.equal(valueOf(plan, 'VLANID'), 2033);
+    assert.equal(valueOf(plan, 'X_FH_802-1pMark'), 3);
+    assert.equal(valueOf(plan, 'X_FH_ServiceList'), 'INTERNET');
+    const paths = batchWanParameters(plan).map(([path]) => path);
+    assert.equal(paths.some((path) => /LinkConfig|X_FH_VLANID|VlanMuxID/.test(path)), false);
+  }
+  const noVlan = planFh({ connectionType: 'pppoe_routed', vlanStatus: false }, FH_SPARSE);
+  assert.equal(valueOf(noVlan, 'VLANID'), undefined);
+});
+
+test('Fiberhome PPP: firmware lama tanpa VLANID di level PPP memakai link config', () => {
+  const plan = planFh({ connectionType: 'pppoe_routed' }, FH_LEGACY);
+  const paths = batchWanParameters(plan).map(([path]) => path);
+  assert.ok(paths.includes(`${FH_CONN}X_FH_WANGponLinkConfig.VLANID`));
+  assert.equal(valueOf(plan, 'VLANID'), undefined);
+});
+
+test('Fiberhome PPP: port binding ke X_FH_LanInterface (daftar path dipisah koma)', () => {
+  const expected = [
+    'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1',
+    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1',
+  ].join(',');
+  for (const leaves of [FH_SPARSE, FH_FULL]) {
+    const plan = planFh({ connectionType: 'pppoe_routed' }, leaves);
+    assert.equal(valueOf(plan, 'X_FH_LanInterface'), expected);
+    assert.equal(valueOf(plan, 'X_CT-COM_LanInterface'), undefined);
+    assert.ok(plan.fields.includes('ports'));
+  }
+  // Firmware China-Telecom yang hanya punya X_CT-COM_LanInterface tetap terlayani.
+  // collectTreeMeta selalu memuat nama polos dan nama berprefiks.
+  const ct = planFh({ connectionType: 'pppoe_bridged' }, [...FH_FULL.filter((n) => !/LanInterface/.test(n)), 'X_CT-COM_LanInterface', 'WANPPPConnection.X_CT-COM_LanInterface']);
+  assert.equal(valueOf(ct, 'X_CT-COM_LanInterface'), expected);
+  assert.equal(valueOf(ct, 'X_FH_LanInterface'), undefined);
+});
+
+test('Fiberhome PPP: Connection Name opsional; bila diisi dikirim sebagai task terpisah', () => {
+  const auto = planFh({ connectionType: 'pppoe_routed', connectionName: 'Otomatis' }, FH_SPARSE);
+  assert.deepEqual(auto.connectionName, []);
+  const named = planFh({ connectionType: 'pppoe_routed', connectionName: 'PPPOE-BUDI' }, FH_SPARSE);
+  assert.deepEqual(named.connectionName, [[`${PPP_PATH}Name`, 'PPPOE-BUDI', 'xsd:string']]);
+  assert.equal(hasName(batchWanParameters(named)), false);
+  assert.equal(named.fields[0], 'connectionName');
+  const tooLong = parseWanPpp(pppBody({ deviceType: 'Fiberhome', connectionName: 'x'.repeat(129) }));
+  assert.match(tooLong.error, /Connection Name/);
 });
 
 test('WAN PPP: ZTE/Huawei/ChinaMobile membawa Name terpisah dari batch utama', () => {

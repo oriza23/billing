@@ -28,6 +28,32 @@ test('nilai dropdown dipetakan ke ConnectionType TR-069', () => {
   assert.equal(CONNECTION_TYPE_TR069.pppoe_routed, 'PPPoE_Routed');
 });
 
+test('edit Fiberhome: nama koneksi di serviceList dipaksa INTERNET dan Name tidak ditulis', () => {
+  const parsed = parseWanPpp(pppBody({
+    deviceType: 'Fiberhome',
+    wanPath: 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.',
+    connectionName: '2_INTERNET_R_VID_2033',
+    serviceList: '2_INTERNET_R_VID_2033',
+    connectionType: 'pppoe_routed',
+  }));
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.value.serviceList, 'INTERNET');
+  assert.equal(parsed.value.connectionName, '');
+  const plan = planWanPpp({
+    values: parsed.value,
+    manufacturer: 'FiberHome',
+    pppPath: PPP_PATH,
+    connectionPath: 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.',
+    knownLeaves: ['WANPPPConnection.Username', 'WANPPPConnection.X_FH_ServiceList', 'WANPPPConnection.VLANID'],
+    dataModel: 'InternetGatewayDevice',
+  });
+  const rows = batchWanParameters(plan);
+  assert.equal(rows.some((row) => String(row[0]).endsWith('.Name')), false);
+  assert.equal(plan.connectionName.length, 0);
+  const service = rows.find((row) => String(row[0]).endsWith('X_FH_ServiceList'));
+  assert.equal(service[1], 'INTERNET');
+});
+
 test('parseWanPpp menolak isian tanpa device', () => {
   const parsed = parseWanPpp({});
   assert.ok(parsed.error);
@@ -226,6 +252,33 @@ test('Fiberhome PPP: port binding ke X_FH_LanInterface (daftar path dipisah koma
   const ct = planFh({ connectionType: 'pppoe_bridged' }, [...FH_FULL.filter((n) => !/LanInterface/.test(n)), 'X_CT-COM_LanInterface', 'WANPPPConnection.X_CT-COM_LanInterface']);
   assert.equal(valueOf(ct, 'X_CT-COM_LanInterface'), expected);
   assert.equal(valueOf(ct, 'X_FH_LanInterface'), undefined);
+});
+
+test('Edit Fiberhome: uncheck sebagian menulis ulang string; uncheck semua tidak mengirim ""', () => {
+  const lan = (index) => `InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.${index}`;
+  const both = planFh({
+    wanPath: PPP_PATH,
+    connectionType: 'pppoe_routed',
+    ports: ['LAN1', 'LAN2'],
+  }, FH_FULL);
+  assert.equal(valueOf(both, 'X_FH_LanInterface'), `${lan(1)},${lan(2)}`);
+  const onlyLan2 = planFh({
+    wanPath: PPP_PATH,
+    connectionType: 'pppoe_routed',
+    ports: ['LAN2'],
+  }, FH_FULL);
+  assert.equal(valueOf(onlyLan2, 'X_FH_LanInterface'), lan(2));
+  assert.equal(onlyLan2.bindClearSkipped, false);
+  const cleared = planFh({
+    wanPath: PPP_PATH,
+    connectionType: 'pppoe_routed',
+    ports: [],
+  }, FH_FULL);
+  assert.equal(valueOf(cleared, 'X_FH_LanInterface'), undefined);
+  assert.equal(cleared.bindClearSkipped, true);
+  const created = planFh({ connectionType: 'pppoe_routed', ports: [] }, FH_FULL);
+  assert.equal(valueOf(created, 'X_FH_LanInterface'), undefined);
+  assert.equal(created.bindClearSkipped, false);
 });
 
 test('Fiberhome PPP: Connection Name opsional; bila diisi dikirim sebagai task terpisah', () => {

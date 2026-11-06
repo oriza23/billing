@@ -531,12 +531,13 @@ const WANS_PROJECTION = [
 const MAX_WANS = 32;
 
 const SERVICE_KEYS = [
+  'X_FH_ServiceList',
+  'X_ZTE-COM_ServiceList',
   'X_CT-COM_ServiceList',
   'X_CMCC_ServiceList',
   'X_CU_ServiceList',
   'X_HW_SERVICELIST',
   'X_BROADCOM_COM_ServiceName',
-  'X_BROADCOM_COM_IfName',
 ];
 
 const BIND_KEYS = [
@@ -664,6 +665,50 @@ function bindingStringOf(data) {
   return huaweiBindString(data?.X_HW_LANBIND);
 }
 
+// String binding (path TR-098 atau token LAN1/SSID1) -> label checkbox. WAN_PPP_1 dan token lain diabaikan.
+function boundPortLabels(bindString) {
+  const text = String(bindString || '');
+  if (!text || text === '-') {
+    return [];
+  }
+  const labels = [];
+  for (let index = 1; index <= 4; index += 1) {
+    const path = new RegExp(`LANEthernetInterfaceConfig\\.${index}(?!\\d)`);
+    const token = new RegExp(`(?:^|[,;\\s])LAN${index}(?!\\d)`, 'i');
+    if (path.test(text) || token.test(text)) {
+      labels.push(`LAN${index}`);
+    }
+  }
+  for (let index = 1; index <= 8; index += 1) {
+    const path = new RegExp(`WLANConfiguration\\.${index}(?!\\d)`);
+    const token = new RegExp(`(?:^|[,;\\s])SSID${index}(?!\\d)`, 'i');
+    if (path.test(text) || token.test(text)) {
+      labels.push(`SSID${index}`);
+    }
+  }
+  return labels;
+}
+
+const PORT_LABEL_ORDER = [
+  ...[1, 2, 3, 4].map((index) => `LAN${index}`),
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map((index) => `SSID${index}`),
+];
+
+// Gabungan port yang sudah terikat pada seluruh WAN modem ini, urutan LAN lalu SSID.
+function allUsedPortsOf(wans) {
+  const used = new Set();
+  for (const wan of Array.isArray(wans) ? wans : []) {
+    const ports = wan?.boundPorts || wan?.bound_ports || [];
+    for (const label of ports) {
+      const name = String(label || '').trim().toUpperCase();
+      if (PORT_LABEL_ORDER.includes(name)) {
+        used.add(name);
+      }
+    }
+  }
+  return PORT_LABEL_ORDER.filter((label) => used.has(label));
+}
+
 function highestIndex(node) {
   return numericKeys(node).reduce((max, key) => Math.max(max, parseInt(key, 10) || 0), 0);
 }
@@ -707,7 +752,8 @@ function connectionRecord(id, kind, data, parent, fullPath) {
     password: ppp ? maskedSecret(data?.Password?._value) : '-',
     vlanStatus: vlanStatusOf(data, vlanId),
     vlanId: vlanId || '-',
-    service: firstLeaf(data, SERVICE_KEYS) || leafText(data, 'Name') || '-',
+    // Jangan jatuhkan ke Name: Fiberhome menamai koneksi "2_INTERNET_R_VID_2033", itu bukan Service List.
+    service: firstLeaf(data, SERVICE_KEYS) || '-',
     dns: leafText(data, 'DNSServers') || '-',
     connTrigger: leafText(data, 'ConnectionTrigger') || 'AlwaysOn',
     nat: enabledLabel(data?.NATEnabled?._value),
@@ -715,8 +761,13 @@ function connectionRecord(id, kind, data, parent, fullPath) {
     mac: leafText(data, 'MACAddress') || '-',
     connType: leafText(data, 'ConnectionType') || (ppp ? 'PPPoE' : 'IP_Routed'),
     uptime: leafText(data, 'Uptime') || '0',
-    portBind: bindingStringOf(data),
+    ...bindingFields(bindingStringOf(data)),
   };
+}
+
+function bindingFields(portBind) {
+  const boundPorts = boundPortLabels(portBind);
+  return { portBind, boundPorts, bound_ports: boundPorts };
 }
 
 function wansTr098(igd) {
@@ -835,6 +886,7 @@ function wansTr181(device) {
       mac,
       connType: 'PPPoE',
       uptime: leafText(data, 'LastChange') || '0',
+      ...bindingFields(''),
     });
   }
 
@@ -868,6 +920,7 @@ function wansTr181(device) {
       mac: leafText(iface, 'MACAddress') || '-',
       connType: leafText(iface, 'Type') || 'IP_Routed',
       uptime: '0',
+      ...bindingFields(''),
     });
   }
   return wans;
@@ -938,6 +991,7 @@ module.exports = {
   extractHosts,
   extractWlans,
   extractWans,
+  allUsedPortsOf,
   wanFirmwareProfile,
   wanStatusRefreshTargets,
   ssidCountOf,

@@ -124,12 +124,35 @@ function readConnectionName(body, deviceType) {
   return readText(raw, 128);
 }
 
+// Nama otomatis Fiberhome, mis. "2_INTERNET_R_VID_2033". Bukan nilai Service List.
+function looksLikeOnuConnectionName(value) {
+  const text = String(value || '').trim();
+  return /^\d+_/.test(text) || /_VID_/i.test(text);
+}
+
+// Service List form. Fiberhome: bila yang datang adalah nama koneksi (salah petakan di UI lama),
+// paksa INTERNET. Nilai sah (INTERNET, TR069, …) tetap dipakai.
+function readServiceList(body, deviceType) {
+  const raw = typeof body?.serviceList === 'string' ? body.serviceList.trim() : '';
+  if (SERVICE_LIST.includes(raw)) {
+    return { serviceList: raw };
+  }
+  const upper = raw.toUpperCase();
+  if (SERVICE_LIST.includes(upper)) {
+    return { serviceList: upper };
+  }
+  if (deviceType === 'fiberhome' && (!raw || looksLikeOnuConnectionName(raw))) {
+    return { serviceList: 'INTERNET' };
+  }
+  return { error: 'Service List tidak valid' };
+}
+
 // Connection Name tidak ikut batch utama. Dikirim terpisah (Safe-Write) setelah Username/Password/VLAN
 // berhasil, supaya Name yang read-only/ditolak tidak menggagalkan parameter utama.
 function connectionNameRows(basePath, values, manufacturer) {
   const name = String(values?.connectionName || '').trim();
   const isAuto = skipConnectionName({ deviceType: values?.deviceType, manufacturer: manufacturer || values?.manufacturer });
-  if (isAuto && name.toLowerCase() === FIBERHOME_AUTO_NAME) {
+  if (isAuto && (values?.wanPath || name.toLowerCase() === FIBERHOME_AUTO_NAME)) {
     return [];
   }
   return name ? [[`${basePath}Name`, name, 'xsd:string']] : [];
@@ -227,18 +250,23 @@ function parseWanPpp(body) {
     return { error: deviceTypeError.error };
   }
   const { deviceType } = deviceTypeError;
-  const connectionName = readConnectionName(body, deviceType);
+  let connectionName = readConnectionName(body, deviceType);
   if (connectionName === null || (deviceType !== 'fiberhome' && !connectionName)) {
     return { error: 'Connection Name wajib diisi (maksimal 128 karakter)' };
+  }
+  // Edit Fiberhome: nama instance (2_INTERNET_R_VID_…) dibuat ONT. Jangan ditulis ulang.
+  if (deviceType === 'fiberhome' && wanPath) {
+    connectionName = '';
   }
   if (typeof body?.enableConnection !== 'boolean' || typeof body?.natStatus !== 'boolean' || typeof body?.vlanStatus !== 'boolean') {
     return { error: 'Status koneksi, NAT, dan VLAN harus berupa true atau false' };
   }
 
-  const serviceList = typeof body?.serviceList === 'string' ? body.serviceList.trim() : '';
-  if (!SERVICE_LIST.includes(serviceList)) {
-    return { error: 'Service List tidak valid' };
+  const serviceRead = readServiceList(body, deviceType);
+  if (serviceRead.error) {
+    return { error: serviceRead.error };
   }
+  const { serviceList } = serviceRead;
   const connectionType = normalizeConnectionType(body?.connectionType);
   if (!PPP_UI_TYPES.includes(connectionType)) {
     return { error: 'Connection Type tidak valid' };
@@ -350,6 +378,29 @@ function accessKind(accessType) {
 
 function selectedLanInterfaces(ports) {
   return PORT_KEYS.filter((key) => ports[key]).map((key) => LAN_INTERFACE[key]).join(',');
+}
+
+// Array ['LAN1'] atau peta { lan1: true } -> seluruh master port, yang tidak dicentang = false.
+function flagsFromPorts(ports) {
+  const flags = {};
+  for (const key of PORT_KEYS) {
+    flags[key] = false;
+  }
+  if (Array.isArray(ports)) {
+    for (const item of ports) {
+      const key = String(item || '').trim().toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(flags, key)) {
+        flags[key] = true;
+      }
+    }
+    return flags;
+  }
+  if (ports && typeof ports === 'object') {
+    for (const key of PORT_KEYS) {
+      flags[key] = ports[key] === true;
+    }
+  }
+  return flags;
 }
 
 const PORT_BIND_ORDER = [
@@ -476,18 +527,22 @@ function parseWanIp(body) {
     return { error: deviceTypeError.error };
   }
   const { deviceType } = deviceTypeError;
-  const connectionName = readConnectionName(body, deviceType);
+  let connectionName = readConnectionName(body, deviceType);
   if (connectionName === null || (deviceType !== 'fiberhome' && !connectionName)) {
     return { error: 'Connection Name wajib diisi (maksimal 128 karakter)' };
+  }
+  if (deviceType === 'fiberhome' && wanPath) {
+    connectionName = '';
   }
   if (typeof body?.enableConnection !== 'boolean' || typeof body?.vlanStatus !== 'boolean') {
     return { error: 'Status koneksi dan VLAN harus berupa true atau false' };
   }
 
-  const serviceList = typeof body?.serviceList === 'string' ? body.serviceList.trim() : '';
-  if (!SERVICE_LIST.includes(serviceList)) {
-    return { error: 'Service List tidak valid' };
+  const serviceRead = readServiceList(body, deviceType);
+  if (serviceRead.error) {
+    return { error: serviceRead.error };
   }
+  const { serviceList } = serviceRead;
   const connectionType = normalizeIpConnectionType(body?.connectionType);
   if (!IP_CONNECTION_TYPES.includes(connectionType)) {
     return { error: 'Connection Type tidak valid' };
@@ -592,32 +647,16 @@ function ipCoreParameters(ipPath, values) {
 }
 
 function ipBindParameters(profile, ctx) {
-  if (profile === 'huawei') {
-    const baseLabels = new Set(['LAN1', 'LAN2', 'LAN3', 'LAN4', 'SSID1', 'SSID2', 'SSID3', 'SSID4']);
-    return PORT_BIND_ORDER
-      .filter(([label]) => baseLabels.has(label) || ctx.ports.includes(label))
-      .map(([label]) => [
-        `${ctx.pppPath}X_HW_LANBIND.${HUAWEI_BIND_LABEL[label]}`,
-        ctx.ports.includes(label),
-        'xsd:boolean',
-      ]);
-  }
-  const lan = generatePortBindingString(ctx.ports, {
-    manufacturer: ctx.manufacturer,
-    modelName: ctx.modelName,
-    wanIpPath: ctx.pppPath,
-  });
-  if (!lan) {
-    return [];
-  }
-  const name = profile === 'zte' ? 'X_ZTE-COM_LanInterface' : 'X_CT-COM_LanInterface';
-  return [[`${ctx.pppPath}${name}`, lan, 'xsd:string']];
+  return bindParameters(profile, ctx);
 }
 
 function planWanIp({ values, manufacturer, modelName, productModel, productClass, accessType, ipPath, connectionPath, knownLeaves, deviceLeaves, readOnlyLeaves, wanIndexValues, dataModel }) {
-  const profile = dataModel === 'Device' || String(ipPath || '').startsWith('Device.')
+  let profile = dataModel === 'Device' || String(ipPath || '').startsWith('Device.')
     ? 'tr181'
     : vendorProfile(manufacturer || values.manufacturer);
+  if (profile !== 'tr181' && normalizeDeviceType(values.deviceType) === 'fiberhome') {
+    profile = 'fiberhome';
+  }
   const resolvedModel = modelName || productModel || values.modelName || '';
   const vlanKind = profile === 'zte' ? detectZteVlanLink(knownLeaves) : null;
   const ctcomVariant = vlanKind === 'epon' || vlanKind === 'gpon';
@@ -658,8 +697,8 @@ function planWanIp({ values, manufacturer, modelName, productModel, productClass
       key: 'bind',
       label: 'port binding',
       optional: true,
-      parameterValues: profile === 'zte'
-        ? sanitizeParameterValues(ipBindParameters(bindProfile, ctx))
+      parameterValues: profile === 'zte' || profile === 'fiberhome'
+        ? preserveBindValues(ipBindParameters(profile === 'zte' ? bindProfile : profile, ctx))
         : finalizeParameters(ipBindParameters(profile, ctx), knownLeaves),
     },
   ];
@@ -679,6 +718,7 @@ function planWanIp({ values, manufacturer, modelName, productModel, productClass
     : [];
   return applyCmccDetection(applyWanIndexGuard({
     profile, ctcomVariant, vlanKind, fields, batches, connectionName, fallbackPayloads, singleAttempt: false, vlanBlocked: false, blockedMessage: '',
+    bindClearSkipped: Boolean(ctx.skipEmptyBind),
   }, ctcomWanIndexGuard({
     knownLeaves, readOnlyLeaves, wanIndexValues, vlanRequested: values.vlanStatus === true,
   })), ctx, {
@@ -721,6 +761,17 @@ function sanitizeParameterValues(parameterValues) {
   return parameterValues
     .filter((row) => Array.isArray(row) && row.length >= 2 && !isEmptyParameterValue(row[1]))
     .map(([path, value, type]) => [path, castByType(value, type), type]);
+}
+
+// Binding saat edit boleh berisi string kosong: itu perintah unbind (hapus seluruh port).
+// sanitizeParameterValues membuang string kosong, jadi uncheck semua tidak pernah sampai ke ONU.
+function preserveBindValues(parameterValues) {
+  if (!Array.isArray(parameterValues)) {
+    return [];
+  }
+  return parameterValues
+    .filter((row) => Array.isArray(row) && row.length >= 2 && row[0])
+    .map(([path, value, type]) => [path, value === '' ? '' : castByType(value, type), type]);
 }
 
 function isTreeNode(value) {
@@ -1338,22 +1389,47 @@ function fallbackProfile(profile) {
 }
 
 function bindParameters(profile, ctx) {
-  const lan = selectedLanInterfaces(ctx.ports);
+  // Master port: yang dicentang diaktifkan, yang tidak dicentang dimatikan secara eksplisit.
+  const flags = flagsFromPorts(ctx.ports);
+  if (profile === 'huawei') {
+    const keys = ctx.isEdit
+      ? PORT_KEYS
+      : PORT_KEYS.filter((key) => !/^ssid[5-8]$/.test(key) || flags[key]);
+    return keys.map((key) => [
+      `${ctx.pppPath}X_HW_LANBIND.${HUAWEI_BIND[key]}`,
+      flags[key],
+      'xsd:boolean',
+    ]);
+  }
+  const paths = [];
+  for (const key of PORT_KEYS) {
+    if (flags[key]) {
+      paths.push(LAN_INTERFACE[key]);
+    }
+  }
+  // ZTE F67x menambahkan path koneksi itu sendiri di ujung string, hanya bila masih ada port.
+  if (profile === 'zte' && paths.length > 0 && isF67Family(ctx.manufacturer, ctx.modelName)) {
+    const self = String(ctx.pppPath || '').trim().replace(/\.+$/, '');
+    if (self) {
+      paths.push(self);
+    }
+  }
+  const lan = paths.join(',');
+  // Buat WAN tanpa port: jangan kirim binding.
   if (!lan && !ctx.isEdit) {
     return [];
   }
-  if (profile === 'huawei') {
-    return PORT_KEYS.filter((key) => !/^ssid[5-8]$/.test(key) || ctx.ports[key]).map((key) => [
-      `${ctx.pppPath}X_HW_LANBIND.${HUAWEI_BIND[key]}`,
-      ctx.ports[key],
-      'xsd:boolean',
-    ]);
+  // Fiberhome mengabaikan "" pada X_FH_LanInterface dan tetap menyimpan binding lama.
+  // Jangan kirim string kosong: verifikasi akan melaporkan nilai berbeda. Unbind sebagian
+  // (mis. LAN1+LAN2 menjadi hanya LAN2) tetap menulis ulang string path yang tersisa.
+  if (!lan && profile === 'fiberhome') {
+    ctx.skipEmptyBind = true;
+    return [];
   }
   let name = 'X_CT-COM_LanInterface';
   if (profile === 'zte') {
     name = 'X_ZTE-COM_LanInterface';
   } else if (profile === 'fiberhome') {
-    // Dulu jatuh ke X_CT-COM_LanInterface yang tidak ada di Fiberhome, lalu dibuang diam-diam oleh filter leaf.
     name = fiberhomeLanLeaf(ctx.knownLeaves);
   }
   return [[`${ctx.pppPath}${name}`, lan, 'xsd:string']];
@@ -1410,11 +1486,9 @@ function planWanPpp({ values, manufacturer, productModel, productClass, accessTy
       key: 'bind',
       label: 'port binding',
       optional: true,
-      parameterValues: profile === 'zte'
-        ? sanitizeParameterValues(bindParameters(bindProfile, ctx))
-        : fiberhome
-          ? sanitizeParameterValues(bindParameters(profile, ctx))
-          : finalizeParameters(bindParameters(profile, ctx), knownLeaves),
+      parameterValues: profile === 'zte' || fiberhome
+        ? preserveBindValues(bindParameters(profile === 'zte' ? bindProfile : profile, ctx))
+        : finalizeParameters(bindParameters(profile, ctx), knownLeaves),
     },
   ];
   const connectionName = connectionNameRows(pppPath, values, manufacturer || values.manufacturer);
@@ -1438,6 +1512,7 @@ function planWanPpp({ values, manufacturer, productModel, productClass, accessTy
     : [];
   return applyCmccDetection(applyWanIndexGuard({
     profile, ctcomVariant, vlanKind, fields, batches, connectionName, fallbackPayloads, singleAttempt: false, vlanBlocked: false, blockedMessage: '',
+    bindClearSkipped: Boolean(ctx.skipEmptyBind),
   }, ctcomWanIndexGuard({
     knownLeaves, readOnlyLeaves, wanIndexValues, vlanRequested: values.vlanStatus === true,
   })), ctx, {
@@ -1454,7 +1529,7 @@ function zteVlanPayloads(batches, ctx, bindFn, primaryKind) {
           return { ...batch, parameterValues: sanitizeParameterValues(zteVendorForKind(ctx, kind)) };
         }
         if (batch.key === 'bind') {
-          return { ...batch, parameterValues: sanitizeParameterValues(bindFn(kind === 'zte' ? 'zte' : 'ctcom', ctx)) };
+          return { ...batch, parameterValues: preserveBindValues(bindFn(kind === 'zte' ? 'zte' : 'ctcom', ctx)) };
         }
         return batch;
       }),

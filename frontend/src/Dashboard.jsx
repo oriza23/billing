@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Swal from 'sweetalert2'
-import { KeyRound, LogOut, Menu, User } from 'lucide-react'
+import {
+  Activity,
+  ClipboardList,
+  CreditCard,
+  IdCard,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Network,
+  Router,
+  Settings,
+  Shield,
+  Ticket,
+  User,
+  Users,
+  WalletCards,
+  Wifi,
+} from 'lucide-react'
 import { clearSession, getUsername } from './api/auth.js'
 import ChangePasswordModal from './ChangePasswordModal.jsx'
 import AdminProfileModal from './AdminProfileModal.jsx'
@@ -10,30 +28,55 @@ import ServerClock from './ServerClock.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 
 const langgananMenu = [
-  { to: '/langganan/profil', label: 'Profil Langganan' },
+  { to: '/langganan/profil', label: 'Profil Langganan', icon: IdCard },
   // Form tambah dibuka dari tombol TAMBAH di Data Langganan, jadi menu ini tetap aktif di sana.
-  { to: '/langganan/data', label: 'Data Langganan', alsoActive: ['/langganan/tambah', '/langganan/registrasi'] },
-  { to: '/langganan/online', label: 'Langganan Online' },
+  { to: '/langganan/data', label: 'Data Langganan', icon: ClipboardList, alsoActive: ['/langganan/tambah', '/langganan/registrasi'] },
+  { to: '/langganan/online', label: 'Langganan Online', icon: Activity },
 ]
 
 const hotspotMenu = [
-  { to: '/dashboard/hotspot/profil', label: 'Profil Hotspot' },
-  { to: '/dashboard/hotspot/stok', label: 'Stok Voucher' },
-  { to: '/dashboard/hotspot/terjual', label: 'Voucher Terjual' },
-  { to: '/dashboard/hotspot/online', label: 'Voucher Online' },
+  { to: '/dashboard/hotspot/profil', label: 'Profil Hotspot', icon: Wifi },
+  { to: '/dashboard/hotspot/stok', label: 'Stok Voucher', icon: Ticket },
+  { to: '/dashboard/hotspot/terjual', label: 'Voucher Terjual', icon: WalletCards },
+  { to: '/dashboard/hotspot/online', label: 'Voucher Online', icon: Activity },
 ]
 
 const sistemMenu = [
-  { to: '/manajemen-admin', label: 'Manajemen Admin' },
-  { to: '/sistem/pengaturan', label: 'Pengaturan' },
-  { to: '/sistem/payment-gateway', label: 'Payment Gateway' },
+  { to: '/manajemen-admin', label: 'Manajemen Admin', icon: Shield },
+  { to: '/sistem/pengaturan', label: 'Pengaturan', icon: Settings },
+  { to: '/sistem/payment-gateway', label: 'Payment Gateway', icon: CreditCard },
 ]
 
 const navLinkClass = ({ isActive }) =>
   [
-    'flex h-11 w-full items-center justify-between rounded-xl px-3.5 text-left text-[15px] font-semibold text-sky-100 no-underline transition-colors duration-300',
+    'flex h-11 w-full items-center justify-between gap-3 rounded-xl px-3.5 text-left text-[15px] font-semibold text-sky-100 no-underline transition-colors duration-300',
     isActive ? 'bg-white/15 text-white shadow-[inset_3px_0_0_#67e8f9]' : 'hover:bg-white/10 hover:text-white',
   ].join(' ')
+
+function SidebarIcon({ icon: Icon }) {
+  if (!Icon) {
+    return null
+  }
+  return <Icon size={18} strokeWidth={2.1} className="shrink-0 text-sky-200/90" aria-hidden="true" />
+}
+
+function SidebarNavLink({ to, end, label, icon: Icon, alsoActive = [] }) {
+  const { pathname } = useLocation()
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) => navLinkClass({
+        isActive: isActive || alsoActive.some((path) => pathname.startsWith(path)),
+      })}
+    >
+      <span className="flex min-w-0 items-center gap-2.5">
+        <SidebarIcon icon={Icon} />
+        <span className="truncate">{label}</span>
+      </span>
+    </NavLink>
+  )
+}
 
 export function DashboardHome() {
   return (
@@ -54,19 +97,20 @@ export function DashboardHome() {
   )
 }
 
-function MenuGroup({ label, items, open, onToggle }) {
-  const { pathname } = useLocation()
-
+function MenuGroup({ label, icon: Icon, items, open, onToggle }) {
   return (
     <div>
       <button
         type="button"
-        className={`flex h-11 w-full cursor-pointer items-center justify-between rounded-xl border-0 bg-transparent px-3.5 text-left text-[15px] font-semibold transition-colors duration-300 ${open ? 'text-white' : 'text-sky-100 hover:bg-white/10 hover:text-white'}`}
+        className={`flex h-11 w-full cursor-pointer items-center justify-between gap-3 rounded-xl border-0 bg-transparent px-3.5 text-left text-[15px] font-semibold transition-colors duration-300 ${open ? 'text-white' : 'text-sky-100 hover:bg-white/10 hover:text-white'}`}
         aria-expanded={open}
         onClick={onToggle}
       >
-        <span>{label}</span>
-        <span className="text-lg leading-none text-sky-200" aria-hidden="true">
+        <span className="flex min-w-0 items-center gap-2.5">
+          <SidebarIcon icon={Icon} />
+          <span className="truncate">{label}</span>
+        </span>
+        <span className="shrink-0 text-lg leading-none text-sky-200" aria-hidden="true">
           {open ? '−' : '+'}
         </span>
       </button>
@@ -74,15 +118,13 @@ function MenuGroup({ label, items, open, onToggle }) {
       {open && (
         <div className="mt-0.5 mb-2 grid gap-1 pl-3">
           {items.map((item) => (
-            <NavLink
+            <SidebarNavLink
               key={item.to}
               to={item.to}
-              className={({ isActive }) => navLinkClass({
-                isActive: isActive || Boolean(item.alsoActive?.some((path) => pathname.startsWith(path))),
-              })}
-            >
-              {item.label}
-            </NavLink>
+              label={item.label}
+              icon={item.icon}
+              alsoActive={item.alsoActive}
+            />
           ))}
         </div>
       )}
@@ -295,29 +337,26 @@ function Dashboard() {
         <ServerClock />
 
         <nav className="grid flex-1 content-start gap-1.5 overflow-x-hidden overflow-y-auto pr-1 custom-sidebar-scrollbar" aria-label="Menu utama">
-          <NavLink to="/dashboard" end className={navLinkClass}>
-            Dashboard
-          </NavLink>
+          <SidebarNavLink to="/dashboard" end label="Dashboard" icon={LayoutDashboard} />
           <MenuGroup
             label="Langganan"
+            icon={Users}
             items={langgananMenu}
             open={openMenus.langganan}
             onToggle={() => toggleMenu('langganan')}
           />
           <MenuGroup
             label="Hotspot"
+            icon={Wifi}
             items={hotspotMenu}
             open={openMenus.hotspot}
             onToggle={() => toggleMenu('hotspot')}
           />
-          <NavLink to="/acs" className={navLinkClass}>
-            GenieACS
-          </NavLink>
-          <NavLink to="/router" className={navLinkClass}>
-            Router
-          </NavLink>
+          <SidebarNavLink to="/acs" label="GenieACS" icon={Network} />
+          <SidebarNavLink to="/router" label="Router" icon={Router} />
           <MenuGroup
             label="Sistem"
+            icon={Settings}
             items={sistemMenu}
             open={openMenus.sistem}
             onToggle={() => toggleMenu('sistem')}

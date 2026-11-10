@@ -47,6 +47,7 @@ import WanConfigModal, {
   portsOfWan,
   resolveDeviceType,
   wanFormFrom,
+  zteServiceControlVisible,
 } from './WanConfigModal.jsx'
 import {
   boundPortKeys,
@@ -2168,6 +2169,13 @@ function GenieAcs() {
         deviceType,
         // Fiberhome: nama opsional saat membuat (kosong = ONT menamai sendiri); saat edit tidak dikirim.
         connectionName: deviceType === 'Fiberhome' && editingPath ? '' : form.connectionName,
+        enableServiceControl: zteServiceControlVisible({
+          deviceType,
+          isPpp: true,
+          connectionType: form.connectionType,
+        })
+          ? Boolean(form.enableServiceControl)
+          : undefined,
         ports: orderedPorts(Array.isArray(form.selectedPorts) ? form.selectedPorts : []),
       })
       return { ok: true, partial: Boolean(result.partial), message: result.message }
@@ -2212,6 +2220,13 @@ function GenieAcs() {
         subnetMask: staticIp ? form.subnetMask : '',
         gateway: staticIp ? form.gateway : '',
         dnsServer: staticIp ? form.dnsServer : '',
+        enableServiceControl: zteServiceControlVisible({
+          deviceType,
+          isPpp: false,
+          connectionType: form.connectionType,
+        })
+          ? Boolean(form.enableServiceControl)
+          : undefined,
         ports: orderedPorts(Array.isArray(form.selectedPorts) ? form.selectedPorts : (Array.isArray(form.ports) ? form.ports : [])),
       })
       return { ok: true, partial: Boolean(result.partial), message: result.message }

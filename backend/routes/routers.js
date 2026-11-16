@@ -122,6 +122,63 @@ router.post('/:id/servers', requireAdmin, async (req, res) => {
   }
 });
 
+router.put('/servers/:serverId', requireAdmin, async (req, res) => {
+  const serverId = readId(req.params.serverId);
+  const routerId = readId(req.body?.router_id);
+  const jenis = readText(req.body?.jenis);
+  const nama = readText(req.body?.nama);
+
+  if (!serverId || !routerId || !JENIS_SERVER.includes(jenis)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Server, router, dan jenis server (hotspot atau pppoe) wajib dipilih',
+    });
+  }
+  if (!validServerName(nama)) {
+    return res.status(400).json({
+      success: false,
+      message: `Nama server wajib diisi, maksimal ${MAX_SERVER_NAME} karakter, dan tidak boleh "${ALL_SERVER}"`,
+    });
+  }
+
+  try {
+    const [routerRows] = await pool.execute('SELECT id FROM routers WHERE id = ? LIMIT 1', [routerId]);
+    if (routerRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Router tidak ditemukan',
+      });
+    }
+
+    const [result] = await pool.execute(
+      'UPDATE router_servers SET router_id = ?, jenis = ?, nama = ? WHERE id = ?',
+      [routerId, jenis, nama, serverId],
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Server tidak ditemukan',
+      });
+    }
+    return res.json({
+      success: true,
+      message: 'Server berhasil diperbarui',
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        success: false,
+        message: 'Server dengan nama itu sudah ada di router ini',
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menyimpan perubahan server',
+      error: error.message,
+    });
+  }
+});
+
 router.delete('/servers/:serverId', requireAdmin, async (req, res) => {
   const serverId = readId(req.params.serverId);
   if (!serverId) {

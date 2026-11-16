@@ -4,8 +4,15 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const acs = require('../acs');
+const { parseWlanUpdate, planWlanUpdate } = require('../acs_wlan');
+const { parseLanUpdate, planLanUpdate } = require('../acs_lan');
+const { parseWanPpp, parseWanIp, isCommitLoopFault } = require('../acs_wan');
+const { WanFlowError, addWanPpp, addWanIp } = require('../acs_wan_flow');
+const { parseZteWanRequest, zteBindingString } = require('../acs_zte_wan');
 const {
-  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, extractHosts, extractWlans, summarizeDevice,
+  LIVE_PROJECTION, HOSTS_PROJECTION, WLANS_PROJECTION, LAN_PROJECTION, WANS_PROJECTION,
+  extractHosts, extractWlans, extractWans, allUsedPortsOf, extractLanConfig, ssidCountOf, summarizeDevice,
+  wanFirmwareProfile, wanStatusRefreshTargets,
 } = require('../acs_summary');
 
 const router = express.Router();
@@ -148,6 +155,11 @@ async function liveBaseUrl(serverId) {
   return `http://${host}:${port}`;
 }
 
+function registeredTime(value) {
+  const time = new Date(value ?? 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
 router.get('/devices', async (req, res) => {
   const serverId = readId(req.query.server_id);
   if (!serverId) {
@@ -167,10 +179,12 @@ router.get('/devices', async (req, res) => {
     if (!Array.isArray(response.data)) {
       throw new Error('Format balasan NBI tidak dikenali');
     }
-    const cleanedData = response.data
+    const mappedDevices = response.data
       .filter((item) => item && item._id)
       .map(summarizeDevice);
-    return res.json(cleanedData);
+    // ONU terbaru terdaftar di atas. Tanpa tanggal dianggap paling lama.
+    const sortedDevices = mappedDevices.sort((a, b) => registeredTime(b.registered) - registeredTime(a.registered));
+    return res.json(sortedDevices);
   } catch (error) {
     console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
     return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
@@ -180,7 +194,9 @@ router.get('/devices', async (req, res) => {
 // Endpoint per perangkat (GET ...?server_id=..&id=<_id GenieACS>): mengambil subtree tertentu satu ONU
 // langsung dari NBI, lalu merangkumnya di backend. Dipanggil saat modal detail / tab dibuka,
 // bukan di daftar ONU (subtree-nya terlalu berat bila diambil untuk semua perangkat).
-function deviceDetailRoute(path, { projection, build, label, middlewares = [] }) {
+//   prepare (opsional): async ({ item, req, serverId, deviceId, reload }) => ({ item, extra }). Dipakai untuk
+//   langkah yang perlu menyentuh ONU sebelum membangun respons; `reload()` membaca ulang dokumen dari NBI.
+function deviceDetailRoute(path, { projection, build, label, middlewares = [], prepare = null }) {
   router.get(path, ...middlewares, async (req, res) => {
     const serverId = readId(req.query.server_id);
     const deviceId = typeof req.query.id === 'string' ? req.query.id.trim() : '';
@@ -197,15 +213,24 @@ function deviceDetailRoute(path, { projection, build, label, middlewares = [] })
         return fail(res, 404, 'Server ACS tidak ditemukan');
       }
 
-      const response = await axios.get(`${baseUrl}/devices/`, {
-        params: { query: JSON.stringify({ _id: deviceId }), projection },
-        timeout: LIVE_TIMEOUT_MS,
-      });
-      const item = Array.isArray(response.data) ? response.data[0] : null;
+      const readItem = async () => {
+        const response = await axios.get(`${baseUrl}/devices/`, {
+          params: { query: JSON.stringify({ _id: deviceId }), projection },
+          timeout: LIVE_TIMEOUT_MS,
+        });
+        return Array.isArray(response.data) ? response.data[0] : null;
+      };
+      let item = await readItem();
       if (!item) {
         return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
       }
-      return res.json(build(item));
+      let extra = {};
+      if (prepare) {
+        const prepared = await prepare({ item, req, serverId, deviceId, reload: readItem });
+        item = prepared.item || item;
+        extra = prepared.extra || {};
+      }
+      return res.json({ ...build(item), ...extra });
     } catch (error) {
       console.error(`Gagal mengambil ${label} dari GenieACS:`, error.code || error.message);
       return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
@@ -220,12 +245,346 @@ deviceDetailRoute('/devices/hosts', {
   label: 'host',
 });
 
+// Konfigurasi LAN (IP gateway, DHCP, DNS) -> { lanConfig: {...} }
+deviceDetailRoute('/devices/lan', {
+  projection: LAN_PROJECTION,
+  build: (item) => ({ lanConfig: extractLanConfig(item) }),
+  label: 'LAN',
+});
+
+// Daftar koneksi WAN -> { wans: [...] }. Sandi PPPoE disamarkan di ekstraksi.
+// Status koneksi sering kosong di cache GenieACS untuk Huawei lama dan firmware China Mobile/Telecom
+// (X_CT-COM / X_CMCC). Untuk perangkat itu, node WAN yang statusnya kosong dipaksa refreshObject dulu
+// sebelum respons dibangun. ?refresh=0 menonaktifkan, ?refresh=1 memaksa refresh semua node WAN.
+const WAN_REFRESH_COOLDOWN_MS = 60 * 1000;
+const WAN_REFRESH_BUDGET_MS = 8000;
+const wanRefreshedAt = new Map();
+
+function wanRefreshTargets(item, mode) {
+  const wans = extractWans(item);
+  if (mode === 'force') {
+    return wans.map((wan) => String(wan.fullPath || '').replace(/\.$/, '')).filter(Boolean).slice(0, 8);
+  }
+  return wanStatusRefreshTargets(wans);
+}
+
+async function prepareWanStatus({ item, req, serverId, deviceId, reload }) {
+  const flag = String(req.query.refresh ?? '');
+  if (flag === '0') {
+    return { item, extra: {} };
+  }
+  const mode = flag === '1' ? 'force' : 'auto';
+  const profile = wanFirmwareProfile(item);
+  if (mode === 'auto' && !profile.kind) {
+    return { item, extra: {} };
+  }
+  const targets = wanRefreshTargets(item, mode);
+  if (targets.length === 0) {
+    return { item, extra: {} };
+  }
+  const lastInform = item._lastInform ? new Date(item._lastInform) : null;
+  const online = Boolean(lastInform && lastInform >= acs.statusCutoffs().online);
+  const recent = Date.now() - (wanRefreshedAt.get(`${serverId}:${deviceId}`) || 0) < WAN_REFRESH_COOLDOWN_MS;
+  if (!online || (mode === 'auto' && recent)) {
+    return { item, extra: { statusRefresh: { attempted: false, reason: online ? 'cooldown' : 'offline' } } };
+  }
+
+  const server = await findServer(serverId).catch(() => null);
+  if (!server) {
+    return { item, extra: {} };
+  }
+  wanRefreshedAt.set(`${serverId}:${deviceId}`, Date.now());
+  try {
+    const refresh = await acs.refreshDeviceObjects(server, deviceId, targets, { budgetMs: WAN_REFRESH_BUDGET_MS });
+    const fresh = refresh.refreshed.length > 0 ? await reload() : null;
+    return {
+      item: fresh || item,
+      extra: { statusRefresh: { attempted: true, kind: profile.kind || 'manual', ...refresh } },
+    };
+  } catch (error) {
+    // Refresh hanya pemulus: kegagalannya tidak boleh menggagalkan pembacaan detail WAN.
+    console.warn(`[ACS wan-status] refresh ${deviceId}: ${error.message}`);
+    return { item, extra: { statusRefresh: { attempted: true, kind: profile.kind || 'manual', error: error.message } } };
+  }
+}
+
+deviceDetailRoute('/devices/wans', {
+  projection: WANS_PROJECTION,
+  build: (item) => {
+    const wans = extractWans(item);
+    const allUsedPorts = allUsedPortsOf(wans);
+    const zteAclServiceControl = wans[0]?.serviceControl || '-';
+    return {
+      wans,
+      zteAclServiceControl,
+      zte_acl_service_control: zteAclServiceControl,
+      allUsedPorts,
+      all_used_ports: allUsedPorts,
+      ssidCount: ssidCountOf(item),
+    };
+  },
+  label: 'WAN',
+  prepare: prepareWanStatus,
+});
+
 // Daftar WiFi -> { wlans: [...] }. Memuat sandi WiFi pelanggan, jadi hanya untuk admin.
 deviceDetailRoute('/devices/wlans', {
   projection: WLANS_PROJECTION,
   build: (item) => ({ wlans: extractWlans(item) }),
   label: 'WLAN',
   middlewares: [requireAdmin],
+});
+
+// ---- Update WLAN: push perubahan SSID / password / status / security ke ONU (setParameterValues) ----
+// Body: { server_id, deviceId (_id GenieACS), wlanId, ssid, password, status, security }.
+// Hanya admin. Hanya parameter yang berbeda dari konfigurasi saat ini yang dikirim.
+router.post('/update-wlan', requireAdmin, async (req, res) => {
+  const parsed = parseWlanUpdate(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const {
+    deviceId, wlanId, ssid, password, status, security,
+  } = parsed.value;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+
+    const target = await acs.readWlanTarget(server, deviceId, wlanId);
+    if (!target) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    if (target.model === 'Device') {
+      return fail(res, 400, 'ONU ini memakai data model TR-181; update WLAN baru mendukung TR-098 (InternetGatewayDevice)');
+    }
+    if (!target.wlanNode) {
+      return fail(res, 404, `WLAN ${wlanId} tidak ditemukan pada perangkat (coba Summon lalu muat ulang)`);
+    }
+
+    const manufacturer = typeof req.body?.manufacturer === 'string' ? req.body.manufacturer.slice(0, 100) : '';
+    const plan = planWlanUpdate({
+      wlanId, wlanNode: target.wlanNode, ssid, password, status, security, manufacturer,
+    });
+    if (plan.error) {
+      return fail(res, 400, plan.error);
+    }
+    const { parameterValues, changed } = plan;
+    const vendorPasswordValues = Array.isArray(plan.vendorPasswordValues) ? plan.vendorPasswordValues : [];
+    if (parameterValues.length === 0 && vendorPasswordValues.length === 0) {
+      return res.json({ success: true, message: 'Tidak ada perubahan untuk dikirim', changed });
+    }
+
+    let applied = true;
+    if (parameterValues.length > 0) {
+      const sent = await acs.sendSetParameterValues(server, deviceId, parameterValues);
+      applied = sent.applied;
+    }
+    if (vendorPasswordValues.length > 0) {
+      try {
+        await acs.sendSetParameterValues(server, deviceId, vendorPasswordValues, {
+          label: 'Fiberhome Password(WPA)+Password(WPA2)',
+        });
+        changed.push('password-wpa');
+      } catch (vendorError) {
+        console.warn(`[ACS update-wlan] sandi ganda Fiberhome dilewati: ${vendorError.message}`);
+      }
+    }
+    // Catatan audit tanpa nilai password.
+    console.log(`[ACS update-wlan] ${req.user?.username || '-'} ${server.host}:${server.port} ${deviceId} WLAN ${wlanId}: ${changed.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      changed,
+      message: applied
+        ? 'Perubahan WLAN diterapkan ke ONU'
+        : 'Perubahan WLAN masuk antrean GenieACS dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS update-wlan] ${deviceId} WLAN ${wlanId}: ${error.message}`);
+    const status502 = error instanceof acs.NbiError;
+    return fail(res, status502 ? 502 : 500, status502 ? error.message : 'Gagal mengirim perubahan WLAN');
+  }
+});
+
+// ---- Update LAN: push IP gateway / DHCP / DNS ke ONU (setParameterValues) -------------
+// Body: { server_id, deviceId (_id GenieACS), ip, subnet, dhcpEnabled, dhcpMin, dhcpMax, leaseTime, dns1, dns2, dns3 }.
+// Hanya admin. Hanya parameter yang berbeda dari konfigurasi saat ini yang dikirim.
+// Perubahan IP gateway selalu membawa IPInterfaceIPAddress dan IPRouters sekaligus.
+router.post('/update-lan', requireAdmin, async (req, res) => {
+  const parsed = parseLanUpdate(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const { value } = parsed;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+
+    const target = await acs.readLanTarget(server, value.deviceId);
+    if (!target) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    if (target.model === 'Device') {
+      return fail(res, 400, 'ONU ini memakai data model TR-181; update LAN baru mendukung TR-098 (InternetGatewayDevice)');
+    }
+    if (!target.lanNode?.IPInterface?.[1]?.IPInterfaceIPAddress) {
+      return fail(res, 404, 'Konfigurasi LAN tidak ditemukan pada perangkat (coba Summon lalu muat ulang)');
+    }
+
+    const { parameterValues, changed } = planLanUpdate({ lanNode: target.lanNode, values: value });
+    if (parameterValues.length === 0) {
+      return res.json({ success: true, message: 'Tidak ada perubahan untuk dikirim', changed });
+    }
+
+    const { applied } = await acs.sendSetParameterValues(server, value.deviceId, parameterValues);
+    console.log(`[ACS update-lan] ${req.user?.username || '-'} ${server.host}:${server.port} ${value.deviceId}: ${changed.join(', ')} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      changed,
+      message: applied
+        ? 'Perubahan LAN diterapkan ke ONU'
+        : 'Perubahan LAN masuk antrean GenieACS dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS update-lan] ${value.deviceId}: ${error.message}`);
+    const isNbiError = error instanceof acs.NbiError;
+    return fail(res, isNbiError ? 502 : 500, isNbiError ? error.message : 'Gagal mengirim perubahan LAN');
+  }
+});
+
+// Hanya instance koneksi WAN yang boleh dihapus, bukan objek TR-069 lain.
+const WAN_DELETE_PATH = /^(?:InternetGatewayDevice\.WANDevice\.\d+\.WANConnectionDevice\.\d+\.WAN(?:PPP|IP)Connection\.\d+\.|Device\.PPP\.Interface\.\d+\.|Device\.IP\.Interface\.\d+\.)$/;
+
+// Terjemahkan hasil/error alur WAN (acs_wan_flow.js) ke respons HTTP.
+function wanErrorResponse(res, error, fallbackMessage) {
+  if (error instanceof WanFlowError) {
+    return fail(res, error.status, error.message);
+  }
+  if (isCommitLoopFault(error)) {
+    return res.status(502).json({ success: false, message: error.message });
+  }
+  const isNbiError = error instanceof acs.NbiError;
+  return res.status(isNbiError ? 502 : 500).json({
+    success: false,
+    message: isNbiError ? `${error.message}${error.rollbackNote || ''}` : fallbackMessage,
+    ...(error.wanPath ? { wanPath: error.wanPath } : {}),
+  });
+}
+
+// options.body        = pengganti req.body (endpoint khusus merek memetakan inputnya lebih dulu)
+// options.expectProfile = profil merek yang wajib cocok dengan perangkat di ACS
+// options.extend(values) = field tambahan untuk respons sukses
+async function handleAddWan(req, res, parse, run, fallbackMessage, { body = req.body, expectProfile, extend } = {}) {
+  const parsed = parse(body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  try {
+    const server = await findServer(body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+    const result = await run({ server, values: parsed.value, username: req.user?.username, expectProfile });
+    return res.json({ success: true, ...result, ...(extend ? extend(parsed.value) : {}) });
+  } catch (error) {
+    return wanErrorResponse(res, error, fallbackMessage);
+  }
+}
+
+// Buat atau ubah koneksi WAN PPP. Body = isian form (nama, NAT, service, connection type,
+// VLAN, 802.1p, username, password, MTU, port binding, enableServiceControl khusus ZTE routed) + server_id + deviceId.
+// wanPath terisi = edit (SetParameterValues, termasuk Service Control true/false bila dikirim).
+// wanPath kosong membuat instance baru (AddObject) lalu setParameterValues (Queue-and-Fire, acs_wan_flow.js).
+// Hanya admin. Sandi tidak dicatat di log.
+router.post('/wan-ppp', requireAdmin, (req, res) => handleAddWan(req, res, parseWanPpp, addWanPpp, 'Gagal mengirim koneksi WAN PPP'));
+
+// Buat koneksi WAN khusus ZTE (F609/F670L). Input ringkas -> alur WAN PPP yang sama dengan /wan-ppp:
+//   1. AddObject ...WANConnectionDevice.            (instance baru ditangkap dari response / selisih pohon)
+//   2. AddObject ...WANConnectionDevice.[N].WANPPPConnection.
+//   3. SetParameterValues atomik (Enable terakhir): ConnectionType, Name, Username/Password, NAT,
+//      X_ZTE-COM_ServiceList, X_ZTE-COM_VLANEnable/VLANID/8021P, X_ZTE-COM_LanInterface.
+//      enableServiceControl: SetParameterValues terpisah ke X_ZTE-COM_Security (AclServices) setelah WAN sukses.
+//   Gagal di langkah 2/3 -> instance baru di-rollback (DeleteObject) dan error dikembalikan ke klien.
+// Body: { server_id, deviceId, type: 'pppoe'|'bridge', name, username?, password?, vlanId?, priority?,
+//         serviceList?, enable?, nat?, enableServiceControl?: boolean, ports?: ['LAN1','SSID1'] }
+// Respons: 400 input tidak valid | 404 perangkat tidak ada | 409 bukan ZTE / diblokir guard |
+//          502 ONU atau GenieACS menolak (rollbackNote menjelaskan nasib instance) | 500 lainnya.
+router.post('/zte/wan', requireAdmin, (req, res) => {
+  const adapted = parseZteWanRequest(req.body);
+  if (adapted.error) {
+    return fail(res, 400, adapted.error);
+  }
+  return handleAddWan(req, res, parseWanPpp, addWanPpp, 'Gagal membuat koneksi WAN ZTE', {
+    body: adapted.body,
+    expectProfile: 'zte',
+    extend: () => ({
+      type: adapted.type,
+      binding: { ports: adapted.labels, value: zteBindingString(adapted.labels) || null },
+    }),
+  });
+});
+
+// Buat atau ubah koneksi WAN IP (WANIPConnection). IP_Routed memakai DHCP atau Static.
+// IP_Bridged tidak mengirim alamat IP. Gagal setParameterValues menghapus instance baru.
+const saveWanIp = (req, res) => handleAddWan(req, res, parseWanIp, addWanIp, 'Gagal mengirim koneksi WAN IP');
+
+router.post('/wan-ip', requireAdmin, saveWanIp);
+router.post('/add-wan-ip', requireAdmin, saveWanIp);
+
+
+function parseWanDelete(body) {
+  const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : '';
+  let wanPath = typeof body?.wanPath === 'string' ? body.wanPath.trim() : '';
+  if (!deviceId || deviceId.length > 255) {
+    return { error: 'ID perangkat tidak valid' };
+  }
+  if (!wanPath || wanPath.length > 300) {
+    return { error: 'Path WAN tidak valid' };
+  }
+  if (!wanPath.endsWith('.')) {
+    wanPath += '.';
+  }
+  if (!WAN_DELETE_PATH.test(wanPath)) {
+    return { error: 'Path WAN tidak valid' };
+  }
+  return { value: { deviceId, wanPath } };
+}
+
+// Hapus satu koneksi WAN (DeleteObject) lewat NBI server ACS yang dipilih.
+// Body: { server_id, deviceId (_id GenieACS), wanPath }.
+router.post('/delete-wan', requireAdmin, async (req, res) => {
+  const parsed = parseWanDelete(req.body);
+  if (parsed.error) {
+    return fail(res, 400, parsed.error);
+  }
+  const { deviceId, wanPath } = parsed.value;
+
+  try {
+    const server = await findServer(req.body?.server_id);
+    if (!server) {
+      return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+    }
+    const { applied } = await acs.sendDeleteObject(server, deviceId, wanPath);
+    console.log(`[ACS delete-wan] ${req.user?.username || '-'} ${server.host}:${server.port} ${deviceId} ${wanPath} (${applied ? 'diterapkan' : 'diantrikan'})`);
+    return res.json({
+      success: true,
+      applied,
+      message: applied
+        ? 'Koneksi WAN dihapus dari ONU'
+        : 'Penghapusan WAN masuk antrean dan diterapkan saat ONU terhubung',
+    });
+  } catch (error) {
+    console.error(`[ACS delete-wan] ${deviceId} ${wanPath}: ${error.message}`);
+    const isNbiError = error instanceof acs.NbiError;
+    return fail(res, isNbiError ? 502 : 500, isNbiError ? error.message : 'Gagal menghapus koneksi WAN');
+  }
 });
 
 // ---- Daftar ONU hasil SINKRON (tersimpan di DB web) + statistik ---------------
@@ -286,7 +645,7 @@ router.get('/devices/db', async (req, res) => {
       `SELECT id, device_id, username, ip_pppoe, ip_tr069, sn, pon, manufacturer, tipe,
               ssid, wifi_users, rx_power, temp, uptime, last_inform, registered, tags
        FROM acs_devices ${whereSql}
-       ORDER BY last_inform IS NULL, last_inform DESC, id DESC
+       ORDER BY registered IS NULL, registered DESC, id DESC
        LIMIT ? OFFSET ?`,
       [...params, limit, (page - 1) * limit],
     );
@@ -309,6 +668,43 @@ router.get('/devices/db', async (req, res) => {
     });
   } catch (error) {
     return fail(res, 500, 'Gagal mengambil data ONU', error);
+  }
+});
+
+// Satu ONU dari NBI, diringkas sama seperti baris di GET /devices.
+// Didaftarkan setelah /devices/hosts|lan|wans|wlans|db supaya path itu tidak tertangkap :deviceId.
+// GET /api/acs/devices/:deviceId?server_id=
+router.get('/devices/:deviceId', async (req, res) => {
+  const serverId = readId(req.query.server_id);
+  const deviceId = typeof req.params.deviceId === 'string' ? req.params.deviceId.trim() : '';
+  if (!serverId) {
+    return fail(res, 400, 'Pilih server ACS terlebih dahulu');
+  }
+  if (!deviceId || deviceId.length > 255) {
+    return fail(res, 400, 'ID perangkat tidak valid');
+  }
+
+  try {
+    const baseUrl = await liveBaseUrl(serverId);
+    if (!baseUrl) {
+      return fail(res, 404, 'Server ACS tidak ditemukan');
+    }
+
+    const response = await axios.get(`${baseUrl}/devices/`, {
+      params: {
+        query: JSON.stringify({ _id: deviceId }),
+        projection: LIVE_PROJECTION,
+      },
+      timeout: LIVE_TIMEOUT_MS,
+    });
+    const item = Array.isArray(response.data) ? response.data[0] : null;
+    if (!item || !item._id) {
+      return fail(res, 404, 'Perangkat tidak ditemukan di GenieACS');
+    }
+    return res.json(summarizeDevice(item));
+  } catch (error) {
+    console.error('Gagal mengambil perangkat dari GenieACS:', error.code || error.message);
+    return res.status(500).json({ success: false, message: 'Gagal terhubung ke server GenieACS' });
   }
 });
 

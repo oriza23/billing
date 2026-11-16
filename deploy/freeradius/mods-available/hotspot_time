@@ -3,7 +3,7 @@
 # reply_name mengisi Session-Timeout di jawaban dengan sisa waktu.
 sqlcounter hotspot_time {
 	sql_module_instance = sql
-	dialect = mysql
+	dialect = postgresql
 
 	counter_name = Max-All-Session
 	check_name = Max-All-Session
@@ -13,7 +13,7 @@ sqlcounter hotspot_time {
 	reset = never
 
 	query = "\
-		SELECT IFNULL(SUM(acctsessiontime), 0) \
+		SELECT COALESCE(SUM(acctsessiontime), 0) \
 		FROM radacct \
 		WHERE username='%{${key}}'"
 }

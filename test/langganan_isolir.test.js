@@ -34,14 +34,6 @@ function fakeDb({ due = [], sessions = [], routers = {}, rows = {} } = {}) {
     }
     return [{ affectedRows: 1 }];
   };
-  const conn = {
-    execute: exec,
-    query: exec,
-    beginTransaction: async () => calls.push({ sql: 'BEGIN' }),
-    commit: async () => calls.push({ sql: 'COMMIT' }),
-    rollback: async () => calls.push({ sql: 'ROLLBACK' }),
-    release: () => {},
-  };
   return {
     calls,
     execute: exec,
@@ -55,49 +47,34 @@ function fakeDb({ due = [], sessions = [], routers = {}, rows = {} } = {}) {
       }
       return exec(sql, params);
     },
-    getConnection: async () => conn,
   };
 }
 
-test('masa aktif habis: status jadi Isolir, login ditolak, sesi aktif diputus', async () => {
+test('masa aktif habis: memanggil isolir Full RADIUS per pelanggan', async () => {
   const db = fakeDb({
-    due: [{ id: 7, username: 'budi@net' }],
-    sessions: [{ nasipaddress: '10.0.0.1', framedipaddress: '172.16.0.5', acctsessionid: '81a0001' }],
-    routers: { '10.0.0.1': 'rahasia-router' },
+    due: [{ id: 7, username: 'budi@net', ktg: 'PPP' }],
   });
-  const sent = [];
-  const isolated = await isolateExpiredCustomers(db, { run: async (job) => sent.push(job) });
+  const isolirCalls = [];
+  const isolated = await isolateExpiredCustomers(db, {
+    isolirFn: async (id, options) => {
+      isolirCalls.push({ id, options });
+    },
+  });
 
   assert.deepEqual(isolated, ['budi@net']);
-  assert.ok(db.calls.some((call) => call.sql.includes("SET status = 'Isolir'") && call.params[0] === 7));
-  assert.ok(db.calls.some((call) => call.sql.includes("'Auth-Type', ':=', 'Reject'") && call.params[0] === 'budi@net'));
-  assert.equal(db.calls.filter((call) => call.sql === 'COMMIT').length, 1);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].ip, '10.0.0.1');
-  assert.equal(sent[0].secret, 'rahasia-router');
-  assert.deepEqual(sent[0].attributes, [
-    'User-Name = "budi@net"',
-    'Acct-Session-Id = "81a0001"',
-    'Framed-IP-Address = 172.16.0.5',
-  ]);
+  assert.equal(isolirCalls.length, 1);
+  assert.deepEqual(isolirCalls[0], {
+    id: 7,
+    options: { sumber: 'tgl_isolir', kick: true, ktgAllowed: ['PPP', 'Hotspot'] },
+  });
 });
 
-test('status sudah berubah di tengah jalan: tidak ada penolakan atau pemutusan ganda', async () => {
-  const db = fakeDb({ due: [{ id: 7, username: 'budi@net' }] });
-  const original = db.getConnection;
-  db.getConnection = async () => {
-    const conn = await original();
-    const execute = conn.execute;
-    conn.execute = async (sql, params) => (
-      String(sql).includes("SET status = 'Isolir'") ? [{ affectedRows: 0 }] : execute(sql, params)
-    );
-    return conn;
-  };
-  const sent = [];
-  const isolated = await isolateExpiredCustomers(db, { run: async (job) => sent.push(job) });
+test('isolir gagal: pelanggan tidak masuk daftar terisolir', async () => {
+  const db = fakeDb({ due: [{ id: 7, username: 'budi@net', ktg: 'PPP' }] });
+  const isolated = await isolateExpiredCustomers(db, {
+    isolirFn: async () => { throw new Error('RADIUS gagal'); },
+  });
   assert.deepEqual(isolated, []);
-  assert.equal(sent.length, 0);
-  assert.equal(db.calls.some((call) => call.sql.includes('Auth-Type')), false);
 });
 
 test('pemutusan memakai secret router tempat sesi berjalan, dan melewati router tak dikenal', async () => {
@@ -109,12 +86,18 @@ test('pemutusan memakai secret router tempat sesi berjalan, dan melewati router 
     routers: { '10.0.0.1': 's1' },
   });
   const sent = [];
-  const result = await disconnectUser(db, 'x@net', { run: async (job) => sent.push(job.ip) });
-  assert.deepEqual(result, { diputus: 1, gagal: 1 });
-  assert.deepEqual(sent, ['10.0.0.1']);
+  const result = await disconnectUser(db, 'x@net', {
+    send: async ({ host, secret }) => { sent.push({ host, secret }); return { ok: true }; },
+  });
+  assert.deepEqual(result.diputus, 1);
+  assert.deepEqual(result.gagal, 1);
+  assert.deepEqual(sent, [{ host: '10.0.0.1', secret: 's1' }]);
 
-  const failing = await disconnectUser(db, 'x@net', { run: async () => { throw new Error('timeout'); } });
+  const failing = await disconnectUser(db, 'x@net', {
+    send: async () => ({ ok: false, error: 'timeout' }),
+  });
   assert.equal(failing.diputus, 0);
+  assert.equal(failing.gagal, 2);
 });
 
 test('isExpired membaca jam database dan tanggal kosong tidak pernah habis', async () => {

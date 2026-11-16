@@ -1,0 +1,60 @@
+2026-11-16T04:43:54.010999Z LOG pgloader version "3.6.7~devel"
+KABOOM!
+ESRAP-PARSE-ERROR: At
+
+  
+   ALTER SCHEMA NAMES MATCH
+   ^ (Line 27, Column 1, Position 896)
+
+In context COMMANDS:
+
+While parsing COMMANDS. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the string "--"
+  or the string "/*"
+  or the string "load"
+An unhandled error condition has been signalled: At
+
+  
+   ALTER SCHEMA NAMES MATCH
+   ^ (Line 27, Column 1, Position 896)
+
+In context COMMANDS:
+
+While parsing COMMANDS. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the string "--"
+  or the string "/*"
+  or the string "load"
+
+
+
+
+What I am doing here?
+
+At
+
+  
+   ALTER SCHEMA NAMES MATCH
+   ^ (Line 27, Column 1, Position 896)
+
+In context COMMANDS:
+
+While parsing COMMANDS. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the string "--"
+  or the string "/*"
+  or the string "load"
+

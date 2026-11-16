@@ -1,6 +1,9 @@
 // Merangkum dokumen perangkat GenieACS (NBI) menjadi objek ONU yang bersih dan standar.
 // Seluruh ekstraksi path TR-069 dan konversi satuan dilakukan di sini, bukan di frontend.
 
+const { normalizeWanStatus, resolveWanStatus, detectLegacyWanFirmware } = require('./acs_wan_status');
+const { extractZteAclServiceControl } = require('./acs_zte_service_control');
+
 // ---- Projection NBI ---------------------------------------------------------
 // Hanya path yang dipakai ringkasan di bawah (balasan tetap kecil). Projection NBI tidak
 // mendukung wildcard, jadi instance 1-4 ditulis eksplisit.
@@ -328,6 +331,7 @@ function extractHosts(item) {
 // Seperti host: tidak ikut LIVE_PROJECTION karena subtree WLANConfiguration berisi puluhan
 // parameter per SSID. Diambil per perangkat saat tab WLAN dibuka.
 const WLANS_PROJECTION = `${IGD}.LANDevice.1.WLANConfiguration,Device.WiFi.SSID,Device.WiFi.AccessPoint,Device.WiFi.Radio`;
+const MIN_WLANS = 4;
 const MAX_WLANS = 16;
 const DEFAULT_BAND = '20MHz/40MHz';
 
@@ -360,25 +364,48 @@ function securityTr098(wlanData) {
   return 'Open System';
 }
 
+function placeholderWlan(index) {
+  return {
+    id: String(index),
+    ssid: `SSID${index}`,
+    password: '-',
+    security: 'None',
+    freq: index > 4 ? '5 GHz' : '2.4 GHz',
+    band: '-',
+    connected: 0,
+    status: false,
+  };
+}
+
+// Minimal 4 baris. Jika ONT melaporkan indeks lebih tinggi (misalnya SSID 5 GHz),
+// batas ikut indeks tertinggi itu, tetapi tidak melewati MAX_WLANS.
+function wlanLimit(keys) {
+  const highest = keys.reduce((max, key) => Math.max(max, parseInt(key, 10) || 0), 0);
+  return Math.min(MAX_WLANS, Math.max(MIN_WLANS, highest));
+}
+
 function wlansTr098(wlanObj) {
   const wlans = [];
-  for (const key of numericKeys(wlanObj)) {
-    const wlanData = wlanObj[key];
+  const limit = wlanLimit(numericKeys(wlanObj));
+  for (let i = 1; i <= limit; i += 1) {
+    const wlanData = wlanObj?.[i];
     if (isNode(wlanData) && wlanData.SSID) {
       const channel = toNumber(wlanData?.Channel?._value);
       wlans.push({
-        id: key,
+        id: String(i),
         ssid: toText(wlanData?.SSID?._value) || 'N/A',
         password: toText(wlanData?.PreSharedKey?.[1]?.PreSharedKey?._value)
           || toText(wlanData?.KeyPassphrase?._value)
           || toText(wlanData?.PreSharedKey?.[1]?.KeyPassphrase?._value)
           || '-',
         security: securityTr098(wlanData),
-        freq: frequencyOf(key, channel),
+        freq: frequencyOf(i, channel),
         band: toText(wlanData?.OperatingChannelBandwidth?._value) || DEFAULT_BAND,
         connected: toNumber(wlanData?.TotalAssociations?._value) ?? 0,
         status: hostIsActive(wlanData?.Enable?._value),
       });
+    } else {
+      wlans.push(placeholderWlan(i));
     }
   }
   return wlans;
@@ -389,11 +416,13 @@ function wlansTr098(wlanObj) {
 function wlansTr181(wifi) {
   const wlans = [];
   const accessPoints = numericKeys(wifi?.AccessPoint).map((name) => wifi.AccessPoint[name]);
-  for (const key of numericKeys(wifi?.SSID)) {
-    const ssidData = wifi.SSID[key];
+  const limit = wlanLimit(numericKeys(wifi?.SSID));
+  for (let i = 1; i <= limit; i += 1) {
+    const key = String(i);
+    const ssidData = wifi?.SSID?.[i];
     if (isNode(ssidData) && ssidData.SSID) {
       const accessPoint = accessPoints.find((entry) => String(entry?.SSIDReference?._value ?? '').endsWith(`WiFi.SSID.${key}`))
-        ?? wifi?.AccessPoint?.[key];
+        ?? wifi?.AccessPoint?.[i];
       const radioIndex = String(ssidData?.LowerLayers?._value ?? '').match(/Radio\.(\d+)/)?.[1];
       const radio = radioIndex ? wifi?.Radio?.[radioIndex] : undefined;
       const radioBand = toText(radio?.OperatingFrequencyBand?._value);
@@ -410,23 +439,568 @@ function wlansTr181(wifi) {
         connected: toNumber(accessPoint?.AssociatedDeviceNumberOfEntries?._value) ?? 0,
         status: hostIsActive(ssidData?.Enable?._value),
       });
+    } else {
+      wlans.push(placeholderWlan(i));
     }
   }
   return wlans;
 }
 
 function extractWlans(item) {
-  const tr098 = wlansTr098(item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration);
-  const wlans = tr098.length > 0 ? tr098 : wlansTr181(item?.Device?.WiFi);
-  return wlans.slice(0, MAX_WLANS);
+  const wlanObj = item?.InternetGatewayDevice?.LANDevice?.[1]?.WLANConfiguration;
+  const wifi = item?.Device?.WiFi;
+  if (numericKeys(wlanObj).length > 0) {
+    return wlansTr098(wlanObj);
+  }
+  if (numericKeys(wifi?.SSID).length > 0) {
+    return wlansTr181(wifi);
+  }
+  return wlansTr098(wlanObj);
+}
+
+// ---- Konfigurasi LAN (IP gateway, DHCP server, DNS) -----------------------------
+// Seperti host/WLAN: diambil per perangkat saat tab LAN dibuka, tidak ikut LIVE_PROJECTION.
+const LAN_PROJECTION = [
+  `${IGD}.LANDevice.1.LANHostConfigManagement`,
+  `${IGD}.LANDevice.1.LANEthernetInterfaceConfig.1.MACAddress`,
+  'Device.IP.Interface.1',
+  'Device.DHCPv4.Server',
+  'Device.Ethernet.Interface.1.MACAddress',
+].join(',');
+
+const LAN_BASE = `${IGD}.LANDevice.1.LANHostConfigManagement`;
+
+// Teks tidak kosong atau '-'.
+function textOrDash(value) {
+  return toText(value) || '-';
+}
+
+// DNSServers berformat "8.8.8.8,8.8.4.4": dipecah, dipangkas, dan selalu 3 elemen ('-' bila kosong).
+function parseDns(value) {
+  const servers = String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean).slice(0, 3);
+  while (servers.length < 3) {
+    servers.push('-');
+  }
+  return servers;
+}
+
+// Utama TR-098 (LANHostConfigManagement). Cadangan TR-181: Device.IP.Interface.1 dan
+// Device.DHCPv4.Server.Pool.1 (diasumsikan interface 1 = LAN).
+function extractLanConfig(item) {
+  const pool = 'Device.DHCPv4.Server.Pool.1';
+  const dhcpEnable = firstOf(item, [`${LAN_BASE}.DHCPServerEnable`, 'Device.DHCPv4.Server.Enable', `${pool}.Enable`]);
+  return {
+    ip: textOrDash(firstOf(item, [
+      `${LAN_BASE}.IPInterface.1.IPInterfaceIPAddress`,
+      'Device.IP.Interface.1.IPv4Address.1.IPAddress',
+    ])),
+    subnet: textOrDash(firstOf(item, [
+      `${LAN_BASE}.IPInterface.1.IPInterfaceSubnetMask`,
+      'Device.IP.Interface.1.IPv4Address.1.SubnetMask',
+    ])),
+    mac: textOrDash(firstOf(item, [
+      `${IGD}.LANDevice.1.LANEthernetInterfaceConfig.1.MACAddress`,
+      'Device.Ethernet.Interface.1.MACAddress',
+    ])),
+    dhcpEnabled: hostIsActive(dhcpEnable),
+    dhcpMin: textOrDash(firstOf(item, [`${LAN_BASE}.MinAddress`, `${pool}.MinAddress`])),
+    dhcpMax: textOrDash(firstOf(item, [`${LAN_BASE}.MaxAddress`, `${pool}.MaxAddress`])),
+    leaseTime: textOrDash(firstOf(item, [`${LAN_BASE}.DHCPLeaseTime`, `${pool}.LeaseTime`])),
+    dns: parseDns(firstOf(item, [`${LAN_BASE}.DNSServers`, `${pool}.DNSServers`])),
+  };
+}
+
+// ---- Daftar koneksi WAN -------------------------------------------------------
+// Tidak ikut LIVE_PROJECTION: subtree WANConnectionDevice besar. Diambil per perangkat
+// saat tab WAN dibuka. Sandi PPPoE tidak pernah dikirim apa adanya.
+const WANS_PROJECTION = [
+  '_lastInform',
+  `${IGD}.DeviceInfo.Manufacturer`,
+  `${IGD}.DeviceInfo.ProductClass`,
+  `${IGD}.DeviceInfo.ModelName`,
+  `${IGD}.WANDevice.1.WANConnectionDevice`,
+  `${IGD}.WANDevice.2.WANConnectionDevice`,
+  `${IGD}.LANDevice.1.WLANConfigurationNumberOfEntries`,
+  `${IGD}.LANDevice.1.WLANConfiguration`,
+  `${IGD}.X_ZTE-COM_Security`,
+  'Device.WiFi.SSIDNumberOfEntries',
+  'Device.WiFi.SSID',
+  'Device.PPP.Interface',
+  'Device.IP.Interface',
+  'Device.Ethernet.VLANTermination',
+  'Device.NAT.InterfaceSetting',
+].join(',');
+const MAX_WANS = 32;
+
+const SERVICE_KEYS = [
+  'X_FH_ServiceList',
+  'X_ZTE-COM_ServiceList',
+  'X_CT-COM_ServiceList',
+  'X_CMCC_ServiceList',
+  'X_CU_ServiceList',
+  'X_HW_SERVICELIST',
+  'X_BROADCOM_COM_ServiceName',
+];
+
+const BIND_KEYS = [
+  'X_CT-COM_LanInterface',
+  'X_CMCC_LanInterface',
+  'X_CU_LanInterface',
+  'X_ZTE-COM_LanInterface',
+  'X_FH_LanInterface',
+  'X_HW_LanInterface',
+  'X_BROADCOM_COM_LanInterface',
+  'PortMapping',
+];
+
+const VLAN_KEYS = [
+  'X_BROADCOM_COM_VLANID',
+  'X_CT-COM_VLANIDMark',
+  'X_CTCOM_VLAN',
+  'X_CT-COM_VLAN',
+  'X_HW_VLAN',
+  'X_CMCC_VLANIDMark',
+  'X_ZTE-COM_VLANID',
+  'X_FH_VLAN',
+  'VLANID',
+];
+
+const LINK_VLAN_NODES = [
+  'X_CT-COM_WANGponLinkConfig',
+  'X_CT-COM_WANEponLinkConfig',
+  'X_CMCC_WANGponLinkConfig',
+  'X_CMCC_WANEponLinkConfig',
+  'X_FH_WANGponLinkConfig',
+  'X_CU_WANGponLinkConfig',
+];
+
+function leafText(node, key) {
+  return toText(node?.[key]?._value);
+}
+
+function firstLeaf(node, keys) {
+  for (const key of keys) {
+    const value = leafText(node, key);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function enabledLabel(value) {
+  if (isEmpty(value)) {
+    return '-';
+  }
+  if (value === true || value === 1) {
+    return 'Enabled';
+  }
+  const text = String(value).trim().toLowerCase();
+  if (text === '1' || text === 'true' || text === 'enabled') {
+    return 'Enabled';
+  }
+  if (text === '0' || text === 'false' || text === 'disabled') {
+    return 'Disabled';
+  }
+  return '-';
+}
+
+function maskedSecret(value) {
+  return isEmpty(value) ? '-' : '********';
+}
+
+function vlanIdOf(data, parent) {
+  const direct = firstLeaf(data, VLAN_KEYS);
+  if (direct) {
+    return direct;
+  }
+  for (const name of LINK_VLAN_NODES) {
+    const mark = leafText(parent?.[name], 'VLANIDMark') || leafText(parent?.[name], 'VLANID');
+    if (mark) {
+      return mark;
+    }
+  }
+  return leafText(parent?.WANEthernetLinkConfig, 'X_CT-COM_VLANIDMark')
+    || leafText(parent?.WANEthernetLinkConfig, 'VLANID');
+}
+
+function vlanStatusOf(data, vlanId) {
+  const flag = firstLeaf(data, ['X_CT-COM_VLANEnabled', 'X_HW_VLANEnabled', 'X_CMCC_VLANEnabled']);
+  if (flag) {
+    const label = enabledLabel(flag);
+    if (label !== '-') {
+      return label;
+    }
+  }
+  if (vlanId && vlanId !== '0') {
+    return 'Enabled';
+  }
+  if (vlanId === '0') {
+    return 'Disabled';
+  }
+  return '-';
+}
+
+function huaweiBindString(node) {
+  if (!isNode(node)) {
+    return '';
+  }
+  const parts = [];
+  for (let index = 1; index <= 4; index += 1) {
+    if (hostIsActive(node[`Lan${index}Enable`]?._value)) {
+      parts.push(`LAN${index}`);
+    }
+  }
+  for (let index = 1; index <= 8; index += 1) {
+    if (hostIsActive(node[`SSID${index}Enable`]?._value)) {
+      parts.push(`SSID${index}`);
+    }
+  }
+  return parts.join(',');
+}
+
+function bindingStringOf(data) {
+  const direct = firstLeaf(data, BIND_KEYS);
+  if (direct) {
+    return direct;
+  }
+  return huaweiBindString(data?.X_HW_LANBIND);
+}
+
+// String binding (path TR-098 atau token LAN1/SSID1) -> label checkbox. WAN_PPP_1 dan token lain diabaikan.
+function boundPortLabels(bindString) {
+  const text = String(bindString || '');
+  if (!text || text === '-') {
+    return [];
+  }
+  const labels = [];
+  for (let index = 1; index <= 4; index += 1) {
+    const path = new RegExp(`LANEthernetInterfaceConfig\\.${index}(?!\\d)`);
+    const token = new RegExp(`(?:^|[,;\\s])LAN${index}(?!\\d)`, 'i');
+    if (path.test(text) || token.test(text)) {
+      labels.push(`LAN${index}`);
+    }
+  }
+  for (let index = 1; index <= 8; index += 1) {
+    const path = new RegExp(`WLANConfiguration\\.${index}(?!\\d)`);
+    const token = new RegExp(`(?:^|[,;\\s])SSID${index}(?!\\d)`, 'i');
+    if (path.test(text) || token.test(text)) {
+      labels.push(`SSID${index}`);
+    }
+  }
+  return labels;
+}
+
+const PORT_LABEL_ORDER = [
+  ...[1, 2, 3, 4].map((index) => `LAN${index}`),
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map((index) => `SSID${index}`),
+];
+
+// Gabungan port yang sudah terikat pada seluruh WAN modem ini, urutan LAN lalu SSID.
+function allUsedPortsOf(wans) {
+  const used = new Set();
+  for (const wan of Array.isArray(wans) ? wans : []) {
+    const ports = wan?.boundPorts || wan?.bound_ports || [];
+    for (const label of ports) {
+      const name = String(label || '').trim().toUpperCase();
+      if (PORT_LABEL_ORDER.includes(name)) {
+        used.add(name);
+      }
+    }
+  }
+  return PORT_LABEL_ORDER.filter((label) => used.has(label));
+}
+
+function highestIndex(node) {
+  return numericKeys(node).reduce((max, key) => Math.max(max, parseInt(key, 10) || 0), 0);
+}
+
+// Jumlah SSID untuk checkbox binding: NumberOfEntries, atau hitungan instance WLAN/SSID.
+// 0 bila perangkat tidak melaporkan WLAN (pemanggil UI memakai 4 sebagai bawaan).
+function ssidCountOf(item) {
+  const lan = item?.InternetGatewayDevice?.LANDevice?.[1];
+  const reported = toNumber(lan?.WLANConfigurationNumberOfEntries?._value) || 0;
+  const fromObjects = highestIndex(lan?.WLANConfiguration);
+  const wifiReported = toNumber(item?.Device?.WiFi?.SSIDNumberOfEntries?._value) || 0;
+  const fromWifi = highestIndex(item?.Device?.WiFi?.SSID);
+  const count = Math.max(reported, fromObjects, wifiReported, fromWifi);
+  if (count <= 0) {
+    return 0;
+  }
+  return Math.min(8, count);
+}
+
+function hasConnectionData(data) {
+  return isNode(data) && Boolean(
+    data.Name || data.ConnectionStatus || data.Status || data.ExternalIPAddress || data.Username
+    || data.Enable || data.ConnectionType || data.TransportType || data.DNSServers,
+  );
+}
+
+function connectionRecord(id, kind, data, parent, fullPath) {
+  const ppp = kind === 'PPP';
+  const vlanId = vlanIdOf(data, parent);
+  const { status, source } = resolveWanStatus(data);
+  return {
+    id,
+    fullPath,
+    type: kind,
+    name: leafText(data, 'Name') || '-',
+    status: status || '-',
+    statusSource: source,
+    ip: leafText(data, 'ExternalIPAddress') || '-',
+    remoteIp: leafText(data, 'RemoteIPAddress') || leafText(data, 'DefaultGateway') || '-',
+    username: ppp ? (leafText(data, 'Username') || '-') : '-',
+    password: ppp ? maskedSecret(data?.Password?._value) : '-',
+    vlanStatus: vlanStatusOf(data, vlanId),
+    vlanId: vlanId || '-',
+    // Jangan jatuhkan ke Name: Fiberhome menamai koneksi "2_INTERNET_R_VID_2033", itu bukan Service List.
+    service: firstLeaf(data, SERVICE_KEYS) || '-',
+    dns: leafText(data, 'DNSServers') || '-',
+    connTrigger: leafText(data, 'ConnectionTrigger') || 'AlwaysOn',
+    nat: enabledLabel(data?.NATEnabled?._value),
+    transport: leafText(data, 'TransportType') || (ppp ? 'PPPoE' : 'IP_Routed'),
+    mac: leafText(data, 'MACAddress') || '-',
+    connType: leafText(data, 'ConnectionType') || (ppp ? 'PPPoE' : 'IP_Routed'),
+    uptime: leafText(data, 'Uptime') || '0',
+    ...bindingFields(bindingStringOf(data)),
+  };
+}
+
+function bindingFields(portBind) {
+  const boundPorts = boundPortLabels(portBind);
+  return { portBind, boundPorts, bound_ports: boundPorts };
+}
+
+function wansTr098(igd) {
+  const wans = [];
+  const wanDevices = igd?.WANDevice;
+  for (const wanKey of numericKeys(wanDevices)) {
+    const connections = wanDevices[wanKey]?.WANConnectionDevice;
+    for (const key of numericKeys(connections)) {
+      const device = connections[key];
+      if (!isNode(device)) {
+        continue;
+      }
+      for (const connKey of numericKeys(device.WANPPPConnection)) {
+        const data = device.WANPPPConnection[connKey];
+        if (hasConnectionData(data)) {
+          wans.push(connectionRecord(
+            `${wanKey}.${key}.ppp.${connKey}`,
+            'PPP',
+            data,
+            device,
+            `${IGD}.WANDevice.${wanKey}.WANConnectionDevice.${key}.WANPPPConnection.${connKey}.`,
+          ));
+        }
+      }
+      for (const connKey of numericKeys(device.WANIPConnection)) {
+        const data = device.WANIPConnection[connKey];
+        if (hasConnectionData(data)) {
+          wans.push(connectionRecord(
+            `${wanKey}.${key}.ip.${connKey}`,
+            'IP',
+            data,
+            device,
+            `${IGD}.WANDevice.${wanKey}.WANConnectionDevice.${key}.WANIPConnection.${connKey}.`,
+          ));
+        }
+      }
+    }
+  }
+  return wans;
+}
+
+function ipv4Of(iface) {
+  for (const key of numericKeys(iface?.IPv4Address)) {
+    const ip = leafText(iface.IPv4Address[key], 'IPAddress');
+    if (ip) {
+      return ip;
+    }
+  }
+  return null;
+}
+
+function natForInterface(device, interfaceRef) {
+  for (const key of numericKeys(device?.NAT?.InterfaceSetting)) {
+    const setting = device.NAT.InterfaceSetting[key];
+    const ref = leafText(setting, 'Interface') || '';
+    if (ref && (ref === interfaceRef || ref.endsWith(interfaceRef) || interfaceRef.endsWith(ref))) {
+      return enabledLabel(setting?.Enable?._value);
+    }
+  }
+  return '-';
+}
+
+function vlanFromLower(device, lower) {
+  const match = String(lower || '').match(/VLANTermination\.(\d+)/);
+  if (!match) {
+    return null;
+  }
+  return leafText(device?.Ethernet?.VLANTermination?.[match[1]], 'VLANID');
+}
+
+function wansTr181(device) {
+  if (!isNode(device)) {
+    return [];
+  }
+  const wans = [];
+  const interfaces = device.IP?.Interface;
+
+  for (const key of numericKeys(device.PPP?.Interface)) {
+    const data = device.PPP.Interface[key];
+    if (!isNode(data) || !(data.Username || data.Name || data.Status || data.ConnectionStatus)) {
+      continue;
+    }
+    let ip = '-';
+    let mac = '-';
+    let nat = '-';
+    let lower = '';
+    for (const ipKey of numericKeys(interfaces)) {
+      const iface = interfaces[ipKey];
+      const layers = leafText(iface, 'LowerLayers') || '';
+      if (layers.includes(`PPP.Interface.${key}`)) {
+        ip = ipv4Of(iface) || '-';
+        mac = leafText(iface, 'MACAddress') || '-';
+        nat = natForInterface(device, `Device.IP.Interface.${ipKey}`);
+        lower = layers;
+        break;
+      }
+    }
+    const vlanId = vlanFromLower(device, lower);
+    wans.push({
+      id: `ppp.${key}`,
+      fullPath: `Device.PPP.Interface.${key}.`,
+      type: 'PPP',
+      name: leafText(data, 'Name') || '-',
+      status: normalizeWanStatus(leafText(data, 'ConnectionStatus') || leafText(data, 'Status')) || '-',
+      ip,
+      remoteIp: '-',
+      username: leafText(data, 'Username') || '-',
+      password: maskedSecret(data?.Password?._value),
+      vlanStatus: vlanId && vlanId !== '0' ? 'Enabled' : '-',
+      vlanId: vlanId || '-',
+      service: leafText(data, 'Name') || '-',
+      dns: '-',
+      connTrigger: leafText(data, 'ConnectionTrigger') || 'AlwaysOn',
+      nat,
+      transport: 'PPPoE',
+      mac,
+      connType: 'PPPoE',
+      uptime: leafText(data, 'LastChange') || '0',
+      ...bindingFields(''),
+    });
+  }
+
+  for (const key of numericKeys(interfaces)) {
+    const iface = interfaces[key];
+    if (!isNode(iface) || !hostIsActive(iface?.Upstream?._value)) {
+      continue;
+    }
+    const lower = leafText(iface, 'LowerLayers') || '';
+    if (lower.includes('PPP.Interface')) {
+      continue;
+    }
+    const vlanId = vlanFromLower(device, lower);
+    wans.push({
+      id: `ip.${key}`,
+      fullPath: `Device.IP.Interface.${key}.`,
+      type: 'IP',
+      name: leafText(iface, 'Name') || '-',
+      status: normalizeWanStatus(leafText(iface, 'Status')) || '-',
+      ip: ipv4Of(iface) || '-',
+      remoteIp: '-',
+      username: '-',
+      password: '-',
+      vlanStatus: vlanId && vlanId !== '0' ? 'Enabled' : '-',
+      vlanId: vlanId || '-',
+      service: leafText(iface, 'Name') || '-',
+      dns: '-',
+      connTrigger: 'AlwaysOn',
+      nat: natForInterface(device, `Device.IP.Interface.${key}`),
+      transport: 'IP_Routed',
+      mac: leafText(iface, 'MACAddress') || '-',
+      connType: leafText(iface, 'Type') || 'IP_Routed',
+      uptime: '0',
+      ...bindingFields(''),
+    });
+  }
+  return wans;
+}
+
+// Nama leaf di seluruh subtree WANDevice (batas kedalaman), untuk mendeteksi firmware X_CT-COM_ / X_CMCC_.
+function collectWanLeafNames(igd, limit = 400) {
+  const names = [];
+  const walk = (node, depth) => {
+    if (!isNode(node) || depth > 6 || names.length >= limit) {
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (key.startsWith('_')) {
+        continue;
+      }
+      names.push(key);
+      walk(node[key], depth + 1);
+    }
+  };
+  walk(igd?.WANDevice, 0);
+  return names;
+}
+
+// Identitas ONU untuk keputusan force refresh: { kind, manufacturer, modelName, productClass, online }.
+// kind = 'china-carrier' | 'huawei-legacy' | ''.
+function wanFirmwareProfile(item) {
+  const info = item?.InternetGatewayDevice?.DeviceInfo;
+  const manufacturer = leafText(info, 'Manufacturer') || '';
+  const productClass = leafText(info, 'ProductClass') || '';
+  const modelName = leafText(info, 'ModelName') || '';
+  const kind = detectLegacyWanFirmware({
+    manufacturer,
+    productClass,
+    modelName,
+    leafNames: collectWanLeafNames(item?.InternetGatewayDevice),
+  });
+  return { kind, manufacturer, productClass, modelName };
+}
+
+// Node WAN (tanpa titik di akhir) yang statusnya masih kosong: target refreshObject.
+function wanStatusRefreshTargets(wans, limit = 8) {
+  const targets = [];
+  for (const wan of Array.isArray(wans) ? wans : []) {
+    if (wan?.fullPath && (!wan.status || wan.status === '-')) {
+      targets.push(String(wan.fullPath).replace(/\.$/, ''));
+    }
+  }
+  return [...new Set(targets)].slice(0, limit);
+}
+
+function extractWans(item) {
+  if (!isNode(item)) {
+    return [];
+  }
+  const serviceControl = extractZteAclServiceControl(item);
+  const tr098 = wansTr098(item.InternetGatewayDevice);
+  const wans = tr098.length > 0 ? tr098 : wansTr181(item.Device);
+  return wans
+    .slice(0, MAX_WANS)
+    .map((wan) => ({ ...wan, serviceControl }));
 }
 
 module.exports = {
   LIVE_PROJECTION,
   HOSTS_PROJECTION,
   WLANS_PROJECTION,
+  LAN_PROJECTION,
+  WANS_PROJECTION,
+  extractLanConfig,
   extractHosts,
   extractWlans,
+  extractWans,
+  extractZteAclServiceControl,
+  allUsedPortsOf,
+  wanFirmwareProfile,
+  wanStatusRefreshTargets,
+  ssidCountOf,
   RX_PATHS,
   TEMP_PATHS,
   readPath,

@@ -5,7 +5,7 @@ const pool = require('../database');
 const ZONEINFO_DIR = '/usr/share/zoneinfo/';
 const LOCALTIME_PATH = '/etc/localtime';
 const TIMEZONE_FILE = '/etc/timezone';
-const DB_SERVICE = 'mariadb';
+const DB_SERVICE = process.env.DB_SERVICE || 'postgresql';
 const RADIUS_SERVICE = 'freeradius';
 
 // Zona waktu Indonesia yang diizinkan beserta singkatannya (tanpa DST).
@@ -89,9 +89,10 @@ async function setOsTimezone(timezone) {
 
 async function readDatabaseTime() {
   const [rows] = await pool.query(
-    "SELECT DATE_FORMAT(NOW(), '%d/%m/%Y %H:%i:%s') AS waktu, @@system_time_zone AS zona, @@global.time_zone AS mode",
+    "SELECT to_char(NOW(), 'DD/MM/YYYY HH24:MI:SS') AS waktu, current_setting('TIMEZONE') AS zona, current_setting('TIMEZONE') AS mode",
   );
-  return { time: rows[0].waktu, abbr: rows[0].zona, mode: rows[0].mode };
+  const abbr = rows[0]?.zona || '';
+  return { time: rows[0]?.waktu || '', abbr, mode: rows[0]?.mode || abbr };
 }
 
 async function waitForDatabase() {
@@ -155,7 +156,7 @@ async function getStatus(targetTimezone) {
 
 let applying = false;
 
-// Terapkan zona waktu ke Web (Node), OS, MariaDB, dan FreeRADIUS.
+// Terapkan zona waktu ke Web (Node), OS, PostgreSQL, dan FreeRADIUS.
 async function applyEverywhere(timezone) {
   const target = ZONES[timezone];
   if (!target) {

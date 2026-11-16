@@ -1,0 +1,116 @@
+2026-11-16T04:42:53.011000Z LOG pgloader version "3.6.7~devel"
+2026-11-16T04:42:53.014000Z LOG Data errors in '/tmp/pgloader/'
+2026-11-16T04:42:53.014000Z LOG Parsing commands from file #P"/tmp/pgloader-orizabil.load"
+KABOOM!
+ESRAP-PARSE-ERROR: At
+
+        type tinyint to smallint,
+        type int unsigned to bigint,
+  
+                ^ (Line 15, Column 14, Position 651)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "when"
+  or the string "with"
+An unhandled error condition has been signalled: At
+
+        type tinyint to smallint,
+        type int unsigned to bigint,
+  
+                ^ (Line 15, Column 14, Position 651)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "when"
+  or the string "with"
+
+
+
+
+What I am doing here?
+
+At
+
+        type tinyint to smallint,
+        type int unsigned to bigint,
+  
+                ^ (Line 15, Column 14, Position 651)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "when"
+  or the string "with"
+

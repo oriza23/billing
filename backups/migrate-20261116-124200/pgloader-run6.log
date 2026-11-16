@@ -1,0 +1,4 @@
+FATAL: Failed to start the monitor thread.
+
+Error opening #P"/tmp/pgloader/pgloader.log": Permission denied
+

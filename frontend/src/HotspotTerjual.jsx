@@ -83,7 +83,7 @@ function HotspotTerjual() {
 
     async function loadOptions() {
       try {
-        const response = await api.get('/api/hotspot/voucher-terjual/opsi')
+        const response = await api.get('/hotspot/voucher-terjual/opsi')
         if (!ignore) {
           setOptions({
             profile: response.data?.profile || [],
@@ -109,7 +109,7 @@ function HotspotTerjual() {
     async function loadSold() {
       setFetching(true)
       try {
-        const response = await api.get('/api/hotspot/voucher-terjual', {
+        const response = await api.get('/hotspot/voucher-terjual', {
           params: buildParams({ page: currentPage, limit: itemsPerPage }),
         })
         if (ignore) {
@@ -183,7 +183,7 @@ function HotspotTerjual() {
 
     let filteredVouchers
     try {
-      const response = await api.get('/api/hotspot/voucher-terjual', {
+      const response = await api.get('/hotspot/voucher-terjual', {
         params: buildParams({ all: 1 }),
       })
       filteredVouchers = Array.isArray(response.data?.data) ? response.data.data : []

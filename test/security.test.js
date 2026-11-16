@@ -15,6 +15,7 @@ const {
   rejectExpiredVouchers,
 } = require('../backend/hotspot_quota');
 const authRouter = require('../backend/routes/auth');
+const usersRouter = require('../backend/routes/users');
 const hotspotRouter = require('../backend/routes/hotspot');
 const adminsRouter = require('../backend/routes/admins');
 const routersRouter = require('../backend/routes/routers');
@@ -37,6 +38,7 @@ const WRITE_ENDPOINTS = [
   ['PUT', '/api/routers/1'],
   ['DELETE', '/api/routers/1'],
   ['POST', '/api/routers/1/servers'],
+  ['PUT', '/api/routers/servers/1'],
   ['DELETE', '/api/routers/servers/1'],
   ['POST', '/api/settings/timezone'],
 ];
@@ -92,6 +94,7 @@ function buildApp() {
   app.use('/api', requireAuth);
   app.use('/api/hotspot', hotspotRouter);
   app.use('/api/admins', adminsRouter);
+  app.use('/api/users', usersRouter);
   app.use('/api/routers', routersRouter);
   app.use('/api/settings', settingsRouter);
   return app;
@@ -160,14 +163,25 @@ test('role selain admin ditolak saat menulis dan tetap boleh membaca', async () 
   const calls = installPool({
     execute: async (sql) => {
       if (sql.includes('FROM web_admins')) {
-        return [[{ id: 1, username: 'ada', role: 'admin', password: 'bocor-rahasia' }]];
+        return [[{
+          id: 1, username: 'ada', role: 'admin', password: 'bocor-rahasia', email: 'ada@test.com', foto_profil: '',
+        }]];
       }
       return [[]];
     },
   });
   const admins = await call('GET', '/api/admins', { token });
   assert.equal(admins.status, 200);
-  assert.deepEqual(admins.body, [{ id: 1, username: 'ada', role: 'admin' }]);
+  assert.deepEqual(admins.body, [{
+    id: 1,
+    username: 'ada',
+    nama_lengkap: '',
+    role: 'admin',
+    role_label: 'Administrator',
+    is_super: true,
+    email: 'ada@test.com',
+    foto_profil: '',
+  }]);
   const packed = JSON.stringify(admins.body);
   assert.equal(packed.includes('password'), false);
   assert.equal(packed.includes('bocor-rahasia'), false);
@@ -593,4 +607,65 @@ test('hash scrypt bisa diverifikasi dan akun awal hanya dibuat dari env', async 
 
   const missingEnv = await ensureBootstrapAdmin(emptyDb, {}, { log() {} });
   assert.equal(missingEnv.created, false);
+});
+
+test('ubah password memakai username token dan menolak password lama yang salah', async () => {
+  const stored = await hashPassword('lama-rahasia');
+  const calls = installPool({
+    execute: async (sql, params) => {
+      if (sql.includes('SELECT password FROM web_admins')) {
+        assert.deepEqual(params, ['hasdin']);
+        return [[{ password: stored }]];
+      }
+      if (sql.startsWith('UPDATE web_admins SET password')) {
+        return [{ affectedRows: 1 }];
+      }
+      return [[]];
+    },
+  });
+
+  const anonymous = await call('POST', '/api/users/change-password', {
+    body: { currentPassword: 'lama-rahasia', newPassword: 'baru-rahasia', confirmPassword: 'baru-rahasia' },
+  });
+  assert.equal(anonymous.status, 401);
+
+  const mismatch = await call('POST', '/api/users/change-password', {
+    token: sign('admin', 'hasdin'),
+    body: {
+      username: 'admin',
+      currentPassword: 'lama-rahasia',
+      newPassword: 'baru-rahasia',
+      confirmPassword: 'beda',
+    },
+  });
+  assert.equal(mismatch.status, 400);
+  assert.equal(calls.some((item) => item.sql.includes('SELECT password')), false);
+
+  const wrong = await call('POST', '/api/users/change-password', {
+    token: sign('kasir', 'hasdin'),
+    body: {
+      username: 'admin',
+      currentPassword: 'salah',
+      newPassword: 'baru-rahasia',
+      confirmPassword: 'baru-rahasia',
+    },
+  });
+  assert.equal(wrong.status, 401);
+  assert.equal(calls.some((item) => item.sql.startsWith('UPDATE')), false);
+
+  const ok = await call('POST', '/api/users/change-password', {
+    token: sign('kasir', 'hasdin'),
+    body: {
+      username: 'admin',
+      currentPassword: 'lama-rahasia',
+      newPassword: 'baru-rahasia',
+      confirmPassword: 'baru-rahasia',
+    },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.success, true);
+  const update = calls.find((item) => item.sql.startsWith('UPDATE web_admins SET password'));
+  assert.equal(update.params[1], 'hasdin');
+  assert.equal(isScryptHash(update.params[0]), true);
+  assert.equal(await verifyPassword('baru-rahasia', update.params[0]), true);
 });

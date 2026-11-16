@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import api from './api/axios.js'
 
-const API = '/api/settings/server-time'
+const API = '/settings/server-time'
 const SYNC_INTERVAL_MS = 60000
 
 export const TIMEZONE_CHANGED_EVENT = 'timezone-changed'

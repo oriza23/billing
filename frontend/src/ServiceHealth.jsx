@@ -1,21 +1,53 @@
 import { useEffect, useState } from 'react'
 import { Database, Globe, RefreshCw, ShieldCheck } from 'lucide-react'
 import api from './api/axios.js'
-import './ServiceHealth.css'
 
 const REFRESH_MS = 10000
 
 const SERVICES = [
   { key: 'web', name: 'Sistem Web', icon: Globe },
-  { key: 'database', name: 'Database MariaDB', icon: Database },
+  { key: 'database', name: 'Database PostgreSQL', icon: Database },
   { key: 'radius', name: 'Radius Server', icon: ShieldCheck },
 ]
+
+const SETTING_CARD =
+  'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm transition-shadow hover:shadow-md dark:border-slate-700 dark:bg-slate-900'
 
 function formatJam(isoText) {
   if (!isoText) {
     return '-'
   }
   return new Date(isoText).toLocaleTimeString('en-GB', { hour12: false })
+}
+
+function cardShellClass(state) {
+  if (state === 'online') {
+    return 'border-emerald-200/80 bg-emerald-50/30 dark:border-emerald-900/50 dark:bg-emerald-950/20'
+  }
+  if (state === 'offline') {
+    return 'border-red-200/80 bg-red-50/40 dark:border-red-900/50 dark:bg-red-950/20'
+  }
+  return 'border-gray-200 bg-gray-50/50 dark:border-slate-700 dark:bg-slate-800/40'
+}
+
+function iconShellClass(state) {
+  if (state === 'online') {
+    return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300'
+  }
+  if (state === 'offline') {
+    return 'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300'
+  }
+  return 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+}
+
+function badgeClass(state) {
+  if (state === 'online') {
+    return 'inline-flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400'
+  }
+  if (state === 'offline') {
+    return 'inline-flex shrink-0 items-center gap-1.5 rounded-full bg-red-500/10 px-2.5 py-1 text-xs font-bold text-red-700 dark:bg-red-500/15 dark:text-red-400'
+  }
+  return 'inline-flex shrink-0 items-center gap-1.5 rounded-full bg-slate-500/10 px-2.5 py-1 text-xs font-bold text-slate-600 dark:bg-slate-500/15 dark:text-slate-400'
 }
 
 function ServiceHealth() {
@@ -29,7 +61,7 @@ function ServiceHealth() {
     async function check() {
       setChecking(true)
       try {
-        const response = await api.get('/api/system/health')
+        const response = await api.get('/system/health')
         if (!ignore) {
           setHealth(response.data)
           setUnreachable(false)
@@ -88,37 +120,49 @@ function ServiceHealth() {
   const labels = { online: 'Online', offline: 'Offline', unknown: '...' }
 
   return (
-    <section className="health-panel" aria-label="Status Layanan">
-      <header className="health-head">
+    <section className={SETTING_CARD} aria-label="Status Layanan">
+      <header className="mb-5 flex items-start justify-between gap-3">
         <div>
-          <h2>Status Layanan</h2>
-          <p>
+          <h2 className="m-0 text-lg font-bold text-slate-900 dark:text-gray-100">Status Layanan</h2>
+          <p className="mt-1 mb-0 text-sm text-slate-500 dark:text-gray-400">
             {unreachable
               ? 'Gagal menghubungi server'
               : `Pemeriksaan terakhir ${formatJam(health?.checked_at)} · otomatis tiap 10 detik`}
           </p>
         </div>
-        <span className={checking ? 'health-refresh is-spinning' : 'health-refresh'} aria-hidden="true">
+        <span
+          className={`grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 ${checking ? 'animate-spin' : ''}`}
+          aria-hidden="true"
+        >
           <RefreshCw size={16} />
         </span>
       </header>
 
-      <div className="health-grid">
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
         {SERVICES.map(({ key, name, icon: Icon }) => {
           const state = stateOf(key)
           return (
-            <article key={key} className={`health-card is-${state}`}>
-              <span className="health-icon">
-                <Icon size={22} />
+            <article
+              key={key}
+              className={`flex items-center gap-4 rounded-xl border p-4 shadow-sm transition-shadow hover:shadow-md ${cardShellClass(state)}`}
+            >
+              <span
+                className={`grid h-12 w-12 shrink-0 place-items-center rounded-full ${iconShellClass(state)}`}
+              >
+                <Icon size={22} strokeWidth={2} />
               </span>
-              <div className="health-info">
-                <h3>{name}</h3>
-                <p>{detailOf(key)}</p>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                  <h3 className="m-0 text-sm font-bold text-slate-900 dark:text-gray-100">{name}</h3>
+                  <span className={badgeClass(state)}>
+                    {state === 'online' && (
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />
+                    )}
+                    {labels[state]}
+                  </span>
+                </div>
+                <p className="mt-1 mb-0 text-xs text-slate-500 dark:text-gray-400">{detailOf(key)}</p>
               </div>
-              <span className={`health-badge is-${state}`}>
-                <i aria-hidden="true" />
-                {labels[state]}
-              </span>
             </article>
           )
         })}

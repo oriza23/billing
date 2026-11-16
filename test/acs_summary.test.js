@@ -348,7 +348,7 @@ test('extractWlans: TR-098 dengan 4 SSID 2.4G + 4 SSID 5G', () => {
   assert.equal(wlans[4].status, false);
 });
 
-test('extractWlans: keamanan terbuka, channel menentukan pita, SSID tanpa node dilewati', () => {
+test('extractWlans: keamanan terbuka, channel menentukan pita, slot kosong jadi SSID default', () => {
   const wlans = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {
     1: wlanNode({ SSID: 'Tamu', BeaconType: 'Basic', BasicEncryptionModes: 'None', Enable: true }),
     2: wlanNode({ SSID: 'Aneh', BeaconType: 'Basic', BasicEncryptionModes: 'WEPEncryption', Channel: 36, OperatingChannelBandwidth: '80MHz', Enable: 'true' }),
@@ -356,12 +356,17 @@ test('extractWlans: keamanan terbuka, channel menentukan pita, SSID tanpa node d
     4: 'bukan-objek',
     x: wlanNode({ SSID: 'bukan-angka' }),
   } } } } });
-  assert.equal(wlans.length, 2);
+  assert.equal(wlans.length, 4);
   assert.equal(wlans[0].security, 'Open System');
   assert.equal(wlans[0].status, true);
   assert.equal(wlans[1].security, 'WEPEncryption');
   assert.equal(wlans[1].freq, '5 GHz');
   assert.equal(wlans[1].band, '80MHz');
+  assert.deepEqual(wlans[2], {
+    id: '3', ssid: 'SSID3', password: '-', security: 'None', freq: '2.4 GHz', band: '-', connected: 0, status: false,
+  });
+  assert.equal(wlans[3].ssid, 'SSID4');
+  assert.equal(wlans[3].status, false);
 });
 
 test('extractWlans: TR-181 (SSID + AccessPoint + Radio)', () => {
@@ -379,15 +384,327 @@ test('extractWlans: TR-181 (SSID + AccessPoint + Radio)', () => {
   assert.deepEqual(wlans[0], {
     id: '1', ssid: 'Rumah', password: 'sandi-181', security: 'WPA2-Personal', freq: '2.4 GHz', band: '40MHz', connected: 4, status: true,
   });
+  assert.equal(wlans.length, 4);
   assert.equal(wlans[1].freq, '5 GHz');
   assert.equal(wlans[1].security, 'Open System');
   assert.equal(wlans[1].status, false);
+  assert.equal(wlans[2].ssid, 'SSID3');
+  assert.equal(wlans[2].status, false);
+  assert.equal(wlans[3].freq, '2.4 GHz');
 });
 
-test('extractWlans: data kosong -> array kosong; projection WLAN terpisah dari daftar ONU', () => {
-  assert.deepEqual(extractWlans({}), []);
-  assert.deepEqual(extractWlans(null), []);
-  assert.deepEqual(extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {} } } } }), []);
+test('extractWlans: data kosong tetap 4 SSID default; indeks 5 GHz memperpanjang daftar', () => {
+  const defaults = [1, 2, 3, 4].map((index) => ({
+    id: String(index),
+    ssid: `SSID${index}`,
+    password: '-',
+    security: 'None',
+    freq: '2.4 GHz',
+    band: '-',
+    connected: 0,
+    status: false,
+  }));
+  assert.deepEqual(extractWlans({}), defaults);
+  assert.deepEqual(extractWlans(null), defaults);
+  assert.deepEqual(extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {} } } } }), defaults);
+
+  const extended = extractWlans({ InternetGatewayDevice: { LANDevice: { 1: { WLANConfiguration: {
+    1: wlanNode({ SSID: 'Utama', Enable: '1' }),
+    6: wlanNode({ SSID: 'Lima', Enable: '0' }),
+  } } } } });
+  assert.equal(extended.length, 6);
+  assert.equal(extended[0].ssid, 'Utama');
+  assert.equal(extended[4].ssid, 'SSID5');
+  assert.equal(extended[4].freq, '5 GHz');
+  assert.equal(extended[5].ssid, 'Lima');
+  assert.equal(extended[5].freq, '5 GHz');
   assert.ok(WLANS_PROJECTION.includes('WLANConfiguration'));
   assert.ok(!LIVE_PROJECTION.split(',').some((path) => path.endsWith('WLANConfiguration')));
+});
+
+const { extractLanConfig, LAN_PROJECTION } = require('../backend/acs_summary');
+
+test('extractLanConfig: TR-098 LANHostConfigManagement lengkap', () => {
+  const item = { InternetGatewayDevice: { LANDevice: { 1: {
+    LANEthernetInterfaceConfig: { 1: wlanNode({ MACAddress: 'AA:BB:CC:00:11:22' }) },
+    LANHostConfigManagement: {
+      IPInterface: { 1: wlanNode({ IPInterfaceIPAddress: '192.168.1.1', IPInterfaceSubnetMask: '255.255.255.0' }) },
+      DHCPServerEnable: { _value: true },
+      MinAddress: { _value: '192.168.1.2' },
+      MaxAddress: { _value: '192.168.1.254' },
+      DHCPLeaseTime: { _value: 86400 },
+      DNSServers: { _value: '8.8.8.8, 1.1.1.1' },
+    },
+  } } } };
+  assert.deepEqual(extractLanConfig(item), {
+    ip: '192.168.1.1', subnet: '255.255.255.0', mac: 'AA:BB:CC:00:11:22', dhcpEnabled: true,
+    dhcpMin: '192.168.1.2', dhcpMax: '192.168.1.254', leaseTime: '86400', dns: ['8.8.8.8', '1.1.1.1', '-'],
+  });
+});
+
+test('extractLanConfig: nilai DHCP berbagai bentuk, 3 DNS, dan data kosong', () => {
+  const cfg = (extra) => extractLanConfig({ InternetGatewayDevice: { LANDevice: { 1: { LANHostConfigManagement: extra } } } });
+  assert.equal(cfg({ DHCPServerEnable: { _value: '1' } }).dhcpEnabled, true);
+  assert.equal(cfg({ DHCPServerEnable: { _value: 'true' } }).dhcpEnabled, true);
+  assert.equal(cfg({ DHCPServerEnable: { _value: '0' } }).dhcpEnabled, false);
+  assert.equal(cfg({ DHCPServerEnable: { _value: false } }).dhcpEnabled, false);
+  assert.deepEqual(cfg({ DNSServers: { _value: '1.1.1.1,8.8.8.8,9.9.9.9,4.4.4.4' } }).dns, ['1.1.1.1', '8.8.8.8', '9.9.9.9']);
+  assert.deepEqual(cfg({ DNSServers: { _value: ',  ,' } }).dns, ['-', '-', '-']);
+  assert.deepEqual(extractLanConfig({}), {
+    ip: '-', subnet: '-', mac: '-', dhcpEnabled: false, dhcpMin: '-', dhcpMax: '-', leaseTime: '-', dns: ['-', '-', '-'],
+  });
+  assert.deepEqual(extractLanConfig(null).dns, ['-', '-', '-']);
+});
+
+test('extractLanConfig: cadangan TR-181 dan projection LAN terpisah dari daftar ONU', () => {
+  const cfg = extractLanConfig({ Device: {
+    IP: { Interface: { 1: { IPv4Address: { 1: wlanNode({ IPAddress: '10.0.0.1', SubnetMask: '255.255.0.0' }) } } } },
+    DHCPv4: { Server: { Enable: { _value: true }, Pool: { 1: wlanNode({ MinAddress: '10.0.0.10', MaxAddress: '10.0.0.99', LeaseTime: 3600, DNSServers: '10.0.0.1' }) } } },
+  } });
+  assert.equal(cfg.ip, '10.0.0.1');
+  assert.equal(cfg.subnet, '255.255.0.0');
+  assert.equal(cfg.dhcpEnabled, true);
+  assert.equal(cfg.dhcpMin, '10.0.0.10');
+  assert.equal(cfg.leaseTime, '3600');
+  assert.deepEqual(cfg.dns, ['10.0.0.1', '-', '-']);
+  assert.ok(LAN_PROJECTION.includes('LANHostConfigManagement'));
+  assert.ok(!LIVE_PROJECTION.includes('LANHostConfigManagement'));
+});
+
+const { extractWans, extractZteAclServiceControl, allUsedPortsOf, WANS_PROJECTION, ssidCountOf } = require('../backend/acs_summary');
+
+test('extractWans: TR-098 PPP dan IP, VLAN vendor, sandi disamarkan', () => {
+  const item = {
+    InternetGatewayDevice: {
+      WANDevice: {
+        1: {
+          WANConnectionDevice: {
+            1: {
+              'X_CT-COM_WANGponLinkConfig': { VLANIDMark: v('200') },
+              WANPPPConnection: {
+                1: host({
+                  Name: 'pppoe_internet',
+                  ConnectionStatus: 'Connected',
+                  ExternalIPAddress: '100.64.1.9',
+                  RemoteIPAddress: '100.64.0.1',
+                  Username: 'budi@isp',
+                  Password: 'rahasia-ppp',
+                  'X_CT-COM_ServiceList': 'INTERNET',
+                  DNSServers: '8.8.8.8,1.1.1.1',
+                  ConnectionTrigger: 'AlwaysOn',
+                  NATEnabled: '1',
+                  TransportType: 'PPPoE',
+                  MACAddress: 'AA:BB:CC:DD:EE:FF',
+                  ConnectionType: 'IP_Routed',
+                  Uptime: '3660',
+                }),
+              },
+              WANIPConnection: {
+                1: {},
+                2: host({
+                  Name: 'ip_tr069',
+                  ConnectionStatus: 'Disconnected',
+                  ExternalIPAddress: '10.1.1.5',
+                  DefaultGateway: '10.1.1.1',
+                  'X_BROADCOM_COM_VLANID': '100',
+                  NATEnabled: false,
+                  Uptime: '0',
+                }),
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(wans.length, 2);
+  assert.equal(JSON.stringify(wans).includes('rahasia-ppp'), false);
+  assert.deepEqual(wans[0], {
+    id: '1.1.ppp.1',
+    fullPath: 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.',
+    type: 'PPP',
+    name: 'pppoe_internet',
+    status: 'Connected',
+    statusSource: 'ConnectionStatus',
+    ip: '100.64.1.9',
+    remoteIp: '100.64.0.1',
+    username: 'budi@isp',
+    password: '********',
+    vlanStatus: 'Enabled',
+    vlanId: '200',
+    service: 'INTERNET',
+    dns: '8.8.8.8,1.1.1.1',
+    connTrigger: 'AlwaysOn',
+    nat: 'Enabled',
+    transport: 'PPPoE',
+    mac: 'AA:BB:CC:DD:EE:FF',
+    connType: 'IP_Routed',
+    uptime: '3660',
+    serviceControl: '-',
+    portBind: '',
+    boundPorts: [],
+    bound_ports: [],
+  });
+  assert.equal(wans[1].type, 'IP');
+  assert.equal(wans[1].id, '1.1.ip.2');
+  assert.equal(wans[1].fullPath, 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.2.');
+  assert.equal(wans[1].username, '-');
+  assert.equal(wans[1].password, '-');
+  assert.equal(wans[1].remoteIp, '10.1.1.1');
+  assert.equal(wans[1].vlanId, '100');
+  assert.equal(wans[1].vlanStatus, 'Enabled');
+  assert.equal(wans[1].nat, 'Disabled');
+  assert.equal(wans[1].transport, 'IP_Routed');
+  assert.equal(wans[1].service, '-');
+  assert.equal(wans[1].connTrigger, 'AlwaysOn');
+});
+
+test('extractWans: TR-181 hanya PPP dan IP upstream, LAN tidak ikut', () => {
+  const item = {
+    Device: {
+      PPP: {
+        Interface: {
+          1: host({
+            Name: 'wanppp',
+            Username: 'user@isp',
+            Password: 'sandi-181',
+            ConnectionStatus: 'Connected',
+            ConnectionTrigger: 'OnDemand',
+          }),
+        },
+      },
+      IP: {
+        Interface: {
+          1: {
+            ...host({ Name: 'lan', Upstream: false, Status: 'Up', MACAddress: '11:11:11:11:11:11' }),
+            IPv4Address: { 1: host({ IPAddress: '192.168.1.1' }) },
+          },
+          2: {
+            ...host({
+              Name: 'wanip',
+              Upstream: true,
+              Status: 'Up',
+              LowerLayers: 'Device.Ethernet.VLANTermination.1',
+              MACAddress: '22:22:22:22:22:22',
+              Type: 'Normal',
+            }),
+            IPv4Address: { 1: host({ IPAddress: '36.1.2.3' }) },
+          },
+          3: {
+            ...host({ Name: 'ppp-ip', Upstream: true, Status: 'Up', LowerLayers: 'Device.PPP.Interface.1' }),
+            IPv4Address: { 1: host({ IPAddress: '100.1.1.1' }) },
+          },
+        },
+      },
+      Ethernet: { VLANTermination: { 1: host({ VLANID: '300' }) } },
+      NAT: { InterfaceSetting: { 1: host({ Interface: 'Device.IP.Interface.2', Enable: true }) } },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(JSON.stringify(wans).includes('sandi-181'), false);
+  assert.deepEqual(wans.map((wan) => wan.type), ['PPP', 'IP']);
+  assert.equal(wans[0].fullPath, 'Device.PPP.Interface.1.');
+  assert.equal(wans[1].fullPath, 'Device.IP.Interface.2.');
+  assert.equal(wans[0].ip, '100.1.1.1');
+  assert.equal(wans[0].username, 'user@isp');
+  assert.equal(wans[0].password, '********');
+  assert.equal(wans[0].connTrigger, 'OnDemand');
+  assert.equal(wans[1].ip, '36.1.2.3');
+  assert.equal(wans[1].vlanId, '300');
+  assert.equal(wans[1].vlanStatus, 'Enabled');
+  assert.equal(wans[1].nat, 'Enabled');
+  assert.equal(wans[1].mac, '22:22:22:22:22:22');
+  assert.ok(!wans.some((wan) => wan.ip === '192.168.1.1'));
+});
+
+test('extractWans: port binding ZTE dan Huawei dibaca, jumlah SSID dari NumberOfEntries', () => {
+  const item = {
+    InternetGatewayDevice: {
+      LANDevice: {
+        1: { WLANConfigurationNumberOfEntries: { _value: 8 } },
+      },
+      WANDevice: {
+        1: {
+          WANConnectionDevice: {
+            1: {
+              WANPPPConnection: {
+                1: {
+                  Name: { _value: 'inet' },
+                  Enable: { _value: true },
+                  'X_ZTE-COM_LanInterface': { _value: 'LAN1,SSID1,WAN_PPP_1' },
+                },
+              },
+              WANIPConnection: {
+                1: {
+                  Name: { _value: 'bridge' },
+                  Enable: { _value: true },
+                  X_HW_LANBIND: {
+                    Lan2Enable: { _value: true },
+                    SSID5Enable: { _value: '1' },
+                    SSID6Enable: { _value: false },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const wans = extractWans(item);
+  assert.equal(wans[0].portBind, 'LAN1,SSID1,WAN_PPP_1');
+  assert.deepEqual(wans[0].boundPorts, ['LAN1', 'SSID1']);
+  assert.deepEqual(wans[0].bound_ports, ['LAN1', 'SSID1']);
+  assert.equal(wans[1].portBind, 'LAN2,SSID5');
+  assert.deepEqual(wans[1].boundPorts, ['LAN2', 'SSID5']);
+  assert.deepEqual(allUsedPortsOf(wans), ['LAN1', 'LAN2', 'SSID1', 'SSID5']);
+  assert.equal(ssidCountOf(item), 8);
+  assert.equal(ssidCountOf({
+    InternetGatewayDevice: {
+      LANDevice: { 1: { WLANConfiguration: { 1: { SSID: { _value: 'a' } }, 4: { SSID: { _value: 'd' } } } } },
+    },
+  }), 4);
+  assert.equal(ssidCountOf({}), 0);
+});
+
+test('extractWans Fiberhome: Service List dari X_FH_ServiceList, nama koneksi tidak masuk service', () => {
+  const item = {
+    InternetGatewayDevice: {
+      WANDevice: {
+        1: {
+          WANConnectionDevice: {
+            2: {
+              WANPPPConnection: {
+                1: host({
+                  Name: '2_INTERNET_R_VID_2033',
+                  ConnectionType: 'IP_Routed',
+                  Username: 'budi@net',
+                  'X_FH_ServiceList': 'INTERNET',
+                  'X_FH_LanInterface': 'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1,InternetGatewayDevice.LANDevice.1.WLANConfiguration.1',
+                  VLANID: '2033',
+                  Enable: true,
+                  ConnectionStatus: 'Connected',
+                }),
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const [wan] = extractWans(item);
+  assert.equal(wan.name, '2_INTERNET_R_VID_2033');
+  assert.equal(wan.service, 'INTERNET');
+  assert.deepEqual(wan.boundPorts, ['LAN1', 'SSID1']);
+  assert.deepEqual(allUsedPortsOf([wan]), ['LAN1', 'SSID1']);
+});
+
+test('extractWans: data kosong dan projection tidak ikut daftar ONU', () => {
+  assert.deepEqual(extractWans({}), []);
+  assert.deepEqual(extractWans(null), []);
+  assert.deepEqual(extractWans({ InternetGatewayDevice: { WANDevice: { 1: { WANConnectionDevice: {} } } } }), []);
+  assert.ok(WANS_PROJECTION.includes('InternetGatewayDevice.WANDevice.1.WANConnectionDevice'));
+  // Daftar ONU hanya mengambil Username/IP, bukan seluruh subtree koneksi WAN.
+  assert.ok(!LIVE_PROJECTION.split(',').includes('InternetGatewayDevice.WANDevice.1.WANConnectionDevice'));
 });

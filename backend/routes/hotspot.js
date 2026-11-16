@@ -494,8 +494,8 @@ function randomFromCharset(charset, length) {
 
 // Batas jumlah voucher per sekali generate (stress test target: 2.000 - 3.000).
 const MAX_VOUCHER_QTY = 5000;
-// Batas baris per satu query bulk insert (jauh di bawah max_allowed_packet MariaDB).
-const BULK_CHUNK_SIZE = 5000;
+// Batas baris per query bulk insert. PostgreSQL maks. 65.535 parameter/query; voucher = 12 kolom -> 2.000 baris = 24.000 parameter.
+const BULK_CHUNK_SIZE = 2000;
 const GENERATE_LOCK_NAME = 'billing_hotspot_voucher_generate';
 
 // Aturan Auto-Length: semakin besar qty, semakin panjang kode minimal agar

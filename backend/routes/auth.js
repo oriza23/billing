@@ -6,6 +6,8 @@ const requireAuth = require('../middleware/auth');
 const { hashPassword, isScryptHash, verifyPassword } = require('../password');
 const { secret, expiresIn } = require('../config/jwt');
 
+const { normalizeRole, isSuperRole, labelOf: roleLabel } = require('../roles');
+
 const router = express.Router();
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -68,7 +70,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const [rows] = await pool.execute(
-      'SELECT username, password, role FROM web_admins WHERE username = ? LIMIT 1',
+      'SELECT username, password, role, nama_lengkap FROM web_admins WHERE username = ? LIMIT 1',
       [username],
     );
     const admin = rows[0];
@@ -96,8 +98,16 @@ router.post('/login', async (req, res) => {
     }
 
     failedAttempts.delete(key);
-    const role = admin.role || 'admin';
-    const token = jwt.sign({ username: admin.username, role }, secret, {
+    const role = normalizeRole(admin.role) || 'admin';
+    const namaLengkap = admin.nama_lengkap || admin.username;
+    // Dipakai activity_log agar baris log login memuat nama & role (req.user belum ada di route publik ini).
+    res.locals.logIdentity = { username: admin.username, nama_lengkap: namaLengkap, role };
+    const token = jwt.sign({
+      username: admin.username,
+      nama_lengkap: namaLengkap,
+      role,
+      is_super: isSuperRole(role),
+    }, secret, {
       algorithm: 'HS256',
       expiresIn,
     });
@@ -107,7 +117,10 @@ router.post('/login', async (req, res) => {
       message: 'Login berhasil',
       token,
       username: admin.username,
+      nama_lengkap: namaLengkap,
       role,
+      role_label: roleLabel(role),
+      is_super: isSuperRole(role),
     });
   } catch (error) {
     return res.status(500).json({

@@ -11,12 +11,16 @@ import LanggananProfil from './LanggananProfil.jsx'
 import Login from './Login.jsx'
 import PrintVoucher from './PrintVoucher.jsx'
 import ManajemenAdmin from './ManajemenAdmin.jsx'
+import Logs from './Logs.jsx'
 import PppoeOnline from './PppoeOnline.jsx'
 import PppoePelanggan from './PppoePelanggan.jsx'
 import PppoeProfil from './PppoeProfil.jsx'
 import RouterMaster from './RouterMaster.jsx'
 import SistemPengaturan from './SistemPengaturan.jsx'
+import PaymentSettings from './PaymentSettings.jsx'
 import TambahLanggananPppoe from './TambahLanggananPppoe.jsx'
+import RegistrasiPelanggan from './RegistrasiPelanggan.jsx'
+import IsolirPage from './IsolirPage.jsx'
 
 // Halaman yang butuh login: tanpa token yang valid, paksa kembali ke halaman Login.
 function ProtectedRoute() {
@@ -28,6 +32,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Login />} />
+        <Route path="/isolir" element={<IsolirPage />} />
         <Route element={<ProtectedRoute />}>
           <Route path="/print" element={<PrintVoucher />} />
           <Route path="/dashboard" element={<Dashboard />}>
@@ -44,6 +49,7 @@ function App() {
           <Route path="/langganan" element={<Dashboard />}>
             <Route path="profil" element={<LanggananProfil />} />
             <Route path="data" element={<LanggananData />} />
+            <Route path="registrasi" element={<RegistrasiPelanggan />} />
             <Route path="tambah" element={<TambahLanggananPppoe />} />
             <Route path="online" element={<PppoeOnline />} />
           </Route>
@@ -53,8 +59,12 @@ function App() {
           <Route path="/router" element={<Dashboard />}>
             <Route index element={<RouterMaster />} />
           </Route>
+          <Route path="/logs" element={<Dashboard />}>
+            <Route index element={<Logs />} />
+          </Route>
           <Route path="/sistem" element={<Dashboard />}>
             <Route path="pengaturan" element={<SistemPengaturan />} />
+            <Route path="payment-gateway" element={<PaymentSettings />} />
           </Route>
           <Route path="/manajemen-admin" element={<Dashboard />}>
             <Route index element={<ManajemenAdmin />} />

@@ -6,6 +6,8 @@ const requireRole = require('../middleware/requireRole');
 const router = express.Router();
 const requireAdmin = requireRole('admin');
 
+router.use(require('./payment_settings'));
+
 const TIMEZONE_KEY = 'timezone';
 const DEFAULT_TIMEZONE = 'Asia/Makassar';
 const TIMEZONES = ['Asia/Jakarta', 'Asia/Makassar', 'Asia/Jayapura'];

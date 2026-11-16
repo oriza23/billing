@@ -1,24 +1,42 @@
-# RANIAH.NET — ISP Billing System (Utama)
+# RANIAH.NET ISP Billing System
 
 <div align="center">
 
+[![GitHub — oriza23/billing](https://img.shields.io/badge/GitHub-oriza23%2Fbilling-1e3a8a?style=for-the-badge&logo=github&logoColor=white)](https://github.com/oriza23/billing)
+
+**Repositori resmi:** **[https://github.com/oriza23/billing](https://github.com/oriza23/billing)**
+
+![License](https://img.shields.io/badge/License-ISC-1e3a8a?style=flat-square)
+![Node.js](https://img.shields.io/badge/Node.js-22_LTS-1e3a8a?style=flat-square&logo=node.js&logoColor=white)
+![React](https://img.shields.io/badge/React-Vite-1e3a8a?style=flat-square&logo=react&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-1e3a8a?style=flat-square&logo=postgresql&logoColor=white)
+![FreeRADIUS](https://img.shields.io/badge/FreeRADIUS-3-1e3a8a?style=flat-square)
+
 ### Sistem All-in-One terpusat untuk manajemen ISP mandiri
 
-Dibangun dengan **Node.js** dan **React** — mengelola **billing pelanggan**, autentikasi **FreeRADIUS** (PPPoE & Hotspot), dan provisioning **ACS TR-069** (GenieACS) untuk ONT **Fiberhome / ZTE**, dengan **MikroTik** sebagai NAS.
+**Node.js** · **React** · **PostgreSQL** · **FreeRADIUS** · **GenieACS (TR-069)**
 
-**Satu panel web · satu database PostgreSQL · dari tagihan hingga sesi di router dan parameter di modem.**
+Billing pelanggan · RADIUS **PPPoE & Hotspot** · ACS provisioning ONT **Fiberhome / ZTE** · integrasi **MikroTik** NAS.
 
 </div>
+
+---
+
+## Tentang proyek
+
+**RANIAH.NET ISP Billing System (Utama)** adalah panel operasional ISP dalam satu tempat: tagihan dan CRM, autentikasi pelanggan lewat **FreeRADIUS**, serta manajemen modem lewat **GenieACS**. Aplikasi web memakai **React** (Vite) dan API **Express** (`server.js` + folder `backend/`), dengan **PostgreSQL** sebagai satu sumber data untuk modul billing dan tabel RADIUS.
+
+Deploy produksi standar: **Nginx** (port 80) sebagai reverse proxy ke Node.js (port **5000**), diproses **PM2**, dan diatur oleh skrip **`install.sh`** untuk server **Debian 11** / **Ubuntu 22.04**.
 
 ---
 
 ## Daftar isi
 
 - [Preview antarmuka](#preview-antarmuka)
-- [Diagram arsitektur & aliran data](#diagram-arsitektur--aliran-data)
-- [Diagram alur instalasi otomatis](#diagram-alur-instalasi-otomatis)
-- [Panduan instalasi](#panduan-instalasi-step-by-step)
-- [Input yang diminta install.sh](#input-yang-diminta-installsh)
+- [Diagram arsitektur](#diagram-arsitektur--aliran-data)
+- [Diagram alur instalasi](#diagram-alur-instalasi-installsh)
+- [Panduan instalasi](#panduan-instalasi)
+- [Input install.sh](#input-yang-diminta-installsh)
 - [Kebutuhan sistem & pasca-instalasi](#kebutuhan-sistem--pasca-instalasi)
 - [Dokumentasi lanjutan](#dokumentasi-lanjutan)
 
@@ -26,60 +44,45 @@ Dibangun dengan **Node.js** dan **React** — mengelola **billing pelanggan**, a
 
 ## Preview antarmuka
 
-Tambahkan tangkapan layar aplikasi ke folder **`assets/images/`** (format PNG atau WebP, lebar disarankan 1280px) agar pratinjau tampil di GitHub.
+Letakkan tangkapan layar di **`assets/images/`** agar GitHub menampilkannya.
 
-| Pratinjau | File |
-|-----------|------|
-| Dashboard & ringkasan operasional | `assets/images/dashboard.png` |
-| Manajemen ACS & inventaris ONT | `assets/images/acs-panel.png` |
-| Hotspot, voucher & integrasi RADIUS | `assets/images/hotspot.png` |
+| Layar | Berkas |
+|-------|--------|
+| Dashboard utama | `assets/images/dashboard.png` |
+| Manajemen ACS & ONT | `assets/images/acs-panel.png` |
+| Hotspot & RADIUS | `assets/images/hotspot.png` |
+| PPPoE & langganan | `assets/images/pppoe.png` |
 
 ![Dashboard Utama](assets/images/dashboard.png)
 
-*Gambar 1 — Dashboard utama RANIAH.NET (letakkan berkas `dashboard.png` di `assets/images/`).*
-
 ![Manajemen ACS & ONT](assets/images/acs-panel.png)
 
-*Gambar 2 — Panel ACS: sinkron GenieACS, WiFi/LAN/WAN ONU (`acs-panel.png`).*
-
-![Hotspot Login & Radius](assets/images/hotspot.png)
-
-*Gambar 3 — Manajemen profil hotspot, voucher, dan kaitan ke FreeRADIUS (`hotspot.png`).*
-
-> **Tips untuk maintainer repo:** setelah screenshot siap, commit ketiga file di atas. GitHub akan merender gambar secara otomatis. Nama file harus persis seperti placeholder agar link tidak putus.
+![Hotspot Login & RADIUS](assets/images/hotspot.png)
 
 ---
 
 ## Diagram arsitektur & aliran data
 
-Aliran data **top-down** antara operator, aplikasi billing, database, ACS, RADIUS, NAS, dan CPE pelanggan.
-
-| Kelas warna | Hex | Pemakaian |
-|-------------|-----|-----------|
-| Aplikasi inti | `#1e3a8a` | React, Node.js API, FreeRADIUS |
-| Eksternal / data | `#f3f4f6` + tepi `#374151` | Browser, PostgreSQL, GenieACS, MikroTik, ONT |
-| Latar diagram | `#ffffff` | Latar putih (identitas visual RANIAH.NET) |
-
 ```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#1e3a8a', 'lineColor': '#374151', 'clusterBkg': '#ffffff'}}}%%
+%%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'lineColor': '#374151'}}}%%
 graph TD
-  BROWSER["Web Browser\nAdmin & staf ISP"]
-  REACT["React Frontend\nSPA · Vite build"]
-  NODE["Node.js API\nExpress · server.js"]
-  PG[("PostgreSQL\nBilling + RADIUS")]
-  GENIE["API GenieACS\nNBI / CWMP"]
-  RADIUS["FreeRADIUS 3\nrlm_sql_postgresql"]
-  MIKROTIK["MikroTik\nNAS · PPPoE · Hotspot"]
-  ONT["Modem ONT\nFiberhome · ZTE"]
+  BROWSER["Web Browser"]
+  REACT["React Frontend"]
+  NODE["Node.js API"]
+  PG[("PostgreSQL")]
+  GENIE["API GenieACS"]
+  RADIUS["FreeRADIUS"]
+  MIKROTIK["MikroTik NAS"]
+  ONT["Modem ONT"]
 
   BROWSER --> REACT
-  REACT <-->|"REST · same origin"| NODE
-  NODE <-->|"SQL"| PG
-  NODE <-->|"REST provisioning"| GENIE
-  RADIUS <-->|"radcheck · radacct"| PG
-  MIKROTIK <-->|"AAA UDP"| RADIUS
-  ONT <-->|"L2/L3"| MIKROTIK
-  ONT <-->|"TR-069"| GENIE
+  REACT <--> NODE
+  NODE <--> PG
+  NODE <--> GENIE
+  RADIUS <--> PG
+  MIKROTIK <--> RADIUS
+  ONT --> MIKROTIK
+  ONT --> GENIE
 
   classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
   classDef raniahExt fill:#f3f4f6,stroke:#374151,color:#111827,stroke-width:2px
@@ -90,164 +93,133 @@ graph TD
 
 ---
 
-## Diagram alur instalasi otomatis
-
-Urutan kerja **`install.sh`** pada server fresh (Debian 11 / Ubuntu 22.04+).
-
-> **Catatan:** pada deploy **billing utama**, web dilayani langsung oleh **Node.js** (port **5000**); installer **tidak memasang Nginx**. Node *Setup OS & Nginx* di diagram mengikuti alur dokumen standar—langkah OS & dependensi pada skrip hanya memasang paket dasar, PostgreSQL, FreeRADIUS, Node, dan PM2.
+## Diagram alur instalasi (`install.sh`)
 
 ```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#1e3a8a', 'lineColor': '#374151'}}}%%
+%%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'lineColor': '#374151'}}}%%
 graph TD
-  START([Mulai deploy]) --> IN["Input kredensial\nDB · Web Admin · RADIUS Secret"]
-  IN --> OS["Setup OS & Nginx\napt · UFW · dependensi"]
-  OS --> DB["Instalasi PostgreSQL\n& FreeRADIUS"]
-  DB --> NPMOD["Konfigurasi SQL RADIUS\nimpor skema · clients.conf"]
-  NPMOD --> NODE["Setup Node.js 22 & PM2"]
-  NODE --> BUILD["Build React\nnpm run build"]
-  BUILD --> FIN(["Selesai\nhttp://IP:5000"])
+  A([Clone repo]) --> B["Input kredensial\nDB · Web · RADIUS"]
+  B --> C["Setup OS & Nginx\ncurl · wget · git"]
+  C --> D["PostgreSQL\nrole + database"]
+  D --> E["FreeRADIUS\nimpor skema SQL"]
+  E --> F["Konfigurasi SQL + clients.conf"]
+  F --> G["Node.js 22 & PM2\nnpm backend + migrasi"]
+  G --> H["Build React frontend"]
+  H --> I["Nginx reverse proxy\nrestart layanan"]
+  I --> J([Selesai])
 
   classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
   classDef raniahExt fill:#f3f4f6,stroke:#374151,color:#111827,stroke-width:2px
 
-  class IN,OS,DB,NPMOD,NODE,BUILD raniahApp
-  class START,FIN raniahExt
+  class B,C,D,E,F,G,H,I raniahApp
+  class A,J raniahExt
 ```
 
 ---
 
-## Panduan instalasi (step-by-step)
+## Panduan instalasi
 
 ### Prasyarat
 
-- **Debian 11** atau **Ubuntu 22.04** LTS (atau turunan Ubuntu yang Anda uji).
-- Akses **root** / **sudo**.
-- Git terpasang di server.
+- **OS:** Debian 11 atau Ubuntu 22.04 LTS (24.04 umumnya kompatibel).
+- **Root/sudo**, koneksi internet, port **80**, **1812/1813 UDP** tidak bentrok.
 
-### Perintah copy-paste
+### Perintah (repositori resmi)
 
-Ganti URL `git clone` dengan repositori GitHub **RANIAH.NET** Anda.
+Clone dari **[github.com/oriza23/billing](https://github.com/oriza23/billing)**:
 
 ```bash
 sudo mkdir -p /var/www
 cd /var/www
-
-# Clone repositori (sesuaikan URL)
-sudo git clone https://github.com/ORGANISASI-ANDA/raniah-billing.git billing
+sudo git clone https://github.com/oriza23/billing.git billing
 cd billing
-
-# Izin eksekusi installer
-sudo chmod +x install.sh scripts/setup-admin.js
-
-# Instalasi interaktif penuh stack billing
+chmod +x install.sh scripts/setup-admin.js
 sudo ./install.sh
 ```
 
-### Verifikasi singkat
+> `git clone` memakai URL `.../billing.git` (format standar Git). Halaman repo di browser: **https://github.com/oriza23/billing**
+
+### Tanpa Nginx (opsional)
 
 ```bash
-sudo systemctl is-active postgresql freeradius
-pm2 ls
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
+sudo USE_NGINX=0 ./install.sh
 ```
 
-Buka browser: **`http://<IP-SERVER>:5000`** — login dengan user superadmin dari instalasi.
+Akses langsung: `http://IP:5000`.
 
-### Opsi environment
+### Verifikasi
 
 ```bash
-sudo APP_PORT=5000 ./install.sh          # port web (default 5000)
-# sudo GENIEACS_OPEN_NBI=1 ./install.sh  # buka 7557 — hanya jika Anda paham risikonya
+sudo systemctl status nginx postgresql freeradius --no-pager
+pm2 ls
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1/
 ```
 
 ---
 
 ## Input yang diminta `install.sh`
 
-| Pertanyaan installer | Default | Keterangan |
-|----------------------|---------|------------|
-| **Nama DB** (`DB_NAME`) | `orizabil` | Database PostgreSQL billing + RADIUS |
-| **User DB** (`DB_USER`) | `oriza` | Role PostgreSQL |
-| **Password DB** (`DB_PASS`) | otomatis | Kosongkan Enter = password acak |
-| **Web Admin** (`WEB_ADMIN`) | `admin` | Username login panel |
-| **Password Web Admin** (`WEB_PASS`) | — | **Wajib**, minimal 8 karakter |
-| **RADIUS Secret** (`RADIUS_SECRET`) | otomatis | Secret NAS MikroTik ↔ FreeRADIUS |
-| Nama lengkap admin | = Web Admin | Profil superadmin awal |
-| Konfirmasi lanjut | `N` | Ketik **`y`** untuk melanjutkan |
-
-Skrip juga menghasilkan **`JWT_SECRET`**, menulis **`.env`** (`DB_SERVICE=postgresql`), mengimpor skema RADIUS, mendaftarkan client **`0.0.0.0/0`**, menjalankan migrasi skema aplikasi, **`setup-admin.js`**, dan **`pm2 start`** proses `billing`.
-
-Kredensial: **`/var/www/billing/.env`** — jangan di-commit.
+| Prompt | Variabel | Default | Catatan |
+|--------|----------|---------|---------|
+| Nama Database | `DB_NAME` | `orizabil` | PostgreSQL billing + RADIUS |
+| Username DB | `DB_USER` | `oriza` | Role PostgreSQL |
+| Password DB | `DB_PASS` | acak | Enter = otomatis |
+| Username Web Admin | `WEB_ADMIN` | `admin` | Login panel |
+| Password Web Admin | `WEB_PASS` | — | **Wajib**, min. 8 karakter |
+| RADIUS Secret | `RADIUS_SECRET` | acak | Secret MikroTik ↔ FreeRADIUS |
+| Nama lengkap admin | — | = WEB_ADMIN | Profil superadmin |
+| Domain/IP Nginx | `server_name` | `_` | Hanya jika `USE_NGINX=1` |
+| Lanjut? | — | `N` | Ketik `y` untuk melanjutkan |
 
 ---
 
 ## Kebutuhan sistem & pasca-instalasi
 
-### Spesifikasi server
+### Spesifikasi minimum
 
-| Aspek | Minimum | Produksi (perkiraan) |
-|--------|---------|----------------------|
-| **OS** | Debian 11 / Ubuntu 22.04 | LTS yang didukung tim Anda |
-| **CPU** | 2 vCPU | 4 vCPU |
-| **RAM** | 2 GB | 4–8 GB *(+ GenieACS di host yang sama)* |
-| **Disk** | 20 GB SSD | 40 GB+ SSD |
+| Aspek | Minimum | Disarankan |
+|--------|---------|------------|
+| OS | Debian 11 / Ubuntu 22.04 | LTS terbaru |
+| CPU | 2 vCPU | 4 vCPU |
+| RAM | 2 GB | 4–8 GB |
+| Disk | 20 GB SSD | 40 GB+ SSD |
 
-**Stack yang dipasang `install.sh`:** PostgreSQL, FreeRADIUS (`freeradius-postgresql`), Node.js **22**, PM2, build frontend React, aturan UFW (SSH, web, RADIUS UDP, port GenieACS).
+**Dependensi (via installer):** PostgreSQL, FreeRADIUS + modul PostgreSQL, Node.js **22**, PM2, **Nginx**, UFW.
 
-### Port utama
+### Port layanan
 
 | Port | Layanan |
 |------|---------|
-| 5000/tcp | Web billing |
-| 5432/tcp | PostgreSQL *(localhost)* |
-| 1812/udp, 1813/udp | RADIUS |
-| 7547, 7567, 3000/tcp | GenieACS *(bila diinstal bersama)* |
-| 7557/tcp | GenieACS NBI *(default hanya localhost)* |
+| 80/tcp | Nginx → billing |
+| 5000/tcp | Node.js (internal) |
+| 5432/tcp | PostgreSQL (localhost) |
+| 1812/1813 UDP | FreeRADIUS |
+| 7547, 7567, 3000/tcp | GenieACS (jika di host yang sama) |
 
 ### Pasca-instalasi
 
-1. Login panel → lengkapi profil ISP, router, server ACS (`127.0.0.1:7557` jika GenieACS lokal).
-2. `pm2 save` dan jalankan perintah **`pm2 startup`** yang ditampilkan installer.
-3. Backup rutin: `pg_dump` + salinan `.env`.
-4. HTTPS: gunakan reverse proxy terpisah; set `TRUST_PROXY=1` hanya di belakang proxy tepercaya.
+1. Buka **`http://IP-SERVER/`**, login superadmin.
+2. Isi router MikroTik, profil PPPoE/Hotspot, server GenieACS (`127.0.0.1:7557` untuk NBI lokal).
+3. `pm2 save` + `pm2 startup`.
+4. Backup rutin `pg_dump` dan file `.env`.
 
-### Konfigurasi Winbox — MikroTik ke RADIUS Server
+### Winbox — MikroTik → RADIUS
 
-Gunakan **`IP_SERVER`** (IP VPS billing) dan **`RADIUS_SECRET`** sama persis dengan input instalasi.
+1. **Radius** → **+**
+2. **Address:** IP server billing  
+3. **Secret:** sama dengan **RADIUS_SECRET** saat `install.sh`  
+4. **Auth:** `1812` · **Acct:** `1813` · centang **ppp** / **hotspot**  
+5. Aktifkan **accounting** untuk pelaporan sesi.
 
-#### 1. Tambah server RADIUS
-
-1. **Winbox** → **Radius** → **+**
-2. **Services:** centang **ppp**, **hotspot**, **login** (sesuai topologi).
-3. **Address:** `IP_SERVER`
-4. **Secret:** `RADIUS_SECRET`
-5. **Authentication Port:** `1812`
-6. **Accounting Port:** `1813`
-7. **Timeout:** 3000–5000 ms
-8. Aktifkan **accounting** untuk pelacakan sesi di `radacct`.
-
-#### 2. PPPoE & Hotspot memakai RADIUS
-
-- **PPP:** aktifkan penggunaan RADIUS pada pengaturan AAA/PPP server Anda.
-- **Hotspot → Server Profile:** **Use RADIUS** = **yes** untuk voucher/profil dari billing.
-
-#### 3. Jaringan
-
-- Pastikan MikroTik mengirim **UDP 1812/1813** ke `IP_SERVER` (buka firewall di VPS jika perlu — UFW installer sudah mengizinkan RADIUS).
-
-#### 4. API RouterOS (fitur billing)
-
-Daftarkan router di panel billing: IP, user API, port **8728**/**8729**. Batasi hak user API seminimal mungkin.
-
-Detail isolir PPPoE: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
+Detail isolir: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
 
 ---
 
 ## Dokumentasi lanjutan
 
-| Berkas | Isi |
-|--------|-----|
-| [`docs/DATABASE-POSTGRESQL.md`](docs/DATABASE-POSTGRESQL.md) | PostgreSQL & `.env` |
+| Dokumen | Isi |
+|---------|-----|
+| [`docs/DATABASE-POSTGRESQL.md`](docs/DATABASE-POSTGRESQL.md) | PostgreSQL & variabel lingkungan |
 | [`docs/MIGRASI-MARIADB-KE-POSTGRESQL.md`](docs/MIGRASI-MARIADB-KE-POSTGRESQL.md) | Migrasi legacy |
 | [`deploy/freeradius/README.md`](deploy/freeradius/README.md) | Modul FreeRADIUS |
 
@@ -255,8 +227,6 @@ Detail isolir PPPoE: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
 
 <div align="center">
 
-**RANIAH.NET** · ISP Billing System
-
-*Biru tua · data terpusat · Billing · RADIUS · ACS*
+**RANIAH.NET** · [github.com/oriza23/billing](https://github.com/oriza23/billing)
 
 </div>

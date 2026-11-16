@@ -2,6 +2,10 @@
 
 <div align="center">
 
+[![GitHub — oriza23/billing](https://img.shields.io/badge/GitHub-oriza23%2Fbilling-1e3a8a?style=for-the-badge&logo=github&logoColor=white)](https://github.com/oriza23/billing)
+
+**Repositori resmi:** **[https://github.com/oriza23/billing](https://github.com/oriza23/billing)**
+
 ![License](https://img.shields.io/badge/License-ISC-1e3a8a?style=flat-square)
 ![Node.js](https://img.shields.io/badge/Node.js-22_LTS-1e3a8a?style=flat-square&logo=node.js&logoColor=white)
 ![React](https://img.shields.io/badge/React-Vite-1e3a8a?style=flat-square&logo=react&logoColor=white)
@@ -13,8 +17,6 @@
 **Node.js** · **React** · **PostgreSQL** · **FreeRADIUS** · **GenieACS (TR-069)**
 
 Billing pelanggan · RADIUS **PPPoE & Hotspot** · ACS provisioning ONT **Fiberhome / ZTE** · integrasi **MikroTik** NAS.
-
-**Repositori resmi:** [https://github.com/oriza23/billing.git](https://github.com/oriza23/billing.git)
 
 </div>
 
@@ -124,6 +126,8 @@ graph TD
 
 ### Perintah (repositori resmi)
 
+Clone dari **[github.com/oriza23/billing](https://github.com/oriza23/billing)**:
+
 ```bash
 sudo mkdir -p /var/www
 cd /var/www
@@ -132,6 +136,8 @@ cd billing
 chmod +x install.sh scripts/setup-admin.js
 sudo ./install.sh
 ```
+
+> `git clone` memakai URL `.../billing.git` (format standar Git). Halaman repo di browser: **https://github.com/oriza23/billing**
 
 ### Tanpa Nginx (opsional)
 

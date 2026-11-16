@@ -4,7 +4,7 @@
 # Auto-deploy server fresh: Debian 11 / Ubuntu 22.04+ (termasuk Ubuntu 24.04)
 #
 # Stack: PostgreSQL · FreeRADIUS (PostgreSQL) · Node.js 22 · PM2 · Nginx
-# Repo: https://github.com/oriza23/billing.git
+# Repo: https://github.com/oriza23/billing
 #
 # Backend: server.js + folder backend/ (kode) di akar repositori (bukan paket npm terpisah).
 # Frontend: frontend/ (React + Vite build → frontend/dist, dilayani Express).

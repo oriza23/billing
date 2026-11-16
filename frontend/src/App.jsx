@@ -11,6 +11,7 @@ import LanggananProfil from './LanggananProfil.jsx'
 import Login from './Login.jsx'
 import PrintVoucher from './PrintVoucher.jsx'
 import ManajemenAdmin from './ManajemenAdmin.jsx'
+import Logs from './Logs.jsx'
 import PppoeOnline from './PppoeOnline.jsx'
 import PppoePelanggan from './PppoePelanggan.jsx'
 import PppoeProfil from './PppoeProfil.jsx'
@@ -57,6 +58,9 @@ function App() {
           </Route>
           <Route path="/router" element={<Dashboard />}>
             <Route index element={<RouterMaster />} />
+          </Route>
+          <Route path="/logs" element={<Dashboard />}>
+            <Route index element={<Logs />} />
           </Route>
           <Route path="/sistem" element={<Dashboard />}>
             <Route path="pengaturan" element={<SistemPengaturan />} />

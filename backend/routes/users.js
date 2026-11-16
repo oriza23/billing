@@ -1,9 +1,11 @@
 const crypto = require('crypto');
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const pool = require('../../database');
 const { hashPassword, isScryptHash, verifyPassword } = require('../password');
+const { secret, expiresIn } = require('../config/jwt');
 const {
-  readEmail, isValidEmail, saveProfilePhoto, safeUnlink, publicAdminRow,
+  readEmail, readNama, isValidEmail, saveProfilePhoto, safeUnlink, publicAdminRow, adminIdentity,
 } = require('../web_admins');
 
 const router = express.Router();
@@ -43,7 +45,7 @@ router.get('/profile', async (req, res) => {
 
   try {
     const [rows] = await pool.execute(
-      'SELECT id, username, role, email, foto_profil FROM web_admins WHERE username = ? LIMIT 1',
+      'SELECT id, username, nama_lengkap, role, email, foto_profil FROM web_admins WHERE username = ? LIMIT 1',
       [username],
     );
     if (!rows[0]) {
@@ -72,6 +74,7 @@ router.put('/profile', async (req, res) => {
   }
 
   const email = readEmail(req.body?.email);
+  const namaLengkap = readNama(req.body?.nama_lengkap);
   const fotoData = req.body?.foto_profil_base64;
 
   if (!isValidEmail(email)) {
@@ -103,12 +106,12 @@ router.put('/profile', async (req, res) => {
     }
 
     await pool.execute(
-      'UPDATE web_admins SET email = ?, foto_profil = ? WHERE username = ?',
-      [email, fotoPath || null, username],
+      'UPDATE web_admins SET email = ?, nama_lengkap = ?, foto_profil = ? WHERE username = ?',
+      [email, namaLengkap || username, fotoPath || null, username],
     );
 
     const [updated] = await pool.execute(
-      'SELECT id, username, role, email, foto_profil FROM web_admins WHERE username = ? LIMIT 1',
+      'SELECT id, username, nama_lengkap, role, email, foto_profil FROM web_admins WHERE username = ? LIMIT 1',
       [username],
     );
 
@@ -116,6 +119,12 @@ router.put('/profile', async (req, res) => {
       success: true,
       message: 'Profil berhasil disimpan',
       profile: publicAdminRow(updated[0]),
+      // Token baru dipakai frontend agar Log Aplikasi langsung memakai nama terbaru.
+      identity: await adminIdentity(pool, username),
+      token: jwt.sign(await adminIdentity(pool, username), secret, {
+        algorithm: 'HS256',
+        expiresIn,
+      }),
     });
   } catch (error) {
     return res.status(error.message?.includes('foto') ? 400 : 500).json({

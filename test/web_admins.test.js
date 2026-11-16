@@ -16,7 +16,14 @@ test('publicAdminRow tidak mengekspos password', () => {
   assert.deepEqual(publicAdminRow({
     id: 1, username: 'a', role: 'admin', password: 'secret', email: null, foto_profil: null,
   }), {
-    id: 1, username: 'a', role: 'admin', email: '', foto_profil: '',
+    id: 1,
+    username: 'a',
+    nama_lengkap: '',
+    role: 'admin',
+    role_label: 'Administrator',
+    is_super: true,
+    email: '',
+    foto_profil: '',
   });
 });
 

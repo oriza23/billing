@@ -1,0 +1,2 @@
+ALTER SCHEMA NAMES MATCHING 'orizabil' RENAME TO 'public';
+)

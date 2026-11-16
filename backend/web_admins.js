@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { normalizeRole, isSuperRole, labelOf: roleLabel } = require('./roles');
 
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'admin-profiles');
 const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
@@ -9,6 +10,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 async function ensureWebAdminColumns(db) {
   await db.query('ALTER TABLE web_admins ADD COLUMN IF NOT EXISTS email VARCHAR(255) NULL');
   await db.query('ALTER TABLE web_admins ADD COLUMN IF NOT EXISTS foto_profil VARCHAR(500) NULL');
+  // Nama lengkap dipakai di tampilan Log Aplikasi ("Berasal" siapa) & sapaan header.
+  await db.query('ALTER TABLE web_admins ADD COLUMN IF NOT EXISTS nama_lengkap VARCHAR(100) NULL');
+}
+
+// Nama lengkap opsional; bila kosong, UI memakai username.
+function readNama(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 100) : '';
 }
 
 function readEmail(value) {
@@ -83,18 +91,48 @@ function publicAdminRow(row) {
   return {
     id: row.id,
     username: row.username,
+    nama_lengkap: row.nama_lengkap || '',
     role: row.role,
+    role_label: roleLabel(row.role),
+    is_super: isSuperRole(row.role),
     email: row.email || '',
     foto_profil: row.foto_profil || '',
   };
 }
 
+// Identitas admin untuk dibuatkan token: JWT memuat nama lengkap & label role
+// supaya Log Aplikasi dan sapaan header tidak perlu query ulang setiap request.
+async function adminIdentity(db, username) {
+  const [rows] = await db.execute(
+    'SELECT username, nama_lengkap, role FROM web_admins WHERE username = ? LIMIT 1',
+    [username],
+  );
+  const admin = rows[0] || {};
+  return {
+    username,
+    nama_lengkap: admin.nama_lengkap || username,
+    role: normalizeRole(admin.role) || 'admin',
+    role_label: roleLabel(admin.role),
+    is_super: isSuperRole(admin.role),
+  };
+}
+
+// Isi nama_lengkap lama (kosong/NULL) dengan username supaya tampilan tidak "-".
+async function backfillNamaLengkap(db) {
+  await db.query(
+    "UPDATE web_admins SET nama_lengkap = username WHERE nama_lengkap IS NULL OR nama_lengkap = ''",
+  );
+}
+
 module.exports = {
   ensureWebAdminColumns,
   readEmail,
+  readNama,
   isValidEmail,
   saveProfilePhoto,
   safeUnlink,
   publicAdminRow,
+  adminIdentity,
+  backfillNamaLengkap,
   MAX_PHOTO_BYTES,
 };

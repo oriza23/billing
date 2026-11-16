@@ -14,6 +14,7 @@ function ManajemenAdmin() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [username, setUsername] = useState('')
+  const [namaLengkap, setNamaLengkap] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('admin')
   const [email, setEmail] = useState('')
@@ -62,6 +63,7 @@ function ManajemenAdmin() {
     setEditMode(false)
     setSelectedUsername('')
     setUsername('')
+    setNamaLengkap('')
     setPassword('')
     setRole('admin')
     setEmail('')
@@ -83,6 +85,7 @@ function ManajemenAdmin() {
     setEditMode(true)
     setSelectedUsername(item.username)
     setUsername(item.username)
+    setNamaLengkap(item.nama_lengkap || '')
     setPassword('')
     setRole(item.role || 'admin')
     setEmail(item.email || '')
@@ -148,13 +151,14 @@ function ManajemenAdmin() {
       if (editMode) {
         await api.put(
           `/admins/${encodeURIComponent(selectedUsername)}`,
-          { password, role, email: email.trim() },
+          { password, role, nama_lengkap: namaLengkap.trim(), email: email.trim() },
         )
       } else {
         await api.post('/admins', {
           username,
           password,
           role,
+          nama_lengkap: namaLengkap.trim(),
           email: email.trim(),
         })
       }
@@ -200,6 +204,7 @@ function ManajemenAdmin() {
                 <tr>
                   <th>No</th>
                   <th>Username</th>
+                  <th>Nama Lengkap</th>
                   <th>Email</th>
                   <th>Role</th>
                   <th>Aksi</th>
@@ -208,7 +213,7 @@ function ManajemenAdmin() {
               <tbody>
                 {admins.length === 0 ? (
                   <tr>
-                    <td colSpan="5" className="admin-empty">
+                    <td colSpan="6" className="admin-empty">
                       Belum ada data admin.
                     </td>
                   </tr>
@@ -220,9 +225,10 @@ function ManajemenAdmin() {
                     >
                       <td>{index + 1}</td>
                       <td>{item.username}</td>
+                      <td>{item.nama_lengkap || '-'}</td>
                       <td>{item.email || '-'}</td>
                       <td>
-                        <span className="admin-role">{item.role}</span>
+                        <span className="admin-role">{item.role_label || item.role}</span>
                       </td>
                       <td>
                         <div className="admin-actions">
@@ -291,6 +297,18 @@ function ManajemenAdmin() {
                 </label>
 
                 <label className="admin-field">
+                  <span>Nama Lengkap</span>
+                  <input
+                    type="text"
+                    name="nama_lengkap"
+                    placeholder="mis. Hasdin Adi Saputra"
+                    value={namaLengkap}
+                    onChange={(event) => setNamaLengkap(event.target.value)}
+                    maxLength={100}
+                  />
+                </label>
+
+                <label className="admin-field">
                   <span>Alamat Email</span>
                   <input
                     type="email"
@@ -305,14 +323,18 @@ function ManajemenAdmin() {
 
                 <label className="admin-field">
                   <span>Role</span>
-                  <input
-                    type="text"
+                  <select
                     name="role"
-                    placeholder="admin"
                     value={role}
                     onChange={(event) => setRole(event.target.value)}
                     required
-                  />
+                  >
+                    <option value="admin">Administrator</option>
+                    <option value="operator">Operator</option>
+                    <option value="teknisi">Teknisi</option>
+                    <option value="cs">Customer Service</option>
+                    <option value="customer">Pelanggan</option>
+                  </select>
                 </label>
               </div>
 

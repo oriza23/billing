@@ -1,5 +1,7 @@
 # FreeRADIUS: sisa waktu voucher
 
+Aplikasi billing memakai **PostgreSQL** sebagai database utama. Modul SQL FreeRADIUS harus memakai driver PostgreSQL (`rlm_sql_postgresql`) dan skema resmi paket `freeradius-postgresql`, bukan MariaDB. Lihat juga [docs/DATABASE-POSTGRESQL.md](../../docs/DATABASE-POSTGRESQL.md).
+
 Modul `mods-available/hotspot_time` menjumlahkan `acctsessiontime` di `radacct` dan membandingkannya dengan `Max-All-Session` pada `radgroupcheck`.
 
 ## Pemasangan

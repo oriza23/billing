@@ -72,7 +72,8 @@
   font-weight: 700;
 }
 
-.admin-field input {
+.admin-field input,
+.admin-field select {
   width: 100%;
   box-sizing: border-box;
   height: 46px;
@@ -86,11 +87,16 @@
   outline: none;
 }
 
+.admin-field select {
+  cursor: pointer;
+}
+
 .admin-field input::placeholder {
   color: #8aa0b5;
 }
 
-.admin-field input:focus {
+.admin-field input:focus,
+.admin-field select:focus {
   border-color: #0891b2;
   box-shadow: 0 0 0 4px rgba(8, 145, 178, 0.16);
   background: #fff;

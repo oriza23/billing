@@ -173,7 +173,14 @@ test('role selain admin ditolak saat menulis dan tetap boleh membaca', async () 
   const admins = await call('GET', '/api/admins', { token });
   assert.equal(admins.status, 200);
   assert.deepEqual(admins.body, [{
-    id: 1, username: 'ada', role: 'admin', email: 'ada@test.com', foto_profil: '',
+    id: 1,
+    username: 'ada',
+    nama_lengkap: '',
+    role: 'admin',
+    role_label: 'Administrator',
+    is_super: true,
+    email: 'ada@test.com',
+    foto_profil: '',
   }]);
   const packed = JSON.stringify(admins.body);
   assert.equal(packed.includes('password'), false);

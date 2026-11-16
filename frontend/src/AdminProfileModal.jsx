@@ -4,6 +4,7 @@ import { User, X } from 'lucide-react'
 import Swal from 'sweetalert2'
 import { fireError, fireSuccess } from './swals.js'
 import api from './api/axios.js'
+import { updateIdentity } from './api/auth.js'
 
 function errorMessage(error, fallback) {
   return error?.response?.data?.message || fallback
@@ -33,6 +34,7 @@ export default function AdminProfileModal({ username, onClose, onSaved }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [profileUsername, setProfileUsername] = useState(username || '')
+  const [namaLengkap, setNamaLengkap] = useState('')
   const [email, setEmail] = useState('')
   const [fotoPath, setFotoPath] = useState('')
   const [previewUrl, setPreviewUrl] = useState('')
@@ -52,6 +54,7 @@ export default function AdminProfileModal({ username, onClose, onSaved }) {
         }
         const data = response.data || {}
         setProfileUsername(data.username || username || '')
+        setNamaLengkap(data.nama_lengkap || '')
         setEmail(data.email || '')
         setFotoPath(data.foto_profil || '')
       } catch (error) {
@@ -113,11 +116,13 @@ export default function AdminProfileModal({ username, onClose, onSaved }) {
     event.preventDefault()
     setSaving(true)
     try {
-      const payload = { email: email.trim() }
+      const payload = { email: email.trim(), nama_lengkap: namaLengkap.trim() }
       if (photoDataUrl) {
         payload.foto_profil_base64 = photoDataUrl
       }
       const response = await api.put('/users/profile', payload)
+      // Simpan identitas & token baru supaya Log Aplikasi memakai nama terbaru.
+      updateIdentity(response.data?.identity, response.data?.token)
       await fireSuccess({
         title: 'Berhasil',
         text: response.data?.message || 'Profil berhasil disimpan',
@@ -180,13 +185,26 @@ export default function AdminProfileModal({ username, onClose, onSaved }) {
             </div>
 
             <label className="grid gap-1.5 text-sm font-semibold text-gray-600 dark:text-gray-300">
-              <span>Nama / Username</span>
+              <span>Username</span>
               <input
                 type="text"
                 value={profileUsername}
                 disabled
                 className="h-11 rounded-xl border border-gray-300 bg-gray-100 px-3 text-sm font-medium text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
               />
+            </label>
+
+            <label className="grid gap-1.5 text-sm font-semibold text-gray-600 dark:text-gray-300">
+              <span>Nama Lengkap</span>
+              <input
+                type="text"
+                value={namaLengkap}
+                onChange={(event) => setNamaLengkap(event.target.value)}
+                placeholder="mis. Hasdin Adi Saputra"
+                maxLength={100}
+                className="h-11 rounded-xl border border-gray-300 bg-gray-50 px-3 text-sm font-medium text-gray-900 outline-none focus:border-cyan-600 focus:ring-4 focus:ring-cyan-600/15 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+              />
+              <span className="text-xs font-normal text-gray-400 dark:text-gray-500">Ditampilkan di Log Aplikasi.</span>
             </label>
 
             <label className="grid gap-1.5 text-sm font-semibold text-gray-600 dark:text-gray-300">

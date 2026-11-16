@@ -1,0 +1,110 @@
+2026-11-16T04:42:45.011000Z LOG pgloader version "3.6.7~devel"
+2026-11-16T04:42:45.014000Z LOG Data errors in '/tmp/pgloader/'
+2026-11-16T04:42:45.014000Z LOG Parsing commands from file #P"/tmp/pgloader-orizabil.load"
+KABOOM!
+ESRAP-PARSE-ERROR: At
+
+        type date drop not null drop default using zero-dates-to-null,
+        type tinyint to smallint when (= 1 precision) usi
+                                 ^ (Line 14, Column 31, Position 636)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "with"
+An unhandled error condition has been signalled: At
+
+        type date drop not null drop default using zero-dates-to-null,
+        type tinyint to smallint when (= 1 precision) usi
+                                 ^ (Line 14, Column 31, Position 636)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "with"
+
+
+
+
+What I am doing here?
+
+At
+
+        type date drop not null drop default using zero-dates-to-null,
+        type tinyint to smallint when (= 1 precision) usi
+                                 ^ (Line 14, Column 31, Position 636)
+
+In context COMMAND:
+
+While parsing COMMAND. Expected:
+
+     the character Tab
+  or the character Newline
+  or the character Return
+  or the character Space
+  or the character , (COMMA)
+  or the string "--"
+  or the string "/*"
+  or the character ; (SEMICOLON)
+  or the string "after"
+  or the string "alter"
+  or the string "before"
+  or the string "cast"
+  or the string "decoding"
+  or the string "distribute"
+  or the string "drop"
+  or the string "excluding"
+  or the string "including"
+  or the string "keep"
+  or the string "materialize"
+  or the string "set"
+  or the string "to"
+  or the string "using"
+  or the string "with"
+

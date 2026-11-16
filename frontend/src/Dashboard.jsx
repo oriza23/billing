@@ -12,6 +12,7 @@ import {
   Menu,
   Network,
   Router,
+  ScrollText,
   Settings,
   Shield,
   Ticket,
@@ -20,7 +21,7 @@ import {
   WalletCards,
   Wifi,
 } from 'lucide-react'
-import { clearSession, getUsername } from './api/auth.js'
+import { clearSession, getNamaLengkap, getRoleLabel, getUsername } from './api/auth.js'
 import ChangePasswordModal from './ChangePasswordModal.jsx'
 import AdminProfileModal from './AdminProfileModal.jsx'
 import api from './api/axios.js'
@@ -148,8 +149,20 @@ function ProfileMenu({ username, onLogout }) {
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [avatarUrl, setAvatarUrl] = useState('')
+  const [namaLengkap, setNamaLengkap] = useState(getNamaLengkap)
+  const [roleLabel, setRoleLabel] = useState(getRoleLabel)
   const menuRef = useRef(null)
-  const label = username || 'Pengguna'
+  const label = namaLengkap || username || 'Pengguna'
+
+  useEffect(() => {
+    const syncIdentity = () => {
+      setNamaLengkap(getNamaLengkap())
+      setRoleLabel(getRoleLabel())
+    }
+    syncIdentity()
+    window.addEventListener('admin-session-changed', syncIdentity)
+    return () => window.removeEventListener('admin-session-changed', syncIdentity)
+  }, [username])
 
   useEffect(() => {
     let ignore = false
@@ -203,7 +216,10 @@ function ProfileMenu({ username, onLogout }) {
             <User size={16} />
           )}
         </span>
-        <span className="truncate">{label}</span>
+        <span className="min-w-0 text-left">
+          <span className="block max-w-[10rem] truncate leading-tight">{label}</span>
+          <span className="block truncate text-[11px] font-semibold text-gray-400 leading-tight dark:text-gray-400">{roleLabel}</span>
+        </span>
       </button>
 
       {isProfileMenuOpen && (
@@ -235,7 +251,9 @@ function ProfileMenu({ username, onLogout }) {
             <KeyRound size={16} aria-hidden="true" />
             Ubah Password
           </button>
-          <div className="my-1 border-t border-gray-200 dark:border-gray-700" role="separator" />
+          <p className="m-0 border-t border-gray-200 px-3 py-2 text-[11px] font-semibold text-gray-400 dark:border-gray-700 dark:text-gray-500">
+            Login sebagai {username} · {roleLabel}
+          </p>
           <button
             type="button"
             className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-2.5 text-left text-sm font-semibold text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950"
@@ -257,6 +275,8 @@ function ProfileMenu({ username, onLogout }) {
           onClose={() => setProfileOpen(false)}
           onSaved={(profile) => {
             setAvatarUrl(profile?.foto_profil ? profilePhotoUrl(profile.foto_profil) : '')
+            setNamaLengkap(getNamaLengkap())
+            window.dispatchEvent(new Event('admin-session-changed'))
           }}
         />
       )}
@@ -354,6 +374,7 @@ function Dashboard() {
           />
           <SidebarNavLink to="/acs" label="GenieACS" icon={Network} />
           <SidebarNavLink to="/router" label="Router" icon={Router} />
+          <SidebarNavLink to="/logs" label="Logs" icon={ScrollText} />
           <MenuGroup
             label="Sistem"
             icon={Settings}

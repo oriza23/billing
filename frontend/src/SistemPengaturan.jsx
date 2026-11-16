@@ -79,7 +79,7 @@ function SistemPengaturan() {
     const label = TIMEZONE_OPTIONS.find((item) => item.value === timezone)?.label || timezone
     const confirm = await Swal.fire({
       title: 'Terapkan zona waktu?',
-      html: `Zona waktu <b>${label}</b> akan diterapkan ke Web, OS, Database, dan FreeRADIUS.<br/>MariaDB dan FreeRADIUS akan di-restart sebentar (beberapa detik).`,
+      html: `Zona waktu <b>${label}</b> akan diterapkan ke Web, OS, Database, dan FreeRADIUS.<br/>PostgreSQL dan FreeRADIUS akan di-restart sebentar (beberapa detik).`,
       icon: 'question',
       showCancelButton: true,
       confirmButtonText: 'Ya, terapkan',
@@ -118,7 +118,7 @@ function SistemPengaturan() {
     ? [
         { name: 'Web (Aplikasi)', time: status.web?.time, abbr: status.web?.abbr },
         { name: 'OS (Server)', time: status.os?.time, abbr: status.os?.abbr },
-        { name: 'Database (MariaDB)', time: status.database?.time, abbr: status.database?.abbr },
+        { name: 'Database (PostgreSQL)', time: status.database?.time, abbr: status.database?.abbr },
       ]
     : []
   const targetAbbr = TIMEZONE_OPTIONS.find((item) => item.value === status?.target)?.label.match(/\((.+)\)/)?.[1]

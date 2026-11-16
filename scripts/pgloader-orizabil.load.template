@@ -1,0 +1,27 @@
+-- Digenerate oleh migrate-mariadb-to-postgresql.sh — jangan edit manual.
+-- pgloader: MariaDB (orizabil) -> PostgreSQL (orizabil)
+
+LOAD DATABASE
+     FROM mysql://MYSQL_USER:MYSQL_PASS@MYSQL_HOST:MYSQL_PORT/MYSQL_DB
+     INTO postgresql://PG_USER:PG_PASS@PG_HOST:PG_PORT/PG_DB
+
+ WITH include drop, create tables, create indexes, reset sequences,
+      workers = 4, concurrency = 1,
+      multiple readers per thread, rows per range = 100000
+
+ CAST type datetime to timestamptz drop default drop not null using zero-dates-to-null,
+      type date drop not null drop default using zero-dates-to-null,
+      type tinyint to smallint drop typemod,
+      type int to integer drop typemod,
+      type int when unsigned to bigint drop typemod,
+      type bigint to bigint drop typemod,
+      type longtext to text,
+      type mediumtext to text,
+      type tinytext to text
+
+ SET work_mem to '64MB',
+     maintenance_work_mem to '512MB'
+
+ BEFORE LOAD DO
+ $$ DROP SCHEMA IF EXISTS public CASCADE; $$,
+ $$ CREATE SCHEMA public; $$;

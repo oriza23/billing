@@ -6,7 +6,7 @@ const REFRESH_MS = 10000
 
 const SERVICES = [
   { key: 'web', name: 'Sistem Web', icon: Globe },
-  { key: 'database', name: 'Database MariaDB', icon: Database },
+  { key: 'database', name: 'Database PostgreSQL', icon: Database },
   { key: 'radius', name: 'Radius Server', icon: ShieldCheck },
 ]
 

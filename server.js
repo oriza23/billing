@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const pool = require('./database');
-const { ensureWebAdminColumns } = require('./backend/web_admins');
+const { ensureWebAdminColumns, backfillNamaLengkap } = require('./backend/web_admins');
 const requireAuth = require('./backend/middleware/auth');
 const ensureBootstrapAdmin = require('./backend/bootstrap_admin');
 const { startExpiredVoucherEnforcement } = require('./backend/hotspot_quota');
@@ -13,6 +13,9 @@ const { ensureTable: ensureRouterServers } = require('./backend/router_servers')
 const { ensureTables: ensureAcsTables } = require('./backend/acs');
 const { mountFrontend } = require('./backend/serve_frontend');
 const { ensurePaymentSchema } = require('./backend/payment/schema');
+const {
+  ensureTable: ensureActivityLogTable, activityLogger, backfillLegacy,
+} = require('./backend/activity_log');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
@@ -26,6 +29,10 @@ if (String(process.env.TRUST_PROXY || '') === '1') {
 app.use(cors());
 app.use(express.json({ limit: '3mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Audit trail: catat semua request tulis (POST/PUT/PATCH/DELETE) ke /api. Username diambil dari JWT
+// (atau body saat login), jadi pencatat harus berada SETELAH express.json tapi SEBELUM router.
+app.use('/api', activityLogger());
 
 // Login & portal isolir / webhook pembayaran bersifat publik (dilindungi secret/IP, bukan JWT).
 app.use('/api/auth', require('./backend/routes/auth'));
@@ -56,6 +63,7 @@ app.use('/api/pelanggan', pelangganRouter);
 const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
+app.use('/api/logs', require('./backend/routes/logs'));
 app.use('/api/acs', require('./backend/routes/acs'));
 
 // Produksi: sajikan hasil `npm run build` (frontend/dist) di port yang sama dengan API.
@@ -65,6 +73,8 @@ const frontendServed = mountFrontend(app);
 async function ensureAdminTable() {
   await ensureBootstrapAdmin(pool);
   await ensureWebAdminColumns(pool);
+  // Isi nama lengkap lama dengan username agar Log Aplikasi tidak menampilkan "-".
+  await backfillNamaLengkap(pool);
 }
 
 async function ensureHotspotProfilesTable() {
@@ -109,6 +119,7 @@ async function ensureDataWilayahTable() {
 }
 
 async function start() {
+  await pool.ensureCompat();
   await ensureAdminTable();
   await ensurePppoeIsolirSchema(pool);
   await ensurePaymentSchema(pool);
@@ -124,6 +135,13 @@ async function start() {
   await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
+  await ensureActivityLogTable();
+  // Baris lama (versi sebelumnya) belum punya action/info: isi ulang agar tampil utuh.
+  await backfillLegacy();
+  if (String(process.env.BILLING_SCHEMA_ONLY || '') === '1') {
+    console.log('Skema database siap (BILLING_SCHEMA_ONLY).');
+    process.exit(0);
+  }
   const timezone = await settingsRouter.loadTimezone();
   console.log(`Zona waktu server: ${timezone}`);
   const osTimezone = require('./backend/system_time').readOsTimezone();

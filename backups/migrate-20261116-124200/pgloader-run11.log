@@ -1,0 +1,24 @@
+2026-11-16T04:44:23.009999Z LOG pgloader version "3.6.7~devel"
+2026-11-16T04:44:23.172994Z LOG Migrating from #<MYSQL-CONNECTION mysql://oriza@127.0.0.1:3306/orizabil {1006BC7833}>
+2026-11-16T04:44:23.173994Z LOG Migrating into #<PGSQL-CONNECTION pgsql://postgres@UNIX:5432/orizabil {1006BC79C3}>
+2026-11-16T04:44:23.456987Z ERROR Database error 22007: invalid input syntax for type timestamp with time zone: "current_timestamp(6)"
+QUERY: CREATE TABLE orizabil.radpostauth 
+(
+  id       bigserial not null,
+  username varchar(64) not null default '',
+  pass     varchar(64) not null default '',
+  reply    varchar(32) not null default '',
+  authdate timestamptz not null default 'current_timestamp(6)',
+  class    varchar(64) default NULL
+);
+2026-11-16T04:44:23.459986Z FATAL Failed to create the schema, see above.
+2026-11-16T04:44:23.461986Z LOG report summary reset
+       table name     errors       rows      bytes      total time
+-----------------  ---------  ---------  ---------  --------------
+      before load          0          2                     0.036s
+  fetch meta data          0         99                     0.085s
+   Create Schemas          0          0                     0.001s
+ Create SQL Types          0          4                     0.010s
+    Create tables          0          0                     0.000s
+-----------------  ---------  ---------  ---------  --------------
+-----------------  ---------  ---------  ---------  --------------

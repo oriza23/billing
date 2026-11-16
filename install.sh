@@ -1,36 +1,29 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install.sh — Auto-deploy Sistem Billing di server fresh
-# Debian 11 / Ubuntu 22.04 (dan turunan Ubuntu 24.04).
+# install.sh — RANIAH.NET ISP Billing System (Utama)
+# Auto-deploy server fresh: Debian 11 / Ubuntu 22.04+ (termasuk Ubuntu 24.04)
 #
-# Stack: PostgreSQL (billing + RADIUS) · FreeRADIUS rlm_sql_postgresql · Node.js 22 · PM2
+# Stack: PostgreSQL · FreeRADIUS (PostgreSQL) · Node.js 22 · PM2 · Nginx
+# Repo: https://github.com/oriza23/billing.git
 #
-# TIDAK memasang: MariaDB/MySQL, Nginx. Billing hanya PostgreSQL (driver pg + pg_compat).
-# Tanpa Nginx: Express (server.js) menyajikan API + frontend/dist satu port (default 5000).
-# Akses: http://IP-SERVER:5000  (APP_PORT=... sudo ./install.sh untuk ubah port).
+# Backend: server.js + folder backend/ (kode) di akar repositori (bukan paket npm terpisah).
+# Frontend: frontend/ (React + Vite build → frontend/dist, dilayani Express).
 #
-# Server yang sama dengan GenieACS / acs-standalone:
-#   - UFW membuka port GenieACS (lihat variabel GENIEACS_*).
-#   - MariaDB untuk acs-standalone TIDAK diinstal/dihapus oleh script ini; biarkan install.sh acs-standalone.
-#
-# Jalankan dari folder billing (setelah git clone):
-#   chmod +x install.sh scripts/setup-admin.js
-#   sudo ./install.sh
-#
-# Proyek ACS terpisah (/var/www/acs-standalone): pakai install.sh di repo tersebut (MariaDB).
+# MariaDB: tidak dipasang. Proyek acs-standalone (jika ada) memakai installer sendiri.
 # =============================================================================
 set -euo pipefail
 
-# --- Konstanta deploy -------------------------------------------------------
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_PORT="${APP_PORT:-5000}"
-# Port GenieACS (diinstal terpisah di server yang sama)
-GENIEACS_UI_PORT="${GENIEACS_UI_PORT:-3000}"      # UI web
-GENIEACS_CWMP_PORT="${GENIEACS_CWMP_PORT:-7547}"  # TR-069: ONU/CPE terhubung ke sini
-GENIEACS_NBI_PORT="${GENIEACS_NBI_PORT:-7557}"    # NBI REST (dipakai billing; tanpa autentikasi)
-GENIEACS_FS_PORT="${GENIEACS_FS_PORT:-7567}"      # File server (firmware)
-# NBI tanpa login: default hanya localhost. Set GENIEACS_OPEN_NBI=1 bila billing/ACS ada di mesin lain.
+USE_NGINX="${USE_NGINX:-1}"
+NGINX_SITE_NAME="${NGINX_SITE_NAME:-raniah-billing}"
+
+GENIEACS_UI_PORT="${GENIEACS_UI_PORT:-3000}"
+GENIEACS_CWMP_PORT="${GENIEACS_CWMP_PORT:-7547}"
+GENIEACS_NBI_PORT="${GENIEACS_NBI_PORT:-7557}"
+GENIEACS_FS_PORT="${GENIEACS_FS_PORT:-7567}"
 GENIEACS_OPEN_NBI="${GENIEACS_OPEN_NBI:-0}"
+
 RADDB="${RADDB:-/etc/freeradius/3.0}"
 RADIUS_SCHEMA="${RADIUS_SCHEMA:-${RADDB}/mods-config/sql/main/postgresql/schema.sql}"
 CLIENTS_MARKER="BEGIN-ORIZABIL-BILLING-INSTALL"
@@ -55,14 +48,12 @@ info() { echo -e "${YELLOW}$*${NC}"; }
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${RED}$*${NC}"; }
 
-# Escape tunggal kutip untuk literal di SQL PostgreSQL (DO/CREATE ROLE).
 sql_escape_pg() {
   local value=$1
   value=${value//\'/\'\'}
   printf '%s' "$value"
 }
 
-# Escape untuk menulis secret ke clients.conf (hindari karakter pengganggu).
 freeradius_escape() {
   local value=$1
   value=${value//\\/\\\\}
@@ -71,14 +62,14 @@ freeradius_escape() {
 }
 
 if [[ ! -f "$APP_DIR/server.js" || ! -f "$APP_DIR/frontend/package.json" ]]; then
-  die "Jalankan script ini di dalam folder proyek billing (ada server.js dan frontend/package.json)."
+  die "Jalankan script di folder clone billing (ada server.js dan frontend/package.json)."
 fi
 
-echo -e "${CYAN}=== Installer Billing + PostgreSQL + FreeRADIUS (tanpa Nginx) ===${NC}"
+echo -e "${CYAN}=== RANIAH.NET — Installer Billing (PostgreSQL + FreeRADIUS + Nginx) ===${NC}"
 echo
 
 # =============================================================================
-# 1. INPUT INTERAKTIF (read) — sebelum apt/npm
+# 1. INPUT INTERAKTIF
 # =============================================================================
 read -r -p "Nama Database (DB_NAME) [orizabil]: " DB_NAME
 DB_NAME=${DB_NAME:-orizabil}
@@ -113,12 +104,18 @@ fi
 read -r -p "Nama lengkap Superadmin [${WEB_ADMIN}]: " WEB_ADMIN_NAMA
 WEB_ADMIN_NAMA=${WEB_ADMIN_NAMA:-$WEB_ADMIN}
 
-# --- Validasi input ---------------------------------------------------------
+if [[ "$USE_NGINX" == "1" ]]; then
+  read -r -p "Domain / IP Nginx (server_name) [_]: " SERVER_NAME
+  SERVER_NAME=${SERVER_NAME:-_}
+else
+  SERVER_NAME="_"
+fi
+
 if [[ ! "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
-  die "DB_NAME: huruf/underscore di awal, lalu huruf/angka/underscore."
+  die "DB_NAME tidak valid."
 fi
 if [[ ! "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
-  die "DB_USER tidak valid untuk PostgreSQL."
+  die "DB_USER tidak valid."
 fi
 [[ "$DB_PASS" != *$'\n'* ]] || die "DB_PASS tidak boleh mengandung baris baru."
 [[ "$WEB_ADMIN" =~ ^[A-Za-z0-9._-]{1,50}$ ]] || die "WEB_ADMIN tidak valid."
@@ -127,39 +124,44 @@ fi
 
 echo
 info "Ringkasan:"
-echo "  Billing DB : PostgreSQL ${DB_NAME} @ localhost:5432 (${DB_USER}) — bukan MariaDB"
+echo "  DB         : PostgreSQL ${DB_NAME} (${DB_USER}@localhost:5432)"
 echo "  Web admin  : ${WEB_ADMIN}"
-echo "  RADIUS     : secret ****, clients 0.0.0.0/0 (SQL → PostgreSQL)"
-echo "  Web        : http://IP-SERVER:${APP_PORT} (Node.js, tanpa Nginx)"
-echo "  MariaDB    : tidak dipasang (acs-standalone pakai installer sendiri bila perlu)"
+echo "  RADIUS     : secret **** · client 0.0.0.0/0"
+if [[ "$USE_NGINX" == "1" ]]; then
+  echo "  Publik web : Nginx :80 → Node :${APP_PORT}"
+else
+  echo "  Publik web : http://IP:${APP_PORT} (tanpa Nginx)"
+fi
 read -r -p "Lanjut instalasi? [y/N]: " CONFIRM
 CONFIRM=${CONFIRM:-N}
 [[ "$CONFIRM" =~ ^[yY] ]] || die "Instalasi dibatalkan."
 
-# Alias kompatibel .env / setup-admin.js
 DB_PASSWORD="$DB_PASS"
 SUPERADMIN_USER="$WEB_ADMIN"
 SUPERADMIN_PASS="$WEB_PASS"
 SUPERADMIN_NAMA="$WEB_ADMIN_NAMA"
 
 # =============================================================================
-# 2. PERSIAPAN OS & PostgreSQL
+# 2. OS & dependensi (curl, wget, git, nginx)
 # =============================================================================
 info "=== apt update & upgrade ==="
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update
 $SUDO apt-get upgrade -y
 
-info "=== Paket dasar (tanpa nginx, tanpa mariadb-server) ==="
+info "=== Paket dasar: curl, wget, git, nginx, PostgreSQL ==="
 $SUDO apt-get install -y \
-  ca-certificates curl wget git openssl ufw \
+  ca-certificates curl wget git openssl ufw nginx \
   postgresql postgresql-contrib \
   build-essential
 
 if systemctl is-active mariadb >/dev/null 2>&1 || systemctl is-active mysql >/dev/null 2>&1; then
-  info "MariaDB/MySQL sudah berjalan di server (mis. acs-standalone): dibiarkan, billing tetap PostgreSQL."
+  info "MariaDB/MySQL terdeteksi (mis. acs-standalone): tidak diubah oleh installer billing."
 fi
 
+# =============================================================================
+# 3. PostgreSQL
+# =============================================================================
 info "=== PostgreSQL: role, database, hak akses ==="
 $SUDO systemctl enable --now postgresql
 
@@ -185,23 +187,20 @@ GRANT ALL PRIVILEGES ON DATABASE "${DB_NAME_SQL}" TO "${DB_USER_SQL}";
 SQL
 
 PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'SELECT 1;' \
-  || die "Koneksi PostgreSQL gagal untuk user ${DB_USER} — periksa pg_hba.conf / password."
+  || die "Koneksi PostgreSQL gagal untuk ${DB_USER}."
 
 # =============================================================================
-# 3. FreeRADIUS + skema PostgreSQL
+# 4. FreeRADIUS + PostgreSQL
 # =============================================================================
-info "=== FreeRADIUS + freeradius-postgresql (bukan freeradius-mysql) ==="
+info "=== FreeRADIUS + freeradius-postgresql ==="
 $SUDO apt-get install -y freeradius freeradius-postgresql
 if dpkg -s freeradius-mysql >/dev/null 2>&1; then
-  info "=== Mencopot freeradius-mysql (billing memakai rlm_sql_postgresql) ==="
   DEBIAN_FRONTEND=noninteractive $SUDO apt-get purge -y freeradius-mysql || true
 fi
 
-if [[ ! -f "$RADIUS_SCHEMA" ]]; then
-  die "Skema RADIUS tidak ditemukan: $RADIUS_SCHEMA"
-fi
+[[ -f "$RADIUS_SCHEMA" ]] || die "Skema RADIUS tidak ada: $RADIUS_SCHEMA"
 
-info "=== Impor skema RADIUS ke database ${DB_NAME} ==="
+info "=== Impor skema SQL RADIUS ke ${DB_NAME} ==="
 $SUDO -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$RADIUS_SCHEMA"
 
 $SUDO -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
@@ -213,23 +212,15 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${DB_USER_S
 SQL
 
 SQL_MOD="${RADDB}/mods-available/sql"
-if [[ ! -f "$SQL_MOD" ]]; then
-  die "Modul SQL FreeRADIUS tidak ada: $SQL_MOD"
-fi
-
 STAMP=$(date +%Y%m%d-%H%M%S)
 $SUDO cp -a "$SQL_MOD" "${SQL_MOD}.bak.${STAMP}"
-info "Backup modul sql: ${SQL_MOD}.bak.${STAMP}"
 
-info "=== Konfigurasi modul SQL (PostgreSQL) ==="
-# Dialect & driver — memenuhi permintaan rlm_sql_postgresql + kompatibel Debian.
+info "=== mods-enabled/sql → PostgreSQL ==="
 $SUDO sed -i \
   -e 's/^[[:space:]]*dialect[[:space:]]*=.*/\tdialect = "postgresql"/' \
   -e 's/^[[:space:]]*driver[[:space:]]*=.*/\tdriver = "rlm_sql_postgresql"/' \
-  -e 's/^[[:space:]]*#.*driver[[:space:]]*=.*/\tdriver = "rlm_sql_postgresql"/' \
   "$SQL_MOD"
 
-# Koneksi database dari input user
 RAD_ESC_PASS=$(freeradius_escape "$DB_PASS")
 $SUDO sed -i \
   -e 's/^[[:space:]]*server[[:space:]]*=.*/\tserver = "localhost"/' \
@@ -241,14 +232,13 @@ $SUDO sed -i \
 
 $SUDO ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
 
-# Modul hotspot_time (opsional, jika ada di repo)
 HOTSPOT_MOD="$APP_DIR/deploy/freeradius/mods-available/hotspot_time"
 if [[ -f "$HOTSPOT_MOD" ]]; then
   $SUDO install -o freerad -g freerad -m 640 "$HOTSPOT_MOD" "${RADDB}/mods-available/hotspot_time"
   $SUDO ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
 fi
 
-info "=== clients.conf: NAS 0.0.0.0/0 ==="
+info "=== clients.conf (MikroTik / NAS) ==="
 CLIENTS_CONF="${RADDB}/clients.conf"
 RAD_ESC_SECRET=$(freeradius_escape "$RADIUS_SECRET")
 if $SUDO grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
@@ -269,30 +259,29 @@ client billing_nas_all {
 EOF
 fi
 
-info "=== Tes konfigurasi FreeRADIUS ==="
 if ! $SUDO freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then
-  die "freeradius -XC gagal. Lihat /tmp/freeradius-install-${STAMP}.log"
+  die "freeradius -XC gagal — lihat /tmp/freeradius-install-${STAMP}.log"
 fi
 
 # =============================================================================
-# 4. Node.js 22, billing backend/frontend, migrasi & superadmin
+# 5. Node.js 22, backend (akar), frontend build, migrasi & seeder
 # =============================================================================
 if command -v node >/dev/null 2>&1 && node -v | grep -qE '^v22\.'; then
   info "Node.js sudah v22: $(node -v)"
 else
-  info "=== Memasang Node.js 22 LTS (NodeSource) ==="
+  info "=== Node.js 22 LTS (NodeSource) ==="
   curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash -
   $SUDO apt-get install -y nodejs
 fi
 
 if ! command -v pm2 >/dev/null 2>&1; then
-  info "=== Memasang PM2 global ==="
+  info "=== PM2 global ==="
   $SUDO npm install -g pm2
 fi
 
 JWT_SECRET=$(openssl rand -hex 48)
 
-info "=== Menulis .env billing ==="
+info "=== .env (backend / server.js) ==="
 umask 077
 {
   echo "PORT=${APP_PORT}"
@@ -307,98 +296,109 @@ umask 077
   echo "BOOTSTRAP_ADMIN_USERNAME=${WEB_ADMIN}"
   echo "BOOTSTRAP_ADMIN_PASSWORD=${WEB_PASS}"
   echo "SETUP_ADMIN_NAMA_LENGKAP=${WEB_ADMIN_NAMA}"
-  # TRUST_PROXY sengaja tidak diset: tanpa reverse proxy, IP klien (isolir/log) diambil dari
-  # koneksi TCP langsung. Mengaktifkannya tanpa proxy membuat header X-Forwarded-For bisa dipalsukan.
+  if [[ "$USE_NGINX" == "1" ]]; then
+    echo "TRUST_PROXY=1"
+  fi
 } > "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
 echo "VITE_API_URL=" > "$APP_DIR/frontend/.env.production"
 
-info "=== npm install (akar proyek + frontend) ==="
+info "=== npm install backend (akar proyek) ==="
 cd "$APP_DIR"
 npm install
+
+info "=== Migrasi tabel billing (server.js) ==="
+BILLING_SCHEMA_ONLY=1 node server.js
+
+info "=== Seeder superadmin (WEB_ADMIN) ==="
+node "$APP_DIR/scripts/setup-admin.js"
+
+info "=== npm install & build frontend ==="
 cd "$APP_DIR/frontend"
 npm install
 npm run build
 
-info "=== Migrasi skema aplikasi (CREATE TABLE di server.js) ==="
-cd "$APP_DIR"
-BILLING_SCHEMA_ONLY=1 node server.js
-
-info "=== Seeder superadmin (scripts/setup-admin.js) ==="
-node "$APP_DIR/scripts/setup-admin.js"
-
 # =============================================================================
-# 5. PM2 & firewall
+# 6. PM2 & Nginx
 # =============================================================================
 info "=== PM2: billing ==="
-if pm2 describe billing >/dev/null 2>&1; then
-  pm2 delete billing
-fi
+pm2 delete billing 2>/dev/null || true
 pm2 start "$APP_DIR/server.js" --name billing --cwd "$APP_DIR"
 pm2 save
 $SUDO env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
 pm2 save
 
-# --- Billing tidak memakai Nginx: hapus hanya config billing, jangan pasang nginx ---
-$SUDO rm -f /etc/nginx/sites-enabled/billing /etc/nginx/sites-available/billing 2>/dev/null || true
-if dpkg -s nginx >/dev/null 2>&1 || dpkg -s nginx-common >/dev/null 2>&1; then
-  OTHER_SITES=$(ls -A /etc/nginx/sites-enabled 2>/dev/null | grep -vE '^default$' || true)
-  if [[ -z "$OTHER_SITES" ]]; then
-    info "=== Nginx terpasang tanpa situs lain: stop & copot (billing pakai Node :${APP_PORT}) ==="
-    $SUDO systemctl disable --now nginx 2>/dev/null || true
-    DEBIAN_FRONTEND=noninteractive $SUDO apt-get purge -y 'nginx*' || true
-    $SUDO apt-get autoremove -y || true
-  else
-    warn "Nginx dipakai situs lain (${OTHER_SITES}); hanya config 'billing' dihapus."
-  fi
+if [[ "$USE_NGINX" == "1" ]]; then
+  info "=== Nginx reverse proxy → 127.0.0.1:${APP_PORT} ==="
+  NGINX_CONF=$($SUDO mktemp)
+  cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${SERVER_NAME};
+
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+  $SUDO cp "$NGINX_CONF" "/etc/nginx/sites-available/${NGINX_SITE_NAME}"
+  rm -f "$NGINX_CONF"
+  $SUDO ln -sf "/etc/nginx/sites-available/${NGINX_SITE_NAME}" "/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
+  $SUDO rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+  $SUDO nginx -t
+  $SUDO systemctl enable --now nginx
+  $SUDO systemctl reload nginx
 fi
 
-# Port < 1024 (mis. APP_PORT=80) butuh izin bind tanpa root
-if [[ "${APP_PORT}" -lt 1024 ]]; then
-  NODE_BIN=$(readlink -f "$(command -v node)")
-  info "=== Izinkan Node bind port ${APP_PORT} (setcap) ==="
-  $SUDO setcap 'cap_net_bind_service=+ep' "$NODE_BIN"
-  pm2 restart billing --update-env || true
-fi
-
-# --- UFW & layanan ----------------------------------------------------------
-info "=== UFW (SSH, Billing, RADIUS, GenieACS) ==="
+# =============================================================================
+# 7. UFW & restart layanan
+# =============================================================================
+info "=== UFW ==="
 $SUDO ufw allow OpenSSH
-$SUDO ufw allow "${APP_PORT}/tcp" comment 'Billing web'
+if [[ "$USE_NGINX" == "1" ]]; then
+  $SUDO ufw allow 80/tcp comment 'RANIAH billing HTTP'
+  $SUDO ufw allow 443/tcp comment 'RANIAH billing HTTPS' 2>/dev/null || true
+else
+  $SUDO ufw allow "${APP_PORT}/tcp" comment 'RANIAH billing'
+fi
 $SUDO ufw allow 1812/udp comment 'FreeRADIUS auth' 2>/dev/null || true
 $SUDO ufw allow 1813/udp comment 'FreeRADIUS acct' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP (TR-069)'
-$SUDO ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS File Server'
-$SUDO ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI'
+$SUDO ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP' 2>/dev/null || true
+$SUDO ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS FS' 2>/dev/null || true
+$SUDO ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI' 2>/dev/null || true
 if [[ "${GENIEACS_OPEN_NBI}" == "1" ]]; then
-  warn "NBI GenieACS (${GENIEACS_NBI_PORT}) dibuka ke publik dan TIDAK punya autentikasi bawaan!"
+  warn "Port NBI GenieACS ${GENIEACS_NBI_PORT} dibuka ke publik tanpa auth bawaan."
   $SUDO ufw allow "${GENIEACS_NBI_PORT}/tcp" comment 'GenieACS NBI'
-else
-  info "NBI GenieACS (${GENIEACS_NBI_PORT}) tidak dibuka: billing mengaksesnya via localhost."
 fi
 $SUDO ufw --force enable || true
 
-info "=== Restart FreeRADIUS ==="
 $SUDO systemctl enable freeradius
 $SUDO systemctl restart freeradius
+[[ "$USE_NGINX" == "1" ]] && $SUDO systemctl reload nginx
 
 SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
 [[ -n "${SERVER_IP}" ]] || SERVER_IP="127.0.0.1"
 
 echo
-ok "=== Instalasi selesai ==="
-echo -e "${GREEN}Billing  : http://${SERVER_IP}:${APP_PORT}${NC}"
-echo -e "${GREEN}Login    : ${WEB_ADMIN} / (password yang Anda masukkan)${NC}"
-echo -e "${GREEN}Database : PostgreSQL ${DB_NAME} user=${DB_USER}${NC}"
-echo -e "${GREEN}PM2      : pm2 ls   |   pm2 logs billing${NC}"
-echo -e "${GREEN}RADIUS   : DB=${DB_NAME} secret=(input Anda) client 0.0.0.0/0${NC}"
+ok "=== Instalasi RANIAH.NET Billing selesai ==="
+if [[ "$USE_NGINX" == "1" ]]; then
+  echo -e "${GREEN}Web      : http://${SERVER_IP}/  (Nginx → :${APP_PORT})${NC}"
+else
+  echo -e "${GREEN}Web      : http://${SERVER_IP}:${APP_PORT}${NC}"
+fi
+echo -e "${GREEN}Login    : ${WEB_ADMIN}${NC}"
+echo -e "${GREEN}Database : PostgreSQL ${DB_NAME} (${DB_USER})${NC}"
+echo -e "${GREEN}PM2      : pm2 ls · pm2 logs billing${NC}"
+echo -e "${GREEN}RADIUS   : secret = (input Anda) · set sama di MikroTik${NC}"
 echo
-echo "Catatan:"
-echo "  - Billing + FreeRADIUS: PostgreSQL saja (DB_SERVICE=postgresql di .env)"
-echo "  - Kredensial DB di ${APP_DIR}/.env"
-echo "  - Dokumentasi: ${APP_DIR}/docs/DATABASE-POSTGRESQL.md"
-echo "  - Tidak ada Nginx; akses web langsung port ${APP_PORT} (HTTPS opsional: reverse proxy terpisah + TRUST_PROXY=1)"
-echo "  - acs-standalone: MariaDB terpisah — jangan campur DB billing ke MariaDB"
-echo "  - Setelah verifikasi PPP/Hotspot, secret MikroTik = RADIUS_SECRET"
-echo "  - GenieACS (UI :${GENIEACS_UI_PORT}, CWMP :${GENIEACS_CWMP_PORT}) diinstal terpisah; UFW sudah dibuka"
-echo "  - Di Billing > ACS, isi GenieACS: 127.0.0.1 port ${GENIEACS_NBI_PORT} (NBI via localhost)"
+echo "Dokumentasi: ${APP_DIR}/README.md"

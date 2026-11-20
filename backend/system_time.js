@@ -1,6 +1,7 @@
 const fs = require('fs');
 const { execFile } = require('child_process');
 const pool = require('../database');
+const { runPrivileged, writeSystemFile } = require('./privileged');
 
 const ZONEINFO_DIR = '/usr/share/zoneinfo/';
 const LOCALTIME_PATH = '/etc/localtime';
@@ -63,36 +64,34 @@ function readOsTimezone() {
 // Ganti zona waktu OS: timedatectl, lalu fallback manual (mis. di LXC/Proxmox).
 async function setOsTimezone(timezone) {
   try {
-    await run('timedatectl', ['set-timezone', timezone]);
+    await runPrivileged('timedatectl', ['set-timezone', timezone]);
   } catch {
     const zoneFile = `${ZONEINFO_DIR}${timezone}`;
     if (!fs.existsSync(zoneFile)) {
       throw new Error(`File zona waktu tidak ditemukan: ${zoneFile}`);
     }
-    try {
-      fs.unlinkSync(LOCALTIME_PATH);
-    } catch {
-      // abaikan jika belum ada
-    }
-    fs.symlinkSync(zoneFile, LOCALTIME_PATH);
+    // -f menimpa symlink lama, -n tidak membuat symlink ke direktori.
+    await runPrivileged('ln', ['-sfn', zoneFile, LOCALTIME_PATH]);
   }
   if (readOsTimezone() !== timezone) {
     throw new Error('Zona waktu OS gagal diubah');
   }
   // Debian membaca /etc/timezone; timedatectl di container tidak selalu memperbaruinya.
   try {
-    fs.writeFileSync(TIMEZONE_FILE, `${timezone}\n`);
+    await writeSystemFile(TIMEZONE_FILE, `${timezone}\n`);
   } catch {
     // tidak kritis
   }
 }
 
 async function readDatabaseTime() {
+  // Singkatan zona diambil dari to_char('TZ') (= WITA), bukan current_setting('TIMEZONE')
+  // yang berisi nama zona (Asia/Makassar) dan tidak pernah sama dengan singkatan target.
   const [rows] = await pool.query(
-    "SELECT to_char(NOW(), 'DD/MM/YYYY HH24:MI:SS') AS waktu, current_setting('TIMEZONE') AS zona, current_setting('TIMEZONE') AS mode",
+    "SELECT to_char(NOW(), 'DD/MM/YYYY HH24:MI:SS') AS waktu, to_char(NOW(), 'TZ') AS abbr, current_setting('TIMEZONE') AS zona",
   );
-  const abbr = rows[0]?.zona || '';
-  return { time: rows[0]?.waktu || '', abbr, mode: rows[0]?.mode || abbr };
+  const mode = rows[0]?.zona || '';
+  return { time: rows[0]?.waktu || '', abbr: rows[0]?.abbr || '', mode };
 }
 
 async function waitForDatabase() {
@@ -188,14 +187,14 @@ async function applyEverywhere(timezone) {
       dbAbbr = '';
     }
     if (changed || dbAbbr !== target.abbr) {
-      await run('systemctl', ['restart', DB_SERVICE]);
+      await runPrivileged('systemctl', ['restart', DB_SERVICE]);
       await waitForDatabase();
       changed = true;
       steps.push('database');
     }
 
     if (changed) {
-      await run('systemctl', ['restart', RADIUS_SERVICE]);
+      await runPrivileged('systemctl', ['restart', RADIUS_SERVICE]);
       steps.push('radius');
     }
     return steps;

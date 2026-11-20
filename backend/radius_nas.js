@@ -17,6 +17,7 @@
 
 const net = require('net');
 const { execFile } = require('child_process');
+const { execPrivileged } = require('./privileged');
 
 const MANAGED_PREFIX = 'billing-router:';
 const MAX_SECRET_LENGTH = 60; // nas.secret VARCHAR(60)
@@ -243,7 +244,7 @@ function serviceName() {
 function scheduleFreeradiusRestart() {
   clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
-    execFile('systemctl', ['restart', serviceName()], { timeout: 30_000 }, (error) => {
+    execPrivileged('systemctl', ['restart', serviceName()], { timeout: 30_000 }, (error) => {
       if (error) {
         console.error('[radius-nas] restart FreeRADIUS gagal:', error.message);
       } else {

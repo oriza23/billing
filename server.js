@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const securityHeaders = require('./backend/security_headers');
 const pool = require('./database');
 const { ensureWebAdminColumns, backfillNamaLengkap } = require('./backend/web_admins');
 const requireAuth = require('./backend/middleware/auth');
@@ -20,6 +21,24 @@ const {
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
+// Sembunyikan versi framework dan kirim header keamanan pada semua respons.
+app.disable('x-powered-by');
+app.use(securityHeaders);
+
+// CORS: kosong = semua origin (perilaku lama). Isi CORS_ORIGINS (dipisah koma) untuk membatasi,
+// mis. CORS_ORIGINS=https://billing.contoh.id,http://localhost:5173
+const CORS_ORIGINS = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+function corsOrigin(origin, callback) {
+  if (!origin || CORS_ORIGINS.length === 0 || CORS_ORIGINS.includes('*') || CORS_ORIGINS.includes(origin)) {
+    return callback(null, true);
+  }
+  return callback(null, false);
+}
+
 // Hanya aktifkan bila ada reverse proxy (Nginx, Caddy, Cloudflare Tunnel, dll).
 // Tanpa proxy: biarkan mati — IP pelanggan diambil dari koneksi TCP langsung.
 if (String(process.env.TRUST_PROXY || '') === '1') {
@@ -27,7 +46,7 @@ if (String(process.env.TRUST_PROXY || '') === '1') {
   app.set('trust proxy', 1);
 }
 
-app.use(cors());
+app.use(cors({ origin: corsOrigin, maxAge: 600 }));
 app.use(express.json({ limit: '3mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -68,6 +87,25 @@ app.use('/api/acs', require('./backend/routes/acs'));
 // Produksi: sajikan hasil `npm run build` (frontend/dist) di port yang sama dengan API.
 // Letakkan paling akhir agar tidak menimpa route /api.
 const frontendServed = mountFrontend(app);
+
+// Penangan error terakhir: klien menerima JSON ringkas, stack trace hanya masuk log server.
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    return next(error);
+  }
+  const known = {
+    'entity.parse.failed': { status: 400, message: 'Body JSON tidak valid' },
+    'entity.too.large': { status: 413, message: 'Ukuran data melebihi batas' },
+  }[error.type];
+  const status = known?.status || Number(error.status || error.statusCode) || 500;
+  if (status >= 500) {
+    console.error(`[${req.method} ${req.originalUrl}]`, error);
+  }
+  const message = known?.message
+    || (status >= 500 ? 'Terjadi kesalahan pada server' : (error.message || 'Permintaan tidak valid'));
+  res.status(status).json({ success: false, message });
+});
+
 
 async function ensureAdminTable() {
   await ensureBootstrapAdmin(pool);

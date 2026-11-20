@@ -13,7 +13,19 @@ const router = express.Router();
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
+const MAX_TRACKED_KEYS = 10_000;
 const failedAttempts = new Map();
+
+// Buang kunci kedaluwarsa supaya Map tidak tumbuh tanpa batas pada serangan acak.
+const sweepTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of failedAttempts) {
+    if (now - entry.first > LOCK_WINDOW_MS) {
+      failedAttempts.delete(key);
+    }
+  }
+}, LOCK_WINDOW_MS);
+sweepTimer.unref?.();
 
 function readText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -44,6 +56,13 @@ function isLocked(key) {
 function recordFailure(key) {
   const entry = failedAttempts.get(key);
   if (!entry || Date.now() - entry.first > LOCK_WINDOW_MS) {
+    if (!entry && failedAttempts.size >= MAX_TRACKED_KEYS) {
+      // Map menjaga urutan penyisipan: hapus kunci tertua agar ukuran tetap terbatas.
+      const oldest = failedAttempts.keys().next().value;
+      if (oldest !== undefined) {
+        failedAttempts.delete(oldest);
+      }
+    }
     failedAttempts.set(key, { count: 1, first: Date.now() });
     return;
   }

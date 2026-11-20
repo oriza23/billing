@@ -17,6 +17,12 @@ const pool = new Pool({
   idleTimeoutMillis: 30_000,
 });
 
+// Koneksi idle yang diputus server (mis. saat PostgreSQL di-restart dari menu zona waktu)
+// memancarkan 'error' pada pool. Tanpa handler, Node menghentikan seluruh proses.
+pool.on('error', (error) => {
+  console.error('[database] koneksi idle terputus:', error.message);
+});
+
 async function runQuery(client, sql, params) {
   const { text, values } = prepareQuery(sql, params);
   try {

@@ -233,6 +233,23 @@ Nginx menjadi reverse proxy pada port 80 dan PM2 menjaga proses backend tetap be
 
 Untuk memakai PM2 tanpa Nginx, jalankan `sudo USE_PM2=1 ./install.sh`. Untuk Node langsung tanpa kedua komponen, gunakan default atau tetapkan `USE_PM2=0 USE_NGINX=0`. Akses langsung menggunakan `http://IP-SERVER:5000`.
 
+### Hardening: service systemd tanpa root
+
+Backend bisa dijalankan sebagai pengguna sistem `billing` lewat unit systemd, sehingga proses web tidak memegang akses root penuh:
+
+```bash
+sudo deploy/install-service.sh
+```
+
+Skrip memasang `billing.service` (`User=billing`, `Restart=always`, `ProtectSystem=strict`, hanya `uploads/` dan `/etc` yang writable) dan `/etc/sudoers.d/billing` yang hanya mengizinkan restart PostgreSQL/FreeRADIUS serta perubahan zona waktu via `sudo -n`. Bila `FREERADIUS_RESTART_ON_SYNC=1` dipakai, `FREERADIUS_SERVICE` harus tetap `freeradius` agar cocok dengan sudoers.
+
+Catatan keamanan tambahan:
+
+- `CORS_ORIGINS` (lihat `.env.example`) membatasi origin API; kosongkan hanya bila memang perlu akses lintas origin dari mana saja.
+- `server.js` mengirim header `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, dan HSTS saat lewat HTTPS.
+- fail2ban (jail `sshd`) melindungi SSH yang masih memakai login root/password.
+
+
 ### Verifikasi
 
 ```bash

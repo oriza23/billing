@@ -1,0 +1,6 @@
+billing ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl restart postgresql, \
+  /usr/bin/systemctl restart freeradius, \
+  /usr/bin/timedatectl set-timezone *, \
+  /usr/bin/ln -sfn /usr/share/zoneinfo/* /etc/localtime, \
+  /usr/bin/install -m 0644 * /etc/timezone

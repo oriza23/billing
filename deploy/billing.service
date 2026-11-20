@@ -1,0 +1,38 @@
+# Template unit systemd — dipasang oleh deploy/install-service.sh.
+# Aplikasi berjalan sebagai pengguna `billing`, bukan root.
+[Unit]
+Description=RANIAH.NET ISP Billing (API + frontend dist)
+Documentation=file:///var/www/billing/README.md
+After=network-online.target postgresql.service freeradius.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=billing
+Group=billing
+WorkingDirectory=/var/www/billing
+Environment=NODE_ENV=production
+EnvironmentFile=/var/www/billing/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+SyslogIdentifier=billing
+StandardOutput=journal
+StandardError=journal
+
+# Hardening: proses hanya bisa menulis folder upload, /etc (zona waktu) dan tmp privat.
+# NoNewPrivileges harus false karena aplikasi memanggil `sudo -n` (systemctl/timedatectl);
+# flag NNP membuat setuid sudo tidak bisa naik ke root.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/www/billing/uploads /etc
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

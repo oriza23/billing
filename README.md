@@ -248,6 +248,9 @@ Catatan keamanan tambahan:
 - `CORS_ORIGINS` (lihat `.env.example`) membatasi origin API; kosongkan hanya bila memang perlu akses lintas origin dari mana saja.
 - `server.js` mengirim header `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, dan HSTS saat lewat HTTPS.
 - fail2ban (jail `sshd`) melindungi SSH yang masih memakai login root/password.
+- Panel saat ini masih tahap pengembangan dan diakses lewat HTTP; HSTS baru berlaku setelah dipasang reverse proxy TLS.
+- Port GenieACS (3000/7547/7567) sudah dibuka di UFW **secara sengaja** sebagai persiapan; layanan ACS menyusul, jadi port itu wajar belum ada yang listen.
+- `/api/system/health` berada di belakang `requireAuth`, sehingga monitoring eksternal perlu token JWT.
 
 
 ### Verifikasi

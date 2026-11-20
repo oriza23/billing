@@ -251,6 +251,7 @@ Catatan keamanan tambahan:
 - Panel saat ini masih tahap pengembangan dan diakses lewat HTTP; HSTS baru berlaku setelah dipasang reverse proxy TLS.
 - Port GenieACS (3000/7547/7567) sudah dibuka di UFW **secara sengaja** sebagai persiapan; layanan ACS menyusul, jadi port itu wajar belum ada yang listen.
 - `/api/system/health` berada di belakang `requireAuth`, sehingga monitoring eksternal perlu token JWT.
+- Untuk monitoring tanpa JWT tersedia `GET /healthz`: publik, hanya membalas `{ status: "ok" }` (200) atau `{ status: "degraded" }` (503) tanpa detail internal. Set `HEALTH_TOKEN` dan kirim header `X-Health-Token` bila ingin detail database/RADIUS (latensi, state layanan).
 
 
 ### Verifikasi

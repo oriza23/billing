@@ -55,6 +55,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api', activityLogger());
 
 // Hanya login yang publik; semua rute /api lain wajib JWT.
+// /healthz sengaja di luar /api agar bisa dipantau monitoring tanpa token (detail opsional).
+app.use('/healthz', require('./backend/routes/healthz'));
 app.use('/api/auth', require('./backend/routes/auth'));
 app.use('/api', requireAuth);
 

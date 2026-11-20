@@ -24,9 +24,9 @@ Billing pelanggan · RADIUS **PPPoE & Hotspot** · ACS provisioning ONT **Fiberh
 
 ## Tentang proyek
 
-**RANIAH.NET ISP Billing System (Utama)** adalah panel operasional ISP dalam satu tempat: tagihan dan CRM, autentikasi pelanggan lewat **FreeRADIUS**, serta manajemen modem lewat **GenieACS**. Aplikasi web memakai **React** (Vite) dan API **Express** (`server.js` + folder `backend/`), dengan **PostgreSQL** sebagai satu sumber data untuk modul billing dan tabel RADIUS.
+**RANIAH.NET ISP Billing System (Utama)** adalah panel operasional ISP dalam satu tempat: tagihan dan CRM, autentikasi pelanggan lewat **FreeRADIUS**, serta manajemen modem lewat **GenieACS**. Frontend memakai **React** (Vite), backend memakai **Node.js + Express** (`server.js` dan folder `backend/`), dan **PostgreSQL** adalah database runtime untuk billing dan tabel RADIUS. MariaDB tidak diperlukan untuk menjalankan aplikasi.
 
-Deploy produksi standar: **Nginx** (port 80) sebagai reverse proxy ke Node.js (port **5000**), diproses **PM2**, dan diatur oleh skrip **`install.sh`** untuk server **Debian 11** / **Ubuntu 22.04**.
+Saat development, backend dapat dijalankan langsung dengan Node.js di port **5000** dan frontend Vite secara opsional di port **5173**. Hasil build frontend (`frontend/dist`) juga dapat disajikan langsung oleh Express. Skrip **`install.sh`** mengikuti mode Node langsung secara default; **PM2** dan **Nginx** hanya dipasang bila diaktifkan untuk deployment produksi.
 
 ---
 
@@ -34,8 +34,10 @@ Deploy produksi standar: **Nginx** (port 80) sebagai reverse proxy ke Node.js (p
 
 - [Preview antarmuka](#preview-antarmuka)
 - [Diagram arsitektur](#diagram-arsitektur--aliran-data)
-- [Diagram alur instalasi](#diagram-alur-instalasi-installsh)
-- [Panduan instalasi](#panduan-instalasi)
+- [Struktur proyek](#struktur-proyek)
+- [Pengembangan lokal](#pengembangan-lokal-nodejs-langsung)
+- [Diagram alur installer](#diagram-alur-installer-installsh)
+- [Deployment server](#deployment-server)
 - [Input install.sh](#input-yang-diminta-installsh)
 - [Kebutuhan sistem & pasca-instalasi](#kebutuhan-sistem--pasca-instalasi)
 - [Dokumentasi lanjutan](#dokumentasi-lanjutan)
@@ -67,16 +69,17 @@ Letakkan tangkapan layar di **`assets/images/`** agar GitHub menampilkannya.
 %%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'lineColor': '#374151'}}}%%
 graph TD
   BROWSER["Web Browser"]
-  REACT["React Frontend"]
-  NODE["Node.js API"]
+  VITE["Vite dev server :5173"]
+  NODE["Node.js + Express :5000<br/>API + frontend hasil build"]
   PG[("PostgreSQL")]
   GENIE["API GenieACS"]
   RADIUS["FreeRADIUS"]
   MIKROTIK["MikroTik NAS"]
   ONT["Modem ONT"]
 
-  BROWSER --> REACT
-  REACT <--> NODE
+  BROWSER -->|"development"| VITE
+  VITE -->|"API"| NODE
+  BROWSER -->|"hasil build / direct Node"| NODE
   NODE <--> PG
   NODE <--> GENIE
   RADIUS <--> PG
@@ -87,25 +90,94 @@ graph TD
   classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
   classDef raniahExt fill:#f3f4f6,stroke:#374151,color:#111827,stroke-width:2px
 
-  class REACT,NODE,RADIUS raniahApp
+  class VITE,NODE,RADIUS raniahApp
   class BROWSER,PG,GENIE,MIKROTIK,ONT raniahExt
 ```
 
 ---
 
-## Diagram alur instalasi (`install.sh`)
+## Struktur proyek
+
+```text
+.
+├── server.js                 # Entry point API Express dan server frontend
+├── database.js               # Koneksi PostgreSQL
+├── backend/
+│   ├── routes/               # Endpoint API
+│   ├── middleware/           # Autentikasi dan otorisasi
+│   ├── payment/              # Integrasi pembayaran
+│   ├── pppoe_isolir/         # Isolir PPPoE
+│   └── ...                   # Modul ACS, pelanggan, RADIUS, dan lainnya
+├── frontend/
+│   ├── src/                  # Aplikasi React
+│   ├── public/               # Aset statis
+│   └── dist/                 # Hasil build, dibuat oleh Vite
+├── utils/                    # Utilitas backend dan cron
+├── scripts/                  # Setup admin, migrasi, dan administrasi
+├── docs/                     # Dokumentasi teknis
+├── deploy/freeradius/        # Konfigurasi dan panduan FreeRADIUS
+├── test/                     # Tes Node.js
+├── assets/images/            # Gambar dokumentasi
+├── uploads/                  # File runtime yang diunggah
+├── .env.example              # Contoh konfigurasi backend
+├── package.json              # Dependensi dan perintah backend
+└── install.sh                # Installer deployment server
+```
+
+`frontend/dist` adalah hasil generate dan tidak perlu diedit langsung. `backend/pg_compat.js` menerjemahkan sebagian sintaks query lama ke PostgreSQL; file ini tidak membuat koneksi ke MariaDB. Skrip dan dokumentasi migrasi MariaDB hanya untuk sistem legacy.
+
+---
+
+## Pengembangan lokal (Node.js langsung)
+
+Gunakan **Node.js 22.x** dan **npm 12.x**. Pastikan PostgreSQL sudah berjalan dan siapkan database/role sesuai variabel di `.env`.
+
+```bash
+cp .env.example .env
+# Edit .env: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, dan JWT_SECRET
+# Ganti semua nilai contoh dengan kredensial kuat; jangan commit .env.
+npm install
+npm start
+```
+
+Backend berjalan di `http://localhost:5000`. Perintah `npm start` menjalankan `node server.js`; bila `frontend/dist/index.html` tersedia, Express juga menyajikan aplikasi React pada port yang sama.
+
+Untuk hot reload frontend, buka terminal kedua:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Buka `http://localhost:5173`. Vite mengarahkan permintaan API ke backend pada port **5000**. Port `5173` adalah server development dan jangan dibuka ke jaringan publik untuk deployment.
+
+Untuk build frontend dan menyajikannya melalui Node:
+
+```bash
+cd frontend
+npm run build
+cd ..
+npm start
+```
+
+Mode langsung ini cocok untuk development. Node melayani HTTP pada port `5000`; HTTPS, domain, dan pengelolaan proses saat production perlu dikonfigurasi terpisah.
+
+---
+
+## Diagram alur installer (`install.sh`)
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'lineColor': '#374151'}}}%%
 graph TD
   A([Clone repo]) --> B["Input kredensial\nDB · Web · RADIUS"]
-  B --> C["Setup OS & Nginx\ncurl · wget · git"]
+  B --> C["Setup OS\nNginx opsional"]
   C --> D["PostgreSQL\nrole + database"]
   D --> E["FreeRADIUS\nimpor skema SQL"]
   E --> F["Konfigurasi SQL + clients.conf"]
-  F --> G["Node.js 22 & PM2\nnpm backend + migrasi"]
+  F --> G["Node.js 22 + npm\nbackend + migrasi"]
   G --> H["Build React frontend"]
-  H --> I["Nginx reverse proxy\nrestart layanan"]
+  H --> I["Jalankan Node langsung\nPM2/Nginx opsional"]
   I --> J([Selesai])
 
   classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
@@ -117,12 +189,14 @@ graph TD
 
 ---
 
-## Panduan instalasi
+## Deployment server
 
 ### Prasyarat
 
-- **OS:** Debian 11 atau Ubuntu 22.04 LTS (24.04 umumnya kompatibel).
-- **Root/sudo**, koneksi internet, port **80**, **1812/1813 UDP** tidak bentrok.
+- **OS:** Debian 11 atau Ubuntu 22.04 LTS ke atas.
+- **Node.js:** 22.x.
+- PostgreSQL dan akses root/sudo untuk installer.
+- Koneksi internet dan port layanan yang dibutuhkan tidak bentrok.
 
 ### Perintah (repositori resmi)
 
@@ -134,25 +208,41 @@ cd /var/www
 sudo git clone https://github.com/oriza23/billing.git billing
 cd billing
 chmod +x install.sh scripts/setup-admin.js
-sudo ./install.sh
 ```
 
 > `git clone` memakai URL `.../billing.git` (format standar Git). Halaman repo di browser: **https://github.com/oriza23/billing**
 
-### Tanpa Nginx (opsional)
+### Instalasi server (default Node langsung)
+
+Secara default installer menyiapkan PostgreSQL, FreeRADIUS, Node.js 22.x, npm 12.x, dependensi backend/frontend, dan build React. PM2 dan Nginx tidak dipasang; setelah instalasi selesai, jalankan backend secara manual:
 
 ```bash
-sudo USE_NGINX=0 ./install.sh
+sudo ./install.sh
+cd /var/www/billing
+npm start
 ```
 
-Akses langsung: `http://IP:5000`.
+### Deployment produksi dengan PM2 dan Nginx
+
+Aktifkan kedua komponen secara eksplisit:
+
+```bash
+sudo USE_PM2=1 USE_NGINX=1 ./install.sh
+```
+
+Nginx menjadi reverse proxy pada port 80 dan PM2 menjaga proses backend tetap berjalan. Installer belum mengatur sertifikat TLS; HTTPS memerlukan konfigurasi sertifikat terpisah.
+
+Untuk memakai PM2 tanpa Nginx, jalankan `sudo USE_PM2=1 ./install.sh`. Untuk Node langsung tanpa kedua komponen, gunakan default atau tetapkan `USE_PM2=0 USE_NGINX=0`. Akses langsung menggunakan `http://IP-SERVER:5000`.
 
 ### Verifikasi
 
 ```bash
-sudo systemctl status nginx postgresql freeradius --no-pager
+sudo systemctl status postgresql freeradius --no-pager
+# Jika USE_NGINX=1:
+sudo systemctl status nginx --no-pager
+# Jika USE_PM2=1:
 pm2 ls
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1/
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 ```
 
 ---
@@ -168,7 +258,7 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1/
 | Password Web Admin | `WEB_PASS` | — | **Wajib**, min. 8 karakter |
 | RADIUS Secret | `RADIUS_SECRET` | acak | Secret MikroTik ↔ FreeRADIUS |
 | Nama lengkap admin | — | = WEB_ADMIN | Profil superadmin |
-| Domain/IP Nginx | `server_name` | `_` | Hanya jika `USE_NGINX=1` |
+| Domain/IP reverse proxy | `server_name` | `_` | Hanya jika `USE_NGINX=1` |
 | Lanjut? | — | `N` | Ketik `y` untuk melanjutkan |
 
 ---
@@ -184,23 +274,25 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1/
 | RAM | 2 GB | 4–8 GB |
 | Disk | 20 GB SSD | 40 GB+ SSD |
 
-**Dependensi (via installer):** PostgreSQL, FreeRADIUS + modul PostgreSQL, Node.js **22**, PM2, **Nginx**, UFW.
+**Dependensi (via installer):** PostgreSQL, FreeRADIUS + modul PostgreSQL, Node.js **22.x**, npm **12.x**, dan UFW. PM2/Nginx hanya dipasang jika `USE_PM2=1` / `USE_NGINX=1`.
 
 ### Port layanan
 
 | Port | Layanan |
 |------|---------|
-| 80/tcp | Nginx → billing |
-| 5000/tcp | Node.js (internal) |
+| 5000/tcp | Node.js + Express (API dan frontend build) |
+| 5173/tcp | Vite development saja; jangan dibuka ke publik |
+| 80/tcp | Nginx → Node.js, jika `USE_NGINX=1` |
+| 443/tcp | HTTPS setelah sertifikat dan konfigurasi TLS disiapkan terpisah |
 | 5432/tcp | PostgreSQL (localhost) |
 | 1812/1813 UDP | FreeRADIUS |
 | 7547, 7567, 3000/tcp | GenieACS (jika di host yang sama) |
 
 ### Pasca-instalasi
 
-1. Buka **`http://IP-SERVER/`**, login superadmin.
+1. Buka **`http://IP-SERVER/`** bila memakai Nginx, atau **`http://IP-SERVER:5000/`** bila Node diakses langsung; login superadmin.
 2. Isi router MikroTik, profil PPPoE/Hotspot, server GenieACS (`127.0.0.1:7557` untuk NBI lokal).
-3. `pm2 save` + `pm2 startup`.
+3. Jika memakai installer, cek proses dengan `pm2 ls`. Pada development, jalankan `npm start` di terminal.
 4. Backup rutin `pg_dump` dan file `.env`.
 
 ### Winbox — MikroTik → RADIUS

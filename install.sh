@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — RANIAH.NET ISP Billing System (Utama)
-# Auto-deploy server fresh: Debian 11 / Ubuntu 22.04+ (termasuk Ubuntu 24.04)
+# Setup server: Debian 11 / Ubuntu 22.04+ (termasuk Ubuntu 24.04)
 #
-# Stack: PostgreSQL · FreeRADIUS (PostgreSQL) · Node.js 22 · PM2 · Nginx
+# Stack: PostgreSQL · FreeRADIUS (PostgreSQL) · Node.js 22 · React/Vite
 # Repo: https://github.com/oriza23/billing
 #
 # Backend: server.js + folder backend/ (kode) di akar repositori (bukan paket npm terpisah).
 # Frontend: frontend/ (React + Vite build → frontend/dist, dilayani Express).
+# Default development: Node langsung (port 5000); PM2 dan Nginx hanya bila diminta.
 #
 # MariaDB: tidak dipasang. Proyek acs-standalone (jika ada) memakai installer sendiri.
 # =============================================================================
@@ -15,7 +16,8 @@ set -euo pipefail
 
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_PORT="${APP_PORT:-5000}"
-USE_NGINX="${USE_NGINX:-1}"
+USE_NGINX="${USE_NGINX:-0}"
+USE_PM2="${USE_PM2:-0}"
 NGINX_SITE_NAME="${NGINX_SITE_NAME:-raniah-billing}"
 
 GENIEACS_UI_PORT="${GENIEACS_UI_PORT:-3000}"
@@ -65,7 +67,10 @@ if [[ ! -f "$APP_DIR/server.js" || ! -f "$APP_DIR/frontend/package.json" ]]; the
   die "Jalankan script di folder clone billing (ada server.js dan frontend/package.json)."
 fi
 
-echo -e "${CYAN}=== RANIAH.NET — Installer Billing (PostgreSQL + FreeRADIUS + Nginx) ===${NC}"
+[[ "$USE_NGINX" == "0" || "$USE_NGINX" == "1" ]] || die "USE_NGINX harus 0 atau 1."
+[[ "$USE_PM2" == "0" || "$USE_PM2" == "1" ]] || die "USE_PM2 harus 0 atau 1."
+
+echo -e "${CYAN}=== RANIAH.NET — Installer Billing (PostgreSQL + FreeRADIUS + Node.js) ===${NC}"
 echo
 
 # =============================================================================
@@ -132,6 +137,11 @@ if [[ "$USE_NGINX" == "1" ]]; then
 else
   echo "  Publik web : http://IP:${APP_PORT} (tanpa Nginx)"
 fi
+if [[ "$USE_PM2" == "1" ]]; then
+  echo "  Proses app : PM2"
+else
+  echo "  Proses app : jalankan manual dengan npm start"
+fi
 read -r -p "Lanjut instalasi? [y/N]: " CONFIRM
 CONFIRM=${CONFIRM:-N}
 [[ "$CONFIRM" =~ ^[yY] ]] || die "Instalasi dibatalkan."
@@ -142,18 +152,23 @@ SUPERADMIN_PASS="$WEB_PASS"
 SUPERADMIN_NAMA="$WEB_ADMIN_NAMA"
 
 # =============================================================================
-# 2. OS & dependensi (curl, wget, git, nginx)
+# 2. OS & dependensi
 # =============================================================================
 info "=== apt update & upgrade ==="
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update
 $SUDO apt-get upgrade -y
 
-info "=== Paket dasar: curl, wget, git, nginx, PostgreSQL ==="
+info "=== Paket dasar: curl, wget, git, PostgreSQL ==="
 $SUDO apt-get install -y \
-  ca-certificates curl wget git openssl ufw nginx \
+  ca-certificates curl wget git openssl ufw \
   postgresql postgresql-contrib \
   build-essential
+
+if [[ "$USE_NGINX" == "1" ]]; then
+  info "=== Nginx reverse proxy ==="
+  $SUDO apt-get install -y nginx
+fi
 
 if systemctl is-active mariadb >/dev/null 2>&1 || systemctl is-active mysql >/dev/null 2>&1; then
   info "MariaDB/MySQL terdeteksi (mis. acs-standalone): tidak diubah oleh installer billing."
@@ -264,17 +279,18 @@ if ! $SUDO freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then
 fi
 
 # =============================================================================
-# 5. Node.js 22, backend (akar), frontend build, migrasi & seeder
+# 5. Node.js 22, npm, backend, frontend build, migrasi & seeder
 # =============================================================================
-if command -v node >/dev/null 2>&1 && node -v | grep -qE '^v22\.'; then
-  info "Node.js sudah v22: $(node -v)"
-else
-  info "=== Node.js 22 LTS (NodeSource) ==="
+info "=== Node.js 22 LTS (NodeSource) ==="
+if [[ -n "$SUDO" ]]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash -
-  $SUDO apt-get install -y nodejs
+else
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 fi
+$SUDO apt-get install -y nodejs
+$SUDO npm install -g 'npm@^12'
 
-if ! command -v pm2 >/dev/null 2>&1; then
+if [[ "$USE_PM2" == "1" ]] && ! command -v pm2 >/dev/null 2>&1; then
   info "=== PM2 global ==="
   $SUDO npm install -g pm2
 fi
@@ -319,14 +335,18 @@ npm install
 npm run build
 
 # =============================================================================
-# 6. PM2 & Nginx
+# 6. Optional PM2 & Nginx
 # =============================================================================
-info "=== PM2: billing ==="
-pm2 delete billing 2>/dev/null || true
-pm2 start "$APP_DIR/server.js" --name billing --cwd "$APP_DIR"
-pm2 save
-$SUDO env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
-pm2 save
+if [[ "$USE_PM2" == "1" ]]; then
+  info "=== PM2: billing ==="
+  pm2 delete billing 2>/dev/null || true
+  pm2 start "$APP_DIR/server.js" --name billing --cwd "$APP_DIR"
+  pm2 save
+  $SUDO env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
+  pm2 save
+else
+  info "PM2 dilewati. Jalankan backend dengan: cd \"$APP_DIR\" && npm start"
+fi
 
 if [[ "$USE_NGINX" == "1" ]]; then
   info "=== Nginx reverse proxy → 127.0.0.1:${APP_PORT} ==="
@@ -398,7 +418,11 @@ else
 fi
 echo -e "${GREEN}Login    : ${WEB_ADMIN}${NC}"
 echo -e "${GREEN}Database : PostgreSQL ${DB_NAME} (${DB_USER})${NC}"
-echo -e "${GREEN}PM2      : pm2 ls · pm2 logs billing${NC}"
+if [[ "$USE_PM2" == "1" ]]; then
+  echo -e "${GREEN}Proses   : pm2 ls · pm2 logs billing${NC}"
+else
+  echo -e "${GREEN}Node.js  : cd \"$APP_DIR\" && npm start${NC}"
+fi
 echo -e "${GREEN}RADIUS   : secret = (input Anda) · set sama di MikroTik${NC}"
 echo
 echo "Dokumentasi: ${APP_DIR}/README.md"

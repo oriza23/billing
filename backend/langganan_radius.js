@@ -63,22 +63,35 @@ async function assertUsernameFree(db, username, ownId = null) {
   }
 }
 
-// Baris radcheck + radusergroup yang seharusnya ada untuk pelanggan ini.
-async function buildAccountRows(db, customer) {
-  let nasIp = '';
-  if (!customer.router) {
+// Atribut radcheck pembatas NAS & server. Dipakai data langganan dan PPPoE pelanggan.
+//   router  : nama router, atau ALL ROUTER (tanpa batas NAS)
+//   server  : nama server (PPPoE Service / Hotspot server), atau ALL SERVER
+// Router tertentu -> NAS-IP-Address == IP router. Server tertentu -> Called-Station-Id == nama server.
+async function buildScopeRows(db, { router, server }) {
+  if (!router) {
     throw new RadiusSyncError('Router wajib dipilih');
   }
-  if (customer.router !== ALL_ROUTER) {
+  const rows = [];
+  if (router !== ALL_ROUTER) {
     const [routerRows] = await db.execute(
       'SELECT ip_address FROM routers WHERE BINARY nama_router = ? LIMIT 1',
-      [customer.router],
+      [router],
     );
-    nasIp = routerRows[0]?.ip_address || '';
+    const nasIp = routerRows[0]?.ip_address || '';
     if (!nasIp) {
-      throw new RadiusSyncError(`Router "${customer.router}" tidak ditemukan atau belum punya IP address`);
+      throw new RadiusSyncError(`Router "${router}" tidak ditemukan atau belum punya IP address`);
     }
+    rows.push(['NAS-IP-Address', '==', nasIp]);
   }
+  if (server && server !== ALL_SERVER) {
+    rows.push(['Called-Station-Id', '==', server]);
+  }
+  return rows;
+}
+
+// Baris radcheck + radusergroup yang seharusnya ada untuk pelanggan ini.
+async function buildAccountRows(db, customer) {
+  const scope = await buildScopeRows(db, { router: customer.router, server: customer.server });
 
   let groupName = '';
   if (customer.profil_id) {
@@ -89,13 +102,7 @@ async function buildAccountRows(db, customer) {
     groupName = (profileRows[0]?.group_name || '').trim();
   }
 
-  const radcheck = [['Cleartext-Password', ':=', customer.password]];
-  if (nasIp) {
-    radcheck.push(['NAS-IP-Address', '==', nasIp]);
-  }
-  if (customer.server && customer.server !== ALL_SERVER) {
-    radcheck.push(['Called-Station-Id', '==', customer.server]);
-  }
+  const radcheck = [['Cleartext-Password', ':=', customer.password], ...scope];
   if (customer.status !== 'Aktif') {
     radcheck.push(['Auth-Type', ':=', 'Reject']);
   }
@@ -157,6 +164,7 @@ module.exports = {
   removeAccount,
   assertUsernameFree,
   buildAccountRows,
+  buildScopeRows,
   writeAccount,
   syncProfileGroup,
 };

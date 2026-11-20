@@ -113,6 +113,27 @@ function RouterMaster() {
     return fireSuccess({ title: 'Berhasil!', text }, refresh)
   }
 
+  // Setelah router disimpan/dihapus, backend menyinkronkannya ke tabel `nas` FreeRADIUS.
+  // FreeRADIUS baru membaca tabel itu saat start, jadi beri tahu bila perlu restart manual.
+  function notifySaved(responseData, refresh) {
+    const sync = responseData?.radius_sync
+    if (sync && sync.ok === false) {
+      return fireSuccess({
+        icon: 'warning',
+        title: 'Router tersimpan',
+        text: 'Namun sinkronisasi ke FreeRADIUS (tabel nas) gagal. Periksa log server.',
+      }, refresh)
+    }
+    if (sync?.reload === 'manual') {
+      return fireSuccess({
+        icon: 'info',
+        title: 'Router tersimpan',
+        text: 'Router sudah masuk tabel NAS FreeRADIUS. Restart FreeRADIUS (systemctl restart freeradius) agar router ini dikenali.',
+      }, refresh)
+    }
+    return notifySuccess('Data sukses diperbarui', refresh)
+  }
+
   function notifyError(errorResponse, fallback) {
     return fireError({
       title: 'Gagal',
@@ -144,14 +165,12 @@ function RouterMaster() {
 
     setSaving(true)
     try {
-      if (editMode) {
-        await api.put(`${API_URL}/${selectedId}`, payload)
-      } else {
-        await api.post(API_URL, payload)
-      }
+      const { data: saved } = editMode
+        ? await api.put(`${API_URL}/${selectedId}`, payload)
+        : await api.post(API_URL, payload)
       resetForm()
       setIsRouterModalOpen(false)
-      await notifySuccess('Data sukses diperbarui', () => { void fetchRouters() })
+      await notifySaved(saved, () => { void fetchRouters() })
     } catch (requestError) {
       notifyError(requestError, editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan router.')
     } finally {
@@ -174,12 +193,12 @@ function RouterMaster() {
 
     setDeletingId(item.id)
     try {
-      await api.delete(`${API_URL}/${item.id}`)
+      const { data: removed } = await api.delete(`${API_URL}/${item.id}`)
       if (selectedId === item.id) {
         resetForm()
         setIsRouterModalOpen(false)
       }
-      await notifySuccess('Data sukses diperbarui', () => { void Promise.all([fetchRouters(), fetchServers()]) })
+      await notifySaved(removed, () => { void Promise.all([fetchRouters(), fetchServers()]) })
     } catch (requestError) {
       notifyError(requestError, 'Gagal menghapus router.')
     } finally {
@@ -494,6 +513,7 @@ function RouterMaster() {
                   <input
                     type="password"
                     name="secret"
+                    maxLength={60}
                     placeholder="Secret RADIUS"
                     value={form.secret}
                     onChange={(event) => updateField('secret', event.target.value)}

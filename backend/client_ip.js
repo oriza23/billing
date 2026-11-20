@@ -5,6 +5,9 @@
  * Dengan proxy: set TRUST_PROXY=1 di env + app.set('trust proxy') di server.js,
  *               barulah header X-Forwarded-For / X-Real-IP dipakai.
  *
+ * X-Forwarded-For dibaca dari ujung kanan (IP yang ditambahkan proxy), bukan ujung kiri
+ * yang dikirim klien.
+ *
  * Bila koneksi masuk dari loopback (Nginx di mesin yang sama) tetapi header
  * X-Forwarded-For / X-Real-IP ada, IP klien diambil dari header — walau TRUST_PROXY belum diset.
  */
@@ -28,17 +31,25 @@ function isLoopback(ip) {
   return n === '127.0.0.1';
 }
 
+// Proxy tepercaya (Nginx/Caddy/Cloudflare) MENAMBAHKAN IP peer di ujung KANAN daftar
+// X-Forwarded-For. Entri sebelah kiri dikirim klien sendiri dan bisa dipalsukan, jadi
+// yang dipakai adalah entri paling kanan yang bukan loopback.
 function readForwardedFor(header) {
   if (!header) {
     return '';
   }
-  const first = String(header).split(',')[0].trim();
-  return normalizeIp(first);
+  const entries = String(header).split(',').map((part) => normalizeIp(part)).filter(Boolean);
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (!isLoopback(entries[i])) {
+      return entries[i];
+    }
+  }
+  return '';
 }
 
 function readProxyClientIp(req) {
   const forwarded = readForwardedFor(req.headers['x-forwarded-for']);
-  if (forwarded && !isLoopback(forwarded)) {
+  if (forwarded) {
     return forwarded;
   }
   const realIp = normalizeIp(req.headers['x-real-ip']);

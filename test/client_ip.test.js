@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveClientIp, normalizeIp, isLoopback } = require('../backend/payment/client_ip');
+const { resolveClientIp, normalizeIp, isLoopback } = require('../backend/client_ip');
 
 function fakeReq({ ip, remoteAddress, headers = {}, trustEnv } = {}) {
   const prev = process.env.TRUST_PROXY;
@@ -31,7 +31,7 @@ test('normalizeIp: ::ffff: dan ::1', () => {
 test('resolveClientIp: TRUST_PROXY + X-Forwarded-For', () => {
   const req = fakeReq({
     ip: '127.0.0.1',
-    headers: { 'x-forwarded-for': '103.172.122.64, 10.0.0.1' },
+    headers: { 'x-forwarded-for': '10.0.0.1, 103.172.122.64' },
     trustEnv: '1',
   });
   try {
@@ -69,4 +69,19 @@ test('resolveClientIp: koneksi langsung tanpa header proxy', () => {
 test('isLoopback mengenali 127.0.0.1', () => {
   assert.equal(isLoopback('127.0.0.1'), true);
   assert.equal(isLoopback('103.1.1.1'), false);
+});
+
+test('resolveClientIp: entri kiri X-Forwarded-For buatan klien diabaikan (spoof)', () => {
+  for (const trustEnv of ['1', '']) {
+    const req = fakeReq({
+      ip: '127.0.0.1',
+      headers: { 'x-forwarded-for': '10.99.0.5, 114.122.167.157' },
+      trustEnv,
+    });
+    try {
+      assert.equal(resolveClientIp(req), '114.122.167.157');
+    } finally {
+      req._restore();
+    }
+  }
 });

@@ -9,7 +9,7 @@
 //
 // Sengaja fire-and-forget: kegagalan tulis log tidak boleh menggagalkan request aslinya.
 const pool = require('../database');
-const { resolveClientIp } = require('./payment/client_ip');
+const { resolveClientIp } = require('./client_ip');
 
 const MAX_PATH = 255;
 const MAX_MESSAGE = 300;

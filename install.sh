@@ -99,12 +99,6 @@ if [[ -z "$WEB_PASS" ]]; then
   die "WEB_PASS wajib diisi (minimal 8 karakter)."
 fi
 
-read -r -s -p "RADIUS NAS Secret (RADIUS_SECRET): " RADIUS_SECRET
-echo
-if [[ -z "$RADIUS_SECRET" ]]; then
-  RADIUS_SECRET=$(openssl rand -hex 12)
-  info "RADIUS_SECRET dibuat otomatis."
-fi
 
 read -r -p "Nama lengkap Superadmin [${WEB_ADMIN}]: " WEB_ADMIN_NAMA
 WEB_ADMIN_NAMA=${WEB_ADMIN_NAMA:-$WEB_ADMIN}
@@ -125,13 +119,12 @@ fi
 [[ "$DB_PASS" != *$'\n'* ]] || die "DB_PASS tidak boleh mengandung baris baru."
 [[ "$WEB_ADMIN" =~ ^[A-Za-z0-9._-]{1,50}$ ]] || die "WEB_ADMIN tidak valid."
 [[ ${#WEB_PASS} -ge 8 ]] || die "WEB_PASS minimal 8 karakter."
-[[ ${#RADIUS_SECRET} -ge 6 ]] || die "RADIUS_SECRET minimal 6 karakter."
 
 echo
 info "Ringkasan:"
 echo "  DB         : PostgreSQL ${DB_NAME} (${DB_USER}@localhost:5432)"
 echo "  Web admin  : ${WEB_ADMIN}"
-echo "  RADIUS     : secret **** · client 0.0.0.0/0"
+echo "  RADIUS     : NAS dari menu Router (sinkron ke tabel nas)"
 if [[ "$USE_NGINX" == "1" ]]; then
   echo "  Publik web : Nginx :80 → Node :${APP_PORT}"
 else
@@ -254,24 +247,13 @@ if [[ -f "$HOTSPOT_MOD" ]]; then
 fi
 
 info "=== clients.conf (MikroTik / NAS) ==="
+# Tidak ada client catch-all (0.0.0.0/0). Setiap router ditambahkan lewat menu Router di web,
+# lalu disinkronkan otomatis ke tabel nas (lihat docs/MULTI_NAS.md). Hapus sisa blok
+# install lama bila ada, supaya NAS yang tidak terdaftar ditolak.
 CLIENTS_CONF="${RADDB}/clients.conf"
-RAD_ESC_SECRET=$(freeradius_escape "$RADIUS_SECRET")
 if $SUDO grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
-  $SUDO sed -i "/${CLIENTS_MARKER}/,/${CLIENTS_MARKER}-END/{
-    s/^[[:space:]]*secret[[:space:]]*=.*/\tsecret = ${RAD_ESC_SECRET}/
-  }" "$CLIENTS_CONF"
-else
-  $SUDO tee -a "$CLIENTS_CONF" >/dev/null <<EOF
-
-# --- ${CLIENTS_MARKER} ---
-client billing_nas_all {
-	ipaddr = 0.0.0.0/0
-	secret = ${RAD_ESC_SECRET}
-	require_message_authenticator = no
-	limit_proxy_state = true
-}
-# --- ${CLIENTS_MARKER}-END ---
-EOF
+  $SUDO sed -i "/# --- ${CLIENTS_MARKER} ---/,/# --- ${CLIENTS_MARKER}-END ---/d" "$CLIENTS_CONF"
+  info "Blok catch-all lama (${CLIENTS_MARKER}) dihapus dari clients.conf."
 fi
 
 if ! $SUDO freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then

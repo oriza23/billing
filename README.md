@@ -105,7 +105,6 @@ graph TD
 ├── backend/
 │   ├── routes/               # Endpoint API
 │   ├── middleware/           # Autentikasi dan otorisasi
-│   ├── payment/              # Integrasi pembayaran
 │   ├── pppoe_isolir/         # Isolir PPPoE
 │   └── ...                   # Modul ACS, pelanggan, RADIUS, dan lainnya
 ├── frontend/
@@ -304,6 +303,8 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 5. Aktifkan **accounting** untuk pelaporan sesi.
 
 Detail isolir: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
+
+Banyak router/NAS dalam satu billing (sinkron otomatis ke tabel `nas` FreeRADIUS): [`docs/MULTI_NAS.md`](docs/MULTI_NAS.md).
 
 ---
 

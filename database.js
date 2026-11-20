@@ -28,7 +28,13 @@ async function runQuery(client, sql, params) {
 }
 
 function attachClientInterface(client) {
-  client.query = async (sql, params) => runQuery(client, sql, params);
+  // Simpan query asli milik pg. Tanpa ini runQuery memanggil client.query yang sudah
+  // diganti di bawah, sehingga rekursi tanpa akhir (stack overflow) pada setiap query.
+  const rawQuery = client.query;
+  const rawRelease = client.release;
+  const raw = { query: (text, values) => rawQuery.call(client, text, values) };
+
+  client.query = async (sql, params) => runQuery(raw, sql, params);
   client.execute = client.query;
 
   client.beginTransaction = async () => {
@@ -41,9 +47,15 @@ function attachClientInterface(client) {
     await client.query('ROLLBACK');
   };
 
-  const release = client.release.bind(client);
-  client.release = () => {
-    release();
+  // Client dikembalikan ke pool: lepas pembungkus agar pool.query tidak menerjemahkan SQL dua kali.
+  client.release = (err) => {
+    client.query = rawQuery;
+    client.release = rawRelease;
+    delete client.execute;
+    delete client.beginTransaction;
+    delete client.commit;
+    delete client.rollback;
+    return rawRelease.call(client, err);
   };
 
   return client;

@@ -12,6 +12,10 @@ function PppoePelanggan() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [paket, setPaket] = useState('')
+  const [daftarRouter, setDaftarRouter] = useState([])
+  const [daftarServer, setDaftarServer] = useState([])
+  const [routerPilih, setRouterPilih] = useState('ALL ROUTER')
+  const [serverPilih, setServerPilih] = useState('ALL SERVER')
   const [saving, setSaving] = useState(false)
   const [deletingUsername, setDeletingUsername] = useState('')
   const [formError, setFormError] = useState('')
@@ -84,12 +88,34 @@ function PppoePelanggan() {
     }
   }, [])
 
+  useEffect(() => {
+    let ignore = false
+    Promise.all([api.get('/routers'), api.get('/routers/servers', { params: { jenis: 'pppoe' } })])
+      .then(([routersRes, serversRes]) => {
+        if (ignore) return
+        setDaftarRouter(Array.isArray(routersRes.data) ? routersRes.data : [])
+        setDaftarServer(Array.isArray(serversRes.data) ? serversRes.data : [])
+      })
+      .catch(() => {
+        if (!ignore) setFormError('Gagal memuat daftar router/server.')
+      })
+    return () => { ignore = true }
+  }, [])
+
+  // Server yang bisa dipilih: milik router terpilih, atau semua server bila ALL ROUTER.
+  const serverOptions = daftarServer
+    .filter((item) => routerPilih === 'ALL ROUTER' || item.nama_router === routerPilih)
+    .map((item) => item.nama)
+  const serverUnik = [...new Set(serverOptions)]
+
   function resetForm() {
     setEditMode(false)
     setSelectedUsername('')
     setUsername('')
     setPassword('')
     setPaket(daftarProfil[0]?.groupname || '')
+    setRouterPilih('ALL ROUTER')
+    setServerPilih('ALL SERVER')
   }
 
   function handleEdit(item) {
@@ -98,6 +124,8 @@ function PppoePelanggan() {
     setUsername(item.username)
     setPassword(item.password)
     setPaket(item.paket || daftarProfil[0]?.groupname || '')
+    setRouterPilih(item.router || 'ALL ROUTER')
+    setServerPilih(item.server || 'ALL SERVER')
     setFormError('')
   }
 
@@ -158,19 +186,24 @@ function PppoePelanggan() {
       if (editMode) {
         await api.put(
           `/pppoe/pelanggan/${encodeURIComponent(selectedUsername)}`,
-          { password, paket },
+          { password, paket, router: routerPilih, server: serverPilih },
         )
       } else {
         await api.post('/pppoe/pelanggan', {
           username,
           password,
           paket,
+          router: routerPilih,
+          server: serverPilih,
         })
       }
       resetForm()
       await notifySuccess(() => { void fetchPelanggan() })
-    } catch {
-      setFormError(editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan pelanggan.')
+    } catch (error) {
+      setFormError(
+        (editMode ? 'Gagal menyimpan perubahan.' : 'Gagal menyimpan pelanggan.')
+        + ' ' + (error?.response?.data?.message || ''),
+      ).trim()
     } finally {
       setSaving(false)
     }
@@ -230,6 +263,42 @@ function PppoePelanggan() {
                 <option key={item.groupname} value={item.groupname}>
                   {item.groupname}
                 </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="pelanggan-field">
+            <span>Router (NAS)</span>
+            <select
+              name="router"
+              value={routerPilih}
+              onChange={(event) => {
+                setRouterPilih(event.target.value)
+                setServerPilih('ALL SERVER')
+              }}
+            >
+              <option value="ALL ROUTER">ALL ROUTER (semua NAS)</option>
+              {daftarRouter.map((item) => (
+                <option key={item.id} value={item.nama_router}>
+                  {item.nama_router}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="pelanggan-field">
+            <span>Server PPPoE</span>
+            <select
+              name="server"
+              value={serverPilih}
+              onChange={(event) => setServerPilih(event.target.value)}
+            >
+              <option value="ALL SERVER">ALL SERVER (semua server)</option>
+              {serverPilih !== 'ALL SERVER' && !serverUnik.includes(serverPilih) && (
+                <option value={serverPilih}>{serverPilih}</option>
+              )}
+              {serverUnik.map((nama) => (
+                <option key={nama} value={nama}>{nama}</option>
               ))}
             </select>
           </label>

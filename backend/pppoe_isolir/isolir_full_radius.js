@@ -4,10 +4,9 @@
  */
 
 const pool = require('../../database');
-const { kickRadiusUser } = require('../../utils/radius-pod');
+const { disconnectUserRadius } = require('../../utils/radius_coa');
 const { readIsolirGroupName } = require('./schema');
 const { applyRadiusIsolir, applyRadiusNormal } = require('./radius_isolir');
-const { resolveRouterForPod } = require('./router_credentials');
 
 class IsolirError extends Error {
   constructor(message, statusCode = 400) {
@@ -35,10 +34,10 @@ const SELECT_CUSTOMER = `
 
 const defaultDeps = {
   readIsolirGroupName,
-  resolveRouterForPod,
   applyRadiusIsolir,
   applyRadiusNormal,
-  kickRadiusUser,
+  // Putus setiap sesi aktif milik username di NAS tempat sesi itu berjalan (bukan router acak).
+  disconnectSessions: (db, username) => disconnectUserRadius(db, username),
 };
 
 async function loadCustomer(db, id, { ktgAllowed = ['PPP'] } = {}) {
@@ -72,18 +71,18 @@ async function loadProfilGroup(db, profilId) {
   return String(rows[0]?.group_name || '').trim();
 }
 
-async function disconnectSessionViaRadius(username, mikrotikIp, radiusSecret, deps, shouldKick = true) {
+async function disconnectSessions(username, db, deps, shouldKick = true) {
   if (shouldKick === false) {
     return { ok: true, skipped: true };
   }
   try {
-    const result = await deps.kickRadiusUser(username, mikrotikIp, radiusSecret);
-    if (!result.ok) {
-      console.warn('[isolir] RADIUS PoD gagal:', result.error, { username, mikrotikIp });
+    const result = await deps.disconnectSessions(db, username);
+    if (result.gagal > 0) {
+      console.warn('[isolir] sebagian sesi gagal diputus:', { username, detail: result.detail });
     }
-    return result;
+    return { ok: result.gagal === 0, ...result };
   } catch (error) {
-    console.error('[isolir] kickRadiusUser exception:', error.message, { username, mikrotikIp });
+    console.error('[isolir] disconnectSessions exception:', error.message, { username });
     return { ok: false, error: error.message };
   }
 }
@@ -105,24 +104,13 @@ async function isolirPelangganFullRadius(customerId, options = {}, db = pool) {
     throw new IsolirError('Pelanggan sudah berstatus Isolir', 409);
   }
 
-  const creds = await deps.resolveRouterForPod(db, customer.router);
-  if (!creds.ok) {
-    throw new IsolirError(creds.message, creds.status);
-  }
-
   const isolirGroup = await deps.readIsolirGroupName(db);
   const radiusResult = await deps.applyRadiusIsolir(db, customer.username, isolirGroup);
   if (!radiusResult.ok) {
     throw new IsolirError(radiusResult.error || 'Gagal mengalihkan grup RADIUS', 502);
   }
 
-  const kickResult = await disconnectSessionViaRadius(
-    customer.username,
-    creds.host,
-    creds.radiusSecret,
-    deps,
-    shouldKick,
-  );
+  const kickResult = await disconnectSessions(customer.username, db, deps, shouldKick);
 
   const profilBackup = customer.profil_id_sebelum_isolir ?? customer.profil_id;
   const [updated] = await db.execute(
@@ -145,7 +133,7 @@ async function isolirPelangganFullRadius(customerId, options = {}, db = pool) {
     username: customer.username,
     status: 'Isolir',
     isolir_group: isolirGroup,
-    router: creds.router,
+    router: customer.router,
     radius: radiusResult,
     kick: kickResult,
   };
@@ -176,23 +164,12 @@ async function bukaIsolirPelangganFullRadius(customerId, options = {}, db = pool
     );
   }
 
-  const creds = await deps.resolveRouterForPod(db, customer.router);
-  if (!creds.ok) {
-    throw new IsolirError(creds.message, creds.status);
-  }
-
   const radiusResult = await deps.applyRadiusNormal(db, customer.username, profilGroup);
   if (!radiusResult.ok) {
     throw new IsolirError(radiusResult.error || 'Gagal mengembalikan grup RADIUS', 502);
   }
 
-  const kickResult = await disconnectSessionViaRadius(
-    customer.username,
-    creds.host,
-    creds.radiusSecret,
-    deps,
-    shouldKick,
-  );
+  const kickResult = await disconnectSessions(customer.username, db, deps, shouldKick);
 
   await db.execute(
     `UPDATE langganan_pelanggan
@@ -213,7 +190,7 @@ async function bukaIsolirPelangganFullRadius(customerId, options = {}, db = pool
     status: 'Aktif',
     profil_id: restoredProfilId,
     profil_group: profilGroup,
-    router: creds.router,
+    router: customer.router,
     radius: radiusResult,
     kick: kickResult,
   };

@@ -11,8 +11,8 @@ const { ensurePppoeIsolirSchema } = require('./backend/pppoe_isolir/schema');
 const { startCron } = require('./utils/cron');
 const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
 const { ensureTables: ensureAcsTables } = require('./backend/acs');
+const { ensureNasTable, syncAfterRouterChange } = require('./backend/radius_nas');
 const { mountFrontend } = require('./backend/serve_frontend');
-const { ensurePaymentSchema } = require('./backend/payment/schema');
 const {
   ensureTable: ensureActivityLogTable, activityLogger, backfillLegacy,
 } = require('./backend/activity_log');
@@ -23,7 +23,8 @@ const PORT = Number(process.env.PORT) || 5000;
 // Hanya aktifkan bila ada reverse proxy (Nginx, Caddy, Cloudflare Tunnel, dll).
 // Tanpa proxy: biarkan mati — IP pelanggan diambil dari koneksi TCP langsung.
 if (String(process.env.TRUST_PROXY || '') === '1') {
-  app.set('trust proxy', true);
+  // Satu hop (Nginx/Caddy): req.ip = IP yang ditambahkan proxy, bukan nilai X-Forwarded-For buatan klien.
+  app.set('trust proxy', 1);
 }
 
 app.use(cors());
@@ -34,10 +35,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // (atau body saat login), jadi pencatat harus berada SETELAH express.json tapi SEBELUM router.
 app.use('/api', activityLogger());
 
-// Login & portal isolir / webhook pembayaran bersifat publik (dilindungi secret/IP, bukan JWT).
+// Hanya login yang publik; semua rute /api lain wajib JWT.
 app.use('/api/auth', require('./backend/routes/auth'));
-app.use('/api/isolir', require('./backend/routes/isolir_portal'));
-app.use('/api/payment', require('./backend/routes/payment'));
 app.use('/api', requireAuth);
 
 app.use('/api/pppoe', require('./backend/routes/pppoe'));
@@ -122,10 +121,11 @@ async function start() {
   await pool.ensureCompat();
   await ensureAdminTable();
   await ensurePppoeIsolirSchema(pool);
-  await ensurePaymentSchema(pool);
   await ensureHotspotProfilesTable();
   await ensureHotspotVouchersTable();
   await ensureRoutersTable();
+  await ensureNasTable(pool);
+  await syncAfterRouterChange(pool);
   await ensureOutletsTable();
   await outletsRouter.ensureTglGabungColumn();
   await langgananProfilRouter.ensureTable();

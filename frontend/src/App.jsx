@@ -17,7 +17,6 @@ import PppoePelanggan from './PppoePelanggan.jsx'
 import PppoeProfil from './PppoeProfil.jsx'
 import RouterMaster from './RouterMaster.jsx'
 import SistemPengaturan from './SistemPengaturan.jsx'
-import PaymentSettings from './PaymentSettings.jsx'
 import TambahLanggananPppoe from './TambahLanggananPppoe.jsx'
 import RegistrasiPelanggan from './RegistrasiPelanggan.jsx'
 import IsolirPage from './IsolirPage.jsx'
@@ -64,7 +63,6 @@ function App() {
           </Route>
           <Route path="/sistem" element={<Dashboard />}>
             <Route path="pengaturan" element={<SistemPengaturan />} />
-            <Route path="payment-gateway" element={<PaymentSettings />} />
           </Route>
           <Route path="/manajemen-admin" element={<Dashboard />}>
             <Route index element={<ManajemenAdmin />} />

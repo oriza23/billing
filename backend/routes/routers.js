@@ -5,6 +5,10 @@ const {
   ALL_SERVER, JENIS_SERVER, MAX_SERVER_NAME, validServerName,
 } = require('../router_servers');
 
+const {
+  MAX_SECRET_LENGTH, isValidIpv4, previewNasSync, syncAfterRouterChange,
+} = require('../radius_nas');
+
 const router = express.Router();
 const requireAdmin = requireRole('admin');
 
@@ -24,6 +28,25 @@ function readRouterBody(body) {
     secret: readText(body?.secret).slice(0, 100),
     deskripsi: readText(body?.deskripsi),
   };
+}
+
+// Pesan error bila data router tidak bisa dipakai sebagai client FreeRADIUS, atau '' bila valid.
+function routerBodyError({ ipAddress, secret }) {
+  if (!isValidIpv4(ipAddress)) {
+    return 'IP address harus berupa IPv4 yang valid (contoh 192.168.1.1)';
+  }
+  if (secret.length > MAX_SECRET_LENGTH) {
+    return `Secret maksimal ${MAX_SECRET_LENGTH} karakter`;
+  }
+  return '';
+}
+
+async function ipAlreadyUsed(ipAddress, exceptId = 0) {
+  const [rows] = await pool.execute(
+    'SELECT id FROM routers WHERE ip_address = ? AND id <> ? LIMIT 1',
+    [ipAddress, exceptId],
+  );
+  return rows.length > 0;
 }
 
 router.get('/', async (req, res) => {
@@ -219,16 +242,30 @@ router.post('/', requireAdmin, async (req, res) => {
     });
   }
 
+  const bodyError = routerBodyError({ ipAddress, secret });
+  if (bodyError) {
+    return res.status(400).json({ success: false, message: bodyError });
+  }
+
   try {
+    if (await ipAlreadyUsed(ipAddress)) {
+      return res.status(409).json({
+        success: false,
+        message: 'IP address itu sudah dipakai router lain',
+      });
+    }
+
     const [result] = await pool.execute(
       'INSERT INTO routers (nama_router, ip_address, secret, deskripsi) VALUES (?, ?, ?, ?)',
       [namaRouter, ipAddress, secret, deskripsi],
     );
+    const radiusSync = await syncAfterRouterChange(pool);
 
     return res.json({
       success: true,
       message: 'Router berhasil disimpan',
       id: result.insertId,
+      radius_sync: radiusSync,
     });
   } catch (error) {
     return res.status(500).json({
@@ -250,29 +287,71 @@ router.put('/:id', requireAdmin, async (req, res) => {
     });
   }
 
+  const bodyError = routerBodyError({ ipAddress, secret });
+  if (bodyError) {
+    return res.status(400).json({ success: false, message: bodyError });
+  }
+
+  const connection = await pool.getConnection();
   try {
-    const [result] = await pool.execute(
+    const [oldRows] = await connection.execute(
+      'SELECT nama_router, ip_address FROM routers WHERE id = ? LIMIT 1',
+      [id],
+    );
+    const old = oldRows[0];
+    if (!old) {
+      return res.status(404).json({ success: false, message: 'Router tidak ditemukan' });
+    }
+    if (await ipAlreadyUsed(ipAddress, id)) {
+      return res.status(409).json({
+        success: false,
+        message: 'IP address itu sudah dipakai router lain',
+      });
+    }
+
+    await connection.beginTransaction();
+
+    // Akun yang membatasi NAS memakai IP router: ikut pindah bila IP berubah.
+    if (String(old.ip_address).trim() !== ipAddress) {
+      await connection.execute(
+        "UPDATE radcheck SET value = ? WHERE attribute = 'NAS-IP-Address' AND value = ?",
+        [ipAddress, String(old.ip_address).trim()],
+      );
+    }
+    // Pelanggan & voucher menyimpan NAMA router: ikut diganti bila nama berubah.
+    if (old.nama_router !== namaRouter) {
+      await connection.execute(
+        'UPDATE langganan_pelanggan SET router = ? WHERE router = ?',
+        [namaRouter, old.nama_router],
+      );
+      await connection.execute(
+        'UPDATE hotspot_vouchers SET router = ? WHERE router = ?',
+        [namaRouter, old.nama_router],
+      );
+    }
+
+    await connection.execute(
       'UPDATE routers SET nama_router = ?, ip_address = ?, secret = ?, deskripsi = ? WHERE id = ?',
       [namaRouter, ipAddress, secret, deskripsi, id],
     );
+    await connection.commit();
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Router tidak ditemukan',
-      });
-    }
+    const radiusSync = await syncAfterRouterChange(pool);
 
     return res.json({
       success: true,
       message: 'Router berhasil diperbarui',
+      radius_sync: radiusSync,
     });
   } catch (error) {
+    await connection.rollback().catch(() => {});
     return res.status(500).json({
       success: false,
       message: 'Gagal memperbarui router',
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 });
 
@@ -287,6 +366,36 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 
   try {
+    const [routerRows] = await pool.execute(
+      'SELECT nama_router, ip_address FROM routers WHERE id = ? LIMIT 1',
+      [id],
+    );
+    const target = routerRows[0];
+    if (!target) {
+      return res.status(404).json({ success: false, message: 'Router tidak ditemukan' });
+    }
+
+    // Jangan hapus router yang masih dipakai: akun RADIUS-nya akan ditolak diam-diam.
+    const [[{ n: akunNas }]] = await pool.execute(
+      "SELECT COUNT(*) AS n FROM radcheck WHERE attribute = 'NAS-IP-Address' AND value = ?",
+      [String(target.ip_address).trim()],
+    );
+    const [[{ n: pelanggan }]] = await pool.execute(
+      'SELECT COUNT(*) AS n FROM langganan_pelanggan WHERE router = ?',
+      [target.nama_router],
+    );
+    const [[{ n: voucher }]] = await pool.execute(
+      'SELECT COUNT(*) AS n FROM hotspot_vouchers WHERE router = ?',
+      [target.nama_router],
+    );
+    if (Number(akunNas) + Number(pelanggan) + Number(voucher) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Router masih dipakai: ${pelanggan} langganan, ${akunNas} akun PPPoE, ${voucher} voucher. `
+          + 'Pindahkan ke ALL ROUTER atau router lain dulu.',
+      });
+    }
+
     // Server milik router ikut dihapus agar tidak jadi data yatim.
     await pool.execute('DELETE FROM router_servers WHERE router_id = ?', [id]);
     const [result] = await pool.execute(
@@ -301,9 +410,12 @@ router.delete('/:id', requireAdmin, async (req, res) => {
       });
     }
 
+    const radiusSync = await syncAfterRouterChange(pool);
+
     return res.json({
       success: true,
       message: 'Router berhasil dihapus',
+      radius_sync: radiusSync,
     });
   } catch (error) {
     return res.status(500).json({
@@ -312,6 +424,33 @@ router.delete('/:id', requireAdmin, async (req, res) => {
       error: error.message,
     });
   }
+});
+
+// Status sinkronisasi router -> tabel nas FreeRADIUS (tanpa mengubah apa pun).
+router.get('/nas-sync', requireAdmin, async (req, res) => {
+  try {
+    const preview = await previewNasSync(pool);
+    return res.json({ success: true, in_sync: !preview.changed, ...preview });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal membaca status sinkronisasi NAS',
+      error: error.message,
+    });
+  }
+});
+
+// Paksa sinkronisasi ulang semua router ke tabel nas.
+router.post('/nas-sync', requireAdmin, async (req, res) => {
+  const result = await syncAfterRouterChange(pool);
+  if (!result.ok) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal sinkronisasi NAS',
+      error: result.error,
+    });
+  }
+  return res.json({ success: true, message: 'Sinkronisasi NAS selesai', ...result });
 });
 
 module.exports = router;

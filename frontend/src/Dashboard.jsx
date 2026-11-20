@@ -4,7 +4,6 @@ import Swal from 'sweetalert2'
 import {
   Activity,
   ClipboardList,
-  CreditCard,
   IdCard,
   KeyRound,
   LayoutDashboard,
@@ -45,7 +44,6 @@ const hotspotMenu = [
 const sistemMenu = [
   { to: '/manajemen-admin', label: 'Manajemen Admin', icon: Shield },
   { to: '/sistem/pengaturan', label: 'Pengaturan', icon: Settings },
-  { to: '/sistem/payment-gateway', label: 'Payment Gateway', icon: CreditCard },
 ]
 
 const navLinkClass = ({ isActive }) =>

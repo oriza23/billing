@@ -1,10 +1,9 @@
 const express = require('express');
-const { exec } = require('child_process');
-const { promisify } = require('util');
 const pool = require('../../database');
 const { MAX_GROUP_NAME, writeProfileReply } = require('../radius_group');
-
-const execAsync = promisify(exec);
+const { ALL_ROUTER, buildScopeRows } = require('../langganan_radius');
+const { ALL_SERVER, serverAllowed } = require('../router_servers');
+const { sendDisconnectRequest } = require('../../utils/radius_coa');
 
 const router = express.Router();
 
@@ -181,6 +180,49 @@ router.delete('/profil/:groupname', async (req, res) => {
   }
 });
 
+// Pilihan NAS & server untuk akun PPPoE pelanggan. Default: ALL ROUTER & ALL SERVER (tanpa batas).
+// Mengembalikan { router, server } atau { error } bila router/server tidak valid.
+async function readPppoeScope(body, { partial = false } = {}) {
+  const hasRouter = body && Object.prototype.hasOwnProperty.call(body, 'router');
+  const hasServer = body && Object.prototype.hasOwnProperty.call(body, 'server');
+  if (partial && !hasRouter && !hasServer) {
+    return { skip: true };
+  }
+  const router = typeof body?.router === 'string' && body.router.trim() ? body.router.trim() : ALL_ROUTER;
+  const server = typeof body?.server === 'string' && body.server.trim() ? body.server.trim() : ALL_SERVER;
+
+  if (router !== ALL_ROUTER) {
+    const [rows] = await pool.execute(
+      'SELECT id FROM routers WHERE BINARY nama_router = ? LIMIT 1',
+      [router],
+    );
+    if (rows.length === 0) {
+      return { error: `Router "${router}" tidak ditemukan` };
+    }
+  }
+  if (server !== ALL_SERVER) {
+    const ok = await serverAllowed(pool, { jenis: 'pppoe', routerName: router, server });
+    if (!ok) {
+      return { error: `Server PPPoE "${server}" tidak terdaftar di router yang dipilih` };
+    }
+  }
+  return { router, server };
+}
+
+// Ganti baris pembatas NAS/server milik username (atribut ini saja; password & grup tidak disentuh).
+async function replaceScopeRows(connection, username, scopeRows) {
+  await connection.execute(
+    "DELETE FROM radcheck WHERE username = ? AND attribute IN ('NAS-IP-Address', 'Called-Station-Id')",
+    [username],
+  );
+  for (const [attribute, op, value] of scopeRows) {
+    await connection.execute(
+      'INSERT INTO radcheck (username, attribute, op, value) VALUES (?, ?, ?, ?)',
+      [username, attribute, op, value],
+    );
+  }
+}
+
 router.post('/pelanggan', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -193,15 +235,39 @@ router.post('/pelanggan', async (req, res) => {
     });
   }
 
+  const scope = await readPppoeScope(req.body);
+  if (scope.error) {
+    return res.status(400).json({ success: false, message: scope.error });
+  }
+
   const connection = await pool.getConnection();
 
   try {
+    const [existing] = await connection.execute(
+      'SELECT username FROM radcheck WHERE username = ? LIMIT 1',
+      [username],
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Username sudah ada di RADIUS',
+      });
+    }
+
+    const scopeRows = await buildScopeRows(connection, scope);
+
     await connection.beginTransaction();
 
     await connection.execute(
       "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
       [username, password],
     );
+    for (const [attribute, op, value] of scopeRows) {
+      await connection.execute(
+        'INSERT INTO radcheck (username, attribute, op, value) VALUES (?, ?, ?, ?)',
+        [username, attribute, op, value],
+      );
+    }
 
     await connection.execute(
       'INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, 1)',
@@ -217,9 +283,9 @@ router.post('/pelanggan', async (req, res) => {
   } catch (error) {
     await connection.rollback();
 
-    return res.status(500).json({
+    return res.status(error.name === 'RadiusSyncError' ? 400 : 500).json({
       success: false,
-      message: 'Gagal menyimpan pelanggan',
+      message: error.name === 'RadiusSyncError' ? error.message : 'Gagal menyimpan pelanggan',
       error: error.message,
     });
   } finally {
@@ -230,10 +296,20 @@ router.post('/pelanggan', async (req, res) => {
 router.get('/pelanggan', async (req, res) => {
   try {
     const [rows] = await pool.execute(
-      "SELECT c.username, c.value AS password, IFNULL(ug.groupname, 'Tanpa Profil') AS paket FROM radcheck c LEFT JOIN radusergroup ug ON c.username = ug.username WHERE c.attribute = 'Cleartext-Password'",
+      `SELECT c.username, c.value AS password, IFNULL(ug.groupname, 'Tanpa Profil') AS paket,
+         (SELECT r.value FROM radcheck r WHERE r.username = c.username AND r.attribute = 'NAS-IP-Address' LIMIT 1) AS nas_ip,
+         (SELECT r.value FROM radcheck r WHERE r.username = c.username AND r.attribute = 'Called-Station-Id' LIMIT 1) AS server
+       FROM radcheck c LEFT JOIN radusergroup ug ON c.username = ug.username
+       WHERE c.attribute = 'Cleartext-Password'`,
     );
+    const [routerRows] = await pool.execute('SELECT nama_router, ip_address FROM routers');
+    const routerByIp = new Map(routerRows.map((r) => [String(r.ip_address).trim(), r.nama_router]));
 
-    res.json(rows);
+    res.json(rows.map(({ nas_ip: nasIp, server, ...row }) => ({
+      ...row,
+      router: nasIp ? (routerByIp.get(nasIp) || nasIp) : ALL_ROUTER,
+      server: server || ALL_SERVER,
+    })));
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -255,9 +331,19 @@ router.put('/pelanggan/:username', async (req, res) => {
     });
   }
 
+  const scope = await readPppoeScope(req.body, { partial: true });
+  if (scope.error) {
+    return res.status(400).json({ success: false, message: scope.error });
+  }
+
   const connection = await pool.getConnection();
 
   try {
+    const scopeRows = scope.skip ? null : await buildScopeRows(connection, {
+      router: scope.router,
+      server: scope.server,
+    });
+
     await connection.beginTransaction();
 
     const [updated] = await connection.execute(
@@ -271,6 +357,10 @@ router.put('/pelanggan/:username', async (req, res) => {
         success: false,
         message: 'Pelanggan tidak ditemukan',
       });
+    }
+
+    if (scopeRows) {
+      await replaceScopeRows(connection, username, scopeRows);
     }
 
     await connection.execute('DELETE FROM radusergroup WHERE username = ?', [username]);
@@ -289,9 +379,9 @@ router.put('/pelanggan/:username', async (req, res) => {
   } catch (error) {
     await connection.rollback();
 
-    return res.status(500).json({
+    return res.status(error.name === 'RadiusSyncError' ? 400 : 500).json({
       success: false,
-      message: 'Gagal memperbarui pelanggan',
+      message: error.name === 'RadiusSyncError' ? error.message : 'Gagal memperbarui pelanggan',
       error: error.message,
     });
   } finally {
@@ -346,6 +436,8 @@ function isIpv4(value) {
   return value.split('.').every((octet) => Number(octet) <= 255);
 }
 
+// Putus sesi PPPoE yang sedang aktif. PoD dikirim ke NAS tempat sesi itu berjalan
+// (radacct.nasipaddress), memakai secret router tersebut. Tanpa shell, tanpa tebakan router.
 router.post('/disconnect', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const framedIp = typeof req.body?.ip_address === 'string' ? req.body.ip_address.trim() : '';
@@ -357,54 +449,61 @@ router.post('/disconnect', async (req, res) => {
     });
   }
 
-  let secret = '';
-
   try {
-    const [routers] = await pool.execute(
-      "SELECT ip_address, secret FROM routers WHERE status = 'Aktif' LIMIT 1",
+    const [sessions] = await pool.execute(
+      `SELECT nasipaddress, framedipaddress, acctsessionid
+       FROM radacct
+       WHERE username = ? AND framedipaddress = ? AND acctstoptime IS NULL`,
+      [username, framedIp],
     );
-
-    if (routers.length === 0) {
+    if (sessions.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Router aktif tidak ditemukan di database',
+        message: 'Sesi aktif tidak ditemukan',
       });
     }
 
-    const ip_address = routers[0].ip_address;
-    secret = typeof routers[0].secret === 'string' ? routers[0].secret : '';
-    if (!isIpv4(String(ip_address || '')) || !secret || /[\s"'\\$`;&|<>()]/.test(secret)) {
-      return res.status(500).json({
+    const results = [];
+    for (const session of sessions) {
+      // eslint-disable-next-line no-await-in-loop
+      const [routers] = await pool.execute(
+        'SELECT nama_router, secret FROM routers WHERE ip_address = ? LIMIT 1',
+        [session.nasipaddress],
+      );
+      const nas = routers[0];
+      if (!nas || !nas.secret) {
+        results.push({ nas: session.nasipaddress, ok: false, error: 'Router/secret tidak dikenal' });
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const response = await sendDisconnectRequest({
+        host: session.nasipaddress,
+        secret: nas.secret,
+        username,
+        sessionId: session.acctsessionid,
+        framedIp: session.framedipaddress,
+      });
+      results.push({ nas: session.nasipaddress, router: nas.nama_router, ...response });
+    }
+
+    const diputus = results.filter((r) => r.ok).length;
+    if (diputus === 0) {
+      return res.status(502).json({
         success: false,
-        message: 'Data router aktif tidak valid',
+        message: 'Gagal memutus koneksi pelanggan',
+        detail: results,
       });
     }
-
-    const command = `echo "Framed-IP-Address='${framedIp}'" | radclient -x ${ip_address}:3799 disconnect ${secret}`;
-    await execAsync(command, { timeout: 10000 });
-
     return res.json({
       success: true,
       message: 'Koneksi pelanggan berhasil diputus',
+      detail: results,
     });
   } catch (error) {
-    const detail = `${error.stderr || ''}\n${error.stdout || ''}`
-      .split(secret)
-      .join('')
-      .trim();
-
-    if (error.code === 'ECONNREFUSED' || error.fatal) {
-      return res.status(500).json({
-        success: false,
-        message: 'Gagal memutus koneksi pelanggan',
-        error: error.message,
-      });
-    }
-
     return res.status(500).json({
       success: false,
       message: 'Gagal memutus koneksi pelanggan',
-      detail,
+      error: error.message,
     });
   }
 });

@@ -5,6 +5,7 @@ const pool = require('../../database');
 const requireAuth = require('../middleware/auth');
 const { hashPassword, isScryptHash, verifyPassword } = require('../password');
 const { secret, expiresIn } = require('../config/jwt');
+const { resolveClientIp } = require('../client_ip');
 
 const { normalizeRole, isSuperRole, labelOf: roleLabel } = require('../roles');
 
@@ -25,7 +26,7 @@ function sameText(a, b) {
 }
 
 function attemptKey(req, username) {
-  return `${req.ip}|${username.toLowerCase()}`;
+  return `${resolveClientIp(req) || req.ip}|${username.toLowerCase()}`;
 }
 
 function isLocked(key) {

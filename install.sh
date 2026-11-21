@@ -386,6 +386,31 @@ $SUDO ufw --force enable || true
 
 $SUDO systemctl enable freeradius
 $SUDO systemctl restart freeradius
+
+# User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
+# Root tidak perlu sudoers. User lain hanya boleh restart postgresql dan freeradius.
+if [[ "$APP_USER" == "root" ]]; then
+  info "Node berjalan sebagai root, /etc/sudoers.d/raniah-services tidak diperlukan."
+elif [[ ! "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  warn "User ${APP_USER} tidak dipakai untuk sudoers restart."
+else
+  info "=== sudoers restart PostgreSQL & FreeRADIUS untuk ${APP_USER} ==="
+  SUDOERS_TMP=$(mktemp)
+  cat > "$SUDOERS_TMP" <<EOF
+# RANIAH billing: restart layanan dari menu Pengaturan, tanpa password.
+${APP_USER} ALL=(root) NOPASSWD: /bin/systemctl restart postgresql, /usr/bin/systemctl restart postgresql, /bin/systemctl restart freeradius, /usr/bin/systemctl restart freeradius
+EOF
+  $SUDO visudo -cf "$SUDOERS_TMP"
+  $SUDO install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/raniah-services
+  $SUDO chmod 0440 /etc/sudoers.d/raniah-services
+  if ! $SUDO visudo -cf /etc/sudoers.d/raniah-services; then
+    $SUDO rm -f /etc/sudoers.d/raniah-services
+    rm -f "$SUDOERS_TMP"
+    die "sudoers /etc/sudoers.d/raniah-services tidak valid, berkas dibatalkan."
+  fi
+  $SUDO rm -f /etc/sudoers.d/raniah-restart
+  rm -f "$SUDOERS_TMP"
+fi
 [[ "$USE_NGINX" == "1" ]] && $SUDO systemctl reload nginx
 
 SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')

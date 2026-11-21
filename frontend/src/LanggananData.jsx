@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import api from './api/axios.js'
 import Swal from 'sweetalert2'
 import { fireError, fireSuccess } from './swals.js'
+import { melayani } from './serverJenis.js'
 import {
   Ban,
   CalendarPlus,
@@ -186,6 +187,7 @@ function LanggananData() {
   const returnTo = location.state?.returnTo
   const [rows, setRows] = useState([])
   const [profiles, setProfiles] = useState([])
+  const [routers, setRouters] = useState([])
   const [routerServers, setRouterServers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -251,10 +253,11 @@ function LanggananData() {
   // Pilihan server berasal dari menu Router; gagal memuat tidak mengganggu halaman.
   useEffect(() => {
     let ignore = false
-    api.get('/routers/servers')
-      .then((response) => {
+    Promise.all([api.get('/routers'), api.get('/routers/servers')])
+      .then(([routerResponse, serverResponse]) => {
         if (!ignore) {
-          setRouterServers(Array.isArray(response.data) ? response.data : [])
+          setRouters(Array.isArray(routerResponse.data) ? routerResponse.data : [])
+          setRouterServers(Array.isArray(serverResponse.data) ? serverResponse.data : [])
         }
       })
       .catch(() => {})
@@ -309,7 +312,7 @@ function LanggananData() {
   const serverChoices = [...new Set([
     'ALL SERVER',
     ...routerServers
-      .filter((item) => item.jenis === serverJenis && (form.router === 'ALL ROUTER' || item.nama_router === form.router))
+      .filter((item) => melayani(item.jenis, serverJenis) && (form.router === 'ALL ROUTER' || item.nama_router === form.router))
       .map((item) => item.nama),
     ...(form.server ? [form.server] : []),
   ])]
@@ -412,6 +415,10 @@ function LanggananData() {
     }
     if (!form.pelanggan.trim() || !form.username.trim()) {
       Swal.fire('Data belum lengkap', 'Nama pelanggan dan username wajib diisi.', 'warning')
+      return
+    }
+    if ((form.ktg === 'PPP' || form.ktg === 'Hotspot') && !form.router) {
+      Swal.fire('Data belum lengkap', 'Router wajib dipilih. ALL ROUTER berarti akun boleh login di semua NAS.', 'warning')
       return
     }
     setSaving(true)
@@ -872,7 +879,34 @@ function LanggananData() {
               <label>Password<input value={form.password} onChange={(event) => updateForm('password', event.target.value)} /></label>
               <label>IP Address<input value={form.ip_address} onChange={(event) => updateForm('ip_address', event.target.value)} placeholder="10.0.0.2" /></label>
               <label>MAC Address<input value={form.mac_address} onChange={(event) => updateForm('mac_address', event.target.value)} /></label>
-              <label>Router<input value={form.router} onChange={(event) => updateForm('router', event.target.value)} /></label>
+              <label>
+                Router
+                <select
+                  value={form.router}
+                  onChange={(event) => {
+                    const router = event.target.value
+                    const jenis = form.ktg === 'Hotspot' ? 'hotspot' : 'pppoe'
+                    const serverMasihValid = !form.server
+                      || form.server === 'ALL SERVER'
+                      || routerServers.some((item) => item.nama === form.server
+                        && melayani(item.jenis, jenis)
+                        && (router === 'ALL ROUTER' || item.nama_router === router))
+                    updateForm('router', router)
+                    if (!serverMasihValid) {
+                      updateForm('server', '')
+                    }
+                  }}
+                >
+                  <option value="">-Pilih-</option>
+                  <option value="ALL ROUTER">ALL ROUTER</option>
+                  {routers.map((item) => (
+                    <option key={item.id} value={item.nama_router}>{item.nama_router}</option>
+                  ))}
+                  {form.router && form.router !== 'ALL ROUTER' && !routers.some((item) => item.nama_router === form.router) && (
+                    <option value={form.router}>{form.router}</option>
+                  )}
+                </select>
+              </label>
               <label>
                 Server
                 <select value={form.server} onChange={(event) => updateForm('server', event.target.value)}>

@@ -62,3 +62,162 @@
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* Jenis Server: checkbox Hotspot / PPPoE (boleh keduanya). */
+.router-page .server-jenis {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.router-page .server-jenis legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: #16324f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.router-page .server-jenis-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.router-page .server-jenis-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 8px 14px;
+  border: 1px solid #c9dbe8;
+  border-radius: 12px;
+  background: #f7fbfd;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+
+.router-page .server-jenis-option:hover {
+  border-color: #0891b2;
+}
+
+.router-page .server-jenis-option:focus-within {
+  border-color: #0891b2;
+  box-shadow: 0 0 0 4px rgba(8, 145, 178, 0.16);
+}
+
+.router-page .server-jenis-option.is-checked {
+  border-color: #0891b2;
+  background: #ecfeff;
+}
+
+.router-page .server-jenis-option input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: none;
+  accent-color: #0891b2;
+  cursor: pointer;
+}
+
+.router-page .server-jenis-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.router-page .server-jenis-text strong {
+  color: #0b1f3a;
+  font-size: 14px;
+}
+
+.router-page .server-jenis-text small {
+  color: #4b647a;
+  font-size: 11px;
+}
+
+.router-page .server-jenis-error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Badge jenis server di tabel. */
+.server-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.server-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.server-badge-hotspot {
+  background: #cffafe;
+  color: #155e75;
+}
+
+.server-badge-pppoe {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.router-page .profil-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dark .router-page .server-jenis legend {
+  color: #e5e7eb;
+}
+
+.dark .router-page .server-jenis-option {
+  border-color: #4b5563;
+  background: #111827;
+}
+
+.dark .router-page .server-jenis-option.is-checked {
+  border-color: #22d3ee;
+  background: rgba(8, 145, 178, 0.18);
+}
+
+.dark .router-page .server-jenis-text strong {
+  color: #f3f4f6;
+}
+
+.dark .router-page .server-jenis-text small {
+  color: #9ca3af;
+}
+
+.dark .router-page .server-jenis-error {
+  color: #fca5a5;
+}
+
+.dark .server-badge-hotspot {
+  background: rgba(8, 145, 178, 0.25);
+  color: #67e8f9;
+}
+
+.dark .server-badge-pppoe {
+  background: rgba(124, 58, 237, 0.25);
+  color: #c4b5fd;
+}
+
+@media (max-width: 480px) {
+  .router-page .server-jenis-options {
+    grid-template-columns: 1fr;
+  }
+}

@@ -2,8 +2,9 @@ const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
 const {
-  ALL_SERVER, JENIS_SERVER, MAX_SERVER_NAME, validServerName,
+  ALL_SERVER, JENIS_SERVER, MAX_SERVER_NAME, validServerName, normalizeJenis, serverNameTaken,
 } = require('../router_servers');
+const { renameServerBindings } = require('../langganan_radius');
 
 const {
   MAX_SECRET_LENGTH, isValidIpv4, previewNasSync, syncAfterRouterChange,
@@ -65,14 +66,21 @@ router.get('/', async (req, res) => {
 });
 
 // Daftar server semua router (sumber dropdown Server di Buat VC dan registrasi
-// PPPoE). Filter opsional: ?jenis=hotspot|pppoe.
+// PPPoE). Filter opsional: ?jenis=hotspot|pppoe. Server bertipe 'both' (Hotspot &
+// PPPoE) ikut tampil di kedua filter. ?jenis=both hanya menampilkan server 'both'.
 router.get('/servers', async (req, res) => {
   const jenis = readText(req.query?.jenis);
   if (jenis && !JENIS_SERVER.includes(jenis)) {
     return res.status(400).json({
       success: false,
-      message: 'Jenis server harus hotspot atau pppoe',
+      message: 'Jenis server harus hotspot, pppoe, atau both',
     });
+  }
+  let where = '';
+  if (jenis === 'both') {
+    where = 'WHERE s.jenis = ?';
+  } else if (jenis) {
+    where = "WHERE s.jenis IN (?, 'both')";
   }
 
   try {
@@ -80,7 +88,7 @@ router.get('/servers', async (req, res) => {
       `SELECT s.id, s.router_id, r.nama_router, s.jenis, s.nama
        FROM router_servers s
        JOIN routers r ON r.id = s.router_id
-       ${jenis ? 'WHERE s.jenis = ?' : ''}
+       ${where}
        ORDER BY r.nama_router ASC, s.jenis ASC, s.nama ASC`,
       jenis ? [jenis] : [],
     );
@@ -96,13 +104,13 @@ router.get('/servers', async (req, res) => {
 
 router.post('/:id/servers', requireAdmin, async (req, res) => {
   const id = readId(req.params.id);
-  const jenis = readText(req.body?.jenis);
+  const jenis = normalizeJenis(req.body?.jenis);
   const nama = readText(req.body?.nama);
 
-  if (!id || !JENIS_SERVER.includes(jenis)) {
+  if (!id || !jenis) {
     return res.status(400).json({
       success: false,
-      message: 'Router dan jenis server (hotspot atau pppoe) wajib dipilih',
+      message: 'Router dan jenis server (hotspot, pppoe, atau keduanya) wajib dipilih',
     });
   }
   if (!validServerName(nama)) {
@@ -118,6 +126,13 @@ router.post('/:id/servers', requireAdmin, async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Router tidak ditemukan',
+      });
+    }
+
+    if (await serverNameTaken(pool, { routerId: id, nama, jenis })) {
+      return res.status(409).json({
+        success: false,
+        message: 'Server dengan nama itu sudah ada di router ini',
       });
     }
 
@@ -148,13 +163,13 @@ router.post('/:id/servers', requireAdmin, async (req, res) => {
 router.put('/servers/:serverId', requireAdmin, async (req, res) => {
   const serverId = readId(req.params.serverId);
   const routerId = readId(req.body?.router_id);
-  const jenis = readText(req.body?.jenis);
+  const jenis = normalizeJenis(req.body?.jenis);
   const nama = readText(req.body?.nama);
 
-  if (!serverId || !routerId || !JENIS_SERVER.includes(jenis)) {
+  if (!serverId || !routerId || !jenis) {
     return res.status(400).json({
       success: false,
-      message: 'Server, router, dan jenis server (hotspot atau pppoe) wajib dipilih',
+      message: 'Server, router, dan jenis server (hotspot, pppoe, atau keduanya) wajib dipilih',
     });
   }
   if (!validServerName(nama)) {
@@ -164,8 +179,21 @@ router.put('/servers/:serverId', requireAdmin, async (req, res) => {
     });
   }
 
+  const connection = await pool.getConnection();
   try {
-    const [routerRows] = await pool.execute('SELECT id FROM routers WHERE id = ? LIMIT 1', [routerId]);
+    const [serverRows] = await connection.execute(
+      'SELECT nama, router_id FROM router_servers WHERE id = ? LIMIT 1',
+      [serverId],
+    );
+    const current = serverRows[0];
+    if (!current) {
+      return res.status(404).json({ success: false, message: 'Server tidak ditemukan' });
+    }
+
+    const [routerRows] = await connection.execute(
+      'SELECT id, nama_router, ip_address FROM routers WHERE id = ? LIMIT 1',
+      [routerId],
+    );
     if (routerRows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -173,21 +201,52 @@ router.put('/servers/:serverId', requireAdmin, async (req, res) => {
       });
     }
 
-    const [result] = await pool.execute(
+    const [oldRouterRows] = await connection.execute(
+      'SELECT nama_router, ip_address FROM routers WHERE id = ? LIMIT 1',
+      [current.router_id],
+    );
+    const oldRouter = oldRouterRows[0] || null;
+
+    if (await serverNameTaken(connection, { routerId, nama, jenis, exceptId: serverId })) {
+      return res.status(409).json({
+        success: false,
+        message: 'Server dengan nama itu sudah ada di router ini',
+      });
+    }
+
+    await connection.beginTransaction();
+    const [result] = await connection.execute(
       'UPDATE router_servers SET router_id = ?, jenis = ?, nama = ? WHERE id = ?',
       [routerId, jenis, nama, serverId],
     );
     if (result.affectedRows === 0) {
+      await connection.rollback();
       return res.status(404).json({
         success: false,
         message: 'Server tidak ditemukan',
       });
     }
+
+    // Nama berubah: Called-Station-Id akun yang terikat ke router lama ikut diganti.
+    // Router tempat akun dikunci adalah router sebelum edit, karena NAS-IP-nya IP itu.
+    let calledStationSync = null;
+    if (current.nama !== nama && oldRouter) {
+      calledStationSync = await renameServerBindings(connection, {
+        oldName: current.nama,
+        newName: nama,
+        routerName: oldRouter.nama_router,
+        routerIp: oldRouter.ip_address,
+      });
+    }
+    await connection.commit();
+
     return res.json({
       success: true,
       message: 'Server berhasil diperbarui',
+      called_station_sync: calledStationSync,
     });
   } catch (error) {
+    await connection.rollback().catch(() => {});
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({
         success: false,
@@ -199,6 +258,8 @@ router.put('/servers/:serverId', requireAdmin, async (req, res) => {
       message: 'Gagal menyimpan perubahan server',
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 });
 

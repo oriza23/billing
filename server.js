@@ -11,6 +11,7 @@ const { startIsolirEnforcement } = require('./backend/langganan_isolir');
 const { ensurePppoeIsolirSchema } = require('./backend/pppoe_isolir/schema');
 const { startCron } = require('./utils/cron');
 const { ensureTable: ensureRouterServers } = require('./backend/router_servers');
+const { ensureProtocolSeparation, syncRouterLocks } = require('./backend/langganan_radius');
 const { ensureTables: ensureAcsTables } = require('./backend/acs');
 const { ensureNasTable, syncAfterRouterChange } = require('./backend/radius_nas');
 const { mountFrontend } = require('./backend/serve_frontend');
@@ -83,6 +84,7 @@ app.use('/api/pelanggan', pelangganRouter);
 const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
+app.use('/api/sistem', require('./backend/routes/service_restart'));
 app.use('/api/logs', require('./backend/routes/logs'));
 app.use('/api/acs', require('./backend/routes/acs'));
 
@@ -171,6 +173,13 @@ async function start() {
   await langgananProfilRouter.ensureTable();
   await langgananDataRouter.ensureTable();
   await ensureRouterServers();
+  await ensureProtocolSeparation(pool);
+  const routerLocks = await syncRouterLocks(pool);
+  if (routerLocks.locked || routerLocks.opened || routerLocks.skipped) {
+    console.log(
+      `Kunci router RADIUS: ${routerLocks.locked} dikunci, ${routerLocks.opened} dibuka (ALL ROUTER), ${routerLocks.skipped} dilewati (router tidak dikenal).`,
+    );
+  }
   await ensureAcsTables();
   await ensureDataWilayahTable();
   await pelangganRouter.ensureTable();

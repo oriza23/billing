@@ -9,6 +9,7 @@ import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
 import Swal from 'sweetalert2'
 import { fireError, fireSuccess } from './swals.js'
+import { melayani } from './serverJenis.js'
 import api from './api/axios.js'
 import useDebouncedValue from './useDebouncedValue.js'
 
@@ -392,7 +393,7 @@ function TambahLanggananPppoe() {
     'ALL SERVER',
     ...new Set(
       reference.servers
-        .filter((row) => row.jenis === serverJenis && (form.router === 'ALL ROUTER' || row.nama_router === form.router))
+        .filter((row) => melayani(row.jenis, serverJenis) && (form.router === 'ALL ROUTER' || row.nama_router === form.router))
         .map((row) => row.nama),
     ),
   ], [reference.servers, serverJenis, form.router])

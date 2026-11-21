@@ -7,6 +7,10 @@ const {
   assertUsernameFree,
   writeAccount,
   syncProfileGroup,
+  replaceFramedProtocol,
+  renameServerBindings,
+  nasLockForRouter,
+  syncRouterLocks,
 } = require('../backend/langganan_radius');
 
 // Database tiruan: mencatat semua statement dan menjawab lookup router/profil.
@@ -62,6 +66,7 @@ test('router dan server tertentu dikunci lewat NAS-IP-Address dan Called-Station
     ['budi@net', 'Cleartext-Password', ':=', 'rahasia1'],
     ['budi@net', 'NAS-IP-Address', '==', '192.168.223.250'],
     ['budi@net', 'Called-Station-Id', '==', 'pppoe-service'],
+    ['budi@net', 'Framed-Protocol', '==', 'PPP'],
   ]);
   assert.deepEqual(inserted(db, 'radusergroup'), [['budi@net', '10-Mbps']]);
 });
@@ -72,6 +77,7 @@ test('ALL ROUTER dan ALL SERVER tidak menulis batas apa pun', async () => {
 
   assert.deepEqual(inserted(db, 'radcheck'), [
     ['budi@net', 'Cleartext-Password', ':=', 'rahasia1'],
+    ['budi@net', 'Framed-Protocol', '==', 'PPP'],
   ]);
   assert.equal(db.calls.some((call) => call.sql.includes('FROM routers')), false);
 });
@@ -83,6 +89,7 @@ test('ALL ROUTER dengan server tertentu hanya membatasi server', async () => {
   assert.deepEqual(inserted(db, 'radcheck').map((row) => row[1]), [
     'Cleartext-Password',
     'Called-Station-Id',
+    'Framed-Protocol',
   ]);
 });
 
@@ -93,6 +100,7 @@ test('router tertentu dengan ALL SERVER hanya membatasi router', async () => {
   assert.deepEqual(inserted(db, 'radcheck').map((row) => row[1]), [
     'Cleartext-Password',
     'NAS-IP-Address',
+    'Framed-Protocol',
   ]);
 });
 
@@ -164,6 +172,112 @@ test('username bentrok dengan langganan lain, voucher/akun RADIUS, atau terlalu 
     (error) => error.statusCode === 400,
   );
   await assert.doesNotReject(assertUsernameFree(fakeDb(), 'baru@net'));
+});
+
+test('akun Hotspot memakai Framed-Protocol != PPP, akun PPP memakai ==', async () => {
+  const hotspot = fakeDb(env);
+  await writeAccount(hotspot, { ...baseCustomer, ktg: 'Hotspot', server: 'hs-1' });
+  const rows = inserted(hotspot, 'radcheck');
+  assert.ok(rows.some((row) => row[1] === 'Framed-Protocol' && row[2] === '!=' && row[3] === 'PPP'));
+  assert.equal(rows.some((row) => row[1] === 'Framed-Protocol' && row[2] === '=='), false);
+  assert.ok(rows.some((row) => row[1] === 'Called-Station-Id' && row[3] === 'hs-1'));
+  assert.ok(rows.some((row) => row[1] === 'NAS-IP-Address' && row[3] === '192.168.223.250'));
+
+  const db = fakeDb();
+  await replaceFramedProtocol(db, 'andi', 'PPP');
+  assert.match(db.calls[0].sql, /DELETE FROM radcheck/);
+  assert.deepEqual(db.calls[1].params, ['andi', 'Framed-Protocol', '==', 'PPP']);
+});
+
+test('akun Hotspot ALL SERVER tidak menulis Called-Station-Id', async () => {
+  const db = fakeDb(env);
+  await writeAccount(db, { ...baseCustomer, ktg: 'Hotspot', server: 'ALL SERVER' });
+  const rows = inserted(db, 'radcheck');
+  assert.equal(rows.some((row) => row[1] === 'Called-Station-Id'), false);
+  assert.ok(rows.some((row) => row[1] === 'NAS-IP-Address'));
+  assert.ok(rows.some((row) => row[1] === 'Framed-Protocol' && row[2] === '!='));
+});
+
+test('ganti nama server memperbarui Called-Station-Id milik router itu', async () => {
+  const calls = [];
+  const db = {
+    async execute(sql, params = []) {
+      calls.push({ sql: String(sql), params });
+      if (String(sql).includes('COUNT(*)')) {
+        return [[{ n: 0 }]];
+      }
+      return [{ affectedRows: 2 }];
+    },
+  };
+  const result = await renameServerBindings(db, {
+    oldName: 'LAMA',
+    newName: 'BARU',
+    routerName: 'RB TES',
+    routerIp: '10.0.0.1',
+  });
+  assert.ok(result.radcheck > 0);
+  assert.equal(result.radgroupcheck, 2);
+  const nas = calls.find((item) => item.sql.includes('NAS-IP-Address'));
+  assert.deepEqual(nas.params, ['BARU', 'LAMA', '10.0.0.1']);
+  const group = calls.find((item) => item.sql.includes('UPDATE radgroupcheck'));
+  assert.deepEqual(group.params, ['BARU', 'LAMA']);
+  const billing = calls.filter((item) => item.sql.startsWith('UPDATE langganan_pelanggan'));
+  assert.deepEqual(billing.map((item) => item.params[2]), ['RB TES', 'ALL ROUTER']);
+});
+
+test('nama server yang masih dipakai router lain tidak mengubah akun ALL ROUTER', async () => {
+  const calls = [];
+  const db = {
+    async execute(sql, params = []) {
+      calls.push({ sql: String(sql), params });
+      if (String(sql).includes('COUNT(*)')) {
+        return [[{ n: 1 }]];
+      }
+      return [{ affectedRows: 1 }];
+    },
+  };
+  await renameServerBindings(db, {
+    oldName: 'SAMA',
+    newName: 'BARU',
+    routerName: 'RB TES',
+    routerIp: '10.0.0.1',
+  });
+  const billing = calls.filter((item) => item.sql.startsWith('UPDATE langganan_pelanggan'));
+  assert.deepEqual(billing.map((item) => item.params[2]), ['RB TES']);
+  assert.equal(calls.some((item) => item.sql.includes('UPDATE radgroupcheck')), false);
+  assert.equal(calls.some((item) => item.sql.includes('username NOT IN')), false);
+});
+
+test('pilihan router: ALL ROUTER tidak mengunci, router tertentu mengunci ke IP-nya', () => {
+  const routers = new Map([['RB TES', '10.0.0.1']]);
+  assert.deepEqual(nasLockForRouter('ALL ROUTER', routers), { lock: false, ip: '' });
+  assert.deepEqual(nasLockForRouter('  ', routers), { lock: false, ip: '' });
+  assert.deepEqual(nasLockForRouter('RB TES', routers), { lock: true, ip: '10.0.0.1' });
+  assert.equal(nasLockForRouter('RB HILANG', routers).unknown, true);
+});
+
+test('syncRouterLocks menulis NAS-IP hanya untuk router spesifik dan melepas ALL ROUTER', async () => {
+  const calls = [];
+  const db = {
+    async execute(sql, params = []) {
+      calls.push({ sql: String(sql), params });
+      if (sql.includes('FROM routers')) return [[{ nama_router: 'RB TES', ip_address: '10.0.0.1' }]];
+      if (sql.includes('FROM hotspot_vouchers')) return [[{ username: 'vc1', router: 'RB TES' }]];
+      if (sql.includes('FROM langganan_pelanggan')) return [[{ username: 'budi', router: 'ALL ROUTER' }]];
+      if (sql.includes("attribute = 'NAS-IP-Address'") && sql.includes('SELECT')) return [[]];
+      return [{ affectedRows: 1 }];
+    },
+  };
+  const summary = await syncRouterLocks(db);
+  assert.equal(summary.locked, 1);
+  assert.equal(summary.opened, 1);
+  const insert = calls.find((item) => item.sql.includes('INSERT INTO radcheck'));
+  assert.deepEqual(insert.params, ['vc1', '10.0.0.1']);
+  const deleted = calls
+    .filter((item) => item.sql.includes('DELETE FROM radcheck'))
+    .map((item) => item.params[0]);
+  assert.ok(deleted.includes('vc1'));
+  assert.ok(deleted.includes('budi'));
 });
 
 test('ganti grup profil memperbarui pelanggan, grup kosong hanya mencabut', async () => {

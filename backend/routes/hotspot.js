@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const express = require('express');
 const pool = require('../../database');
 const requireRole = require('../middleware/requireRole');
-const { ALL_SERVER, serverAllowed } = require('../router_servers');
+const { serverAllowed } = require('../router_servers');
+const { buildScopeRows, RadiusSyncError, protocolCheck } = require('../langganan_radius');
 const { writeGroupReply, GROUP_ATTRIBUTE } = require('../radius_group');
 
 const router = express.Router();
@@ -578,14 +579,13 @@ async function insertVouchersBulk(connection, vouchers, record) {
 
   for (const voucher of vouchers) {
     radcheckRows.push([voucher.username, 'Cleartext-Password', ':=', voucher.password]);
-    if (record.nasIp) {
-      radcheckRows.push([voucher.username, 'NAS-IP-Address', '==', record.nasIp]);
+    // scopeRows: NAS-IP-Address router tertentu, Called-Station-Id bila bukan ALL SERVER.
+    for (const [attribute, op, value] of record.scopeRows) {
+      radcheckRows.push([voucher.username, attribute, op, value]);
     }
-    // MikroTik mengirim nama server Hotspot sebagai Called-Station-Id.
-    // ALL SERVER tidak membatasi, sehingga voucher bisa login di semua server.
-    if (record.server && record.server !== ALL_SERVER) {
-      radcheckRows.push([voucher.username, 'Called-Station-Id', '==', record.server]);
-    }
+    // Voucher tidak boleh dipakai dial PPPoE, termasuk di server bertipe both.
+    const hotspotProtocol = protocolCheck('Hotspot');
+    radcheckRows.push([voucher.username, ...hotspotProtocol]);
     radusergroupRows.push([voucher.username, record.mikrotikGroup, 1]);
     voucherRows.push([
       voucher.username,
@@ -1128,16 +1128,17 @@ router.post('/voucher/generate', requireAdmin, async (req, res) => {
       admin,
     };
 
-    let nasIp = '';
-    if (routerName && routerName !== 'ALL ROUTER') {
-      const [routerRows] = await connection.execute(
-        'SELECT ip_address FROM routers WHERE nama_router = ? LIMIT 1',
-        [routerName],
-      );
-      nasIp = routerRows[0]?.ip_address || '';
+    let scopeRows;
+    try {
+      scopeRows = await buildScopeRows(connection, { router: routerName, server: serverName });
+    } catch (error) {
+      if (error instanceof RadiusSyncError) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+      throw error;
     }
     record.kodeBatch = Math.floor(Date.now() / 1000).toString();
-    record.nasIp = nasIp;
+    record.scopeRows = scopeRows;
 
     const [existingRows] = await connection.query(
       'SELECT username FROM radcheck UNION SELECT username FROM hotspot_vouchers',

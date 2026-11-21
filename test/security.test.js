@@ -315,6 +315,8 @@ test('server spesifik dipaksa lewat Called-Station-Id, ALL SERVER tidak membatas
   const limited = radcheckRows(specific).filter((row) => row[1] === 'Called-Station-Id');
   assert.equal(limited.length, 1);
   assert.deepEqual(limited[0].slice(1), ['Called-Station-Id', '==', 'HS-1']);
+  const nas = radcheckRows(specific).filter((row) => row[1] === 'NAS-IP-Address');
+  assert.deepEqual(nas[0].slice(1), ['NAS-IP-Address', '==', '10.0.0.1']);
 
   const all = installPool({ execute: async (sql, params) => generateExecute(sql, params) });
   const withAll = await call('POST', '/api/hotspot/voucher/generate', {
@@ -323,12 +325,23 @@ test('server spesifik dipaksa lewat Called-Station-Id, ALL SERVER tidak membatas
   });
   assert.equal(withAll.status, 200, JSON.stringify(withAll.body));
   assert.equal(radcheckRows(all).some((row) => row[1] === 'Called-Station-Id'), false);
+  assert.equal(radcheckRows(all).some((row) => row[1] === 'NAS-IP-Address'), false);
+
+  // Voucher Hotspot tidak boleh punya Framed-Protocol == PPP, supaya tidak bisa dial PPPoE.
+  for (const batch of [specific, all]) {
+    const protocol = radcheckRows(batch).filter((row) => row[1] === 'Framed-Protocol');
+    assert.equal(protocol.length, 1);
+    assert.deepEqual(protocol[0].slice(1), ['Framed-Protocol', '!=', 'PPP']);
+  }
 });
 
-test('server router: hanya nama valid dan jenis hotspot/pppoe yang disimpan', async () => {
+test('server router: hanya nama valid dan jenis hotspot/pppoe/both yang disimpan', async () => {
   const token = sign('admin', 'admin');
   const bad = [
     ['jenis salah', { jenis: 'static', nama: 'HS-1' }],
+    ['jenis kosong', { jenis: '', nama: 'HS-1' }],
+    ['array jenis kosong', { jenis: [], nama: 'HS-1' }],
+    ['array jenis salah', { jenis: ['hotspot', 'static'], nama: 'HS-1' }],
     ['nama kosong', { jenis: 'hotspot', nama: '   ' }],
     ['nama ALL SERVER', { jenis: 'hotspot', nama: 'all server' }],
     ['nama terlalu panjang', { jenis: 'pppoe', nama: 'x'.repeat(101) }],
@@ -340,9 +353,30 @@ test('server router: hanya nama valid dan jenis hotspot/pppoe yang disimpan', as
     assert.equal(calls.some((item) => item.sql.includes('INSERT INTO router_servers')), false, label);
   }
 
-  const calls = installPool({
-    execute: async (sql) => (sql.includes('FROM routers') ? [[{ id: 1 }]] : [{ affectedRows: 1, insertId: 7 }]),
-  });
+  function serverPool(taken = false) {
+    return installPool({
+      execute: async (sql) => {
+        if (sql.includes('SELECT nama, router_id FROM router_servers')) {
+          return [[{ nama: 'LAMA', router_id: 1 }]];
+        }
+        if (sql.includes('SELECT nama_router, ip_address FROM routers')) {
+          return [[{ nama_router: 'RB TES', ip_address: '10.0.0.1' }]];
+        }
+        if (sql.includes('COUNT(*)') && sql.includes('router_servers')) {
+          return [[{ n: 0 }]];
+        }
+        if (sql.includes('FROM router_servers')) {
+          return [taken ? [{ id: 3 }] : []];
+        }
+        if (sql.includes('FROM routers')) {
+          return [[{ id: 1 }]];
+        }
+        return [{ affectedRows: 1, insertId: 7 }];
+      },
+    });
+  }
+
+  const calls = serverPool();
   const ok = await call('POST', '/api/routers/1/servers', {
     token,
     body: { jenis: 'pppoe', nama: 'PPP-1' },
@@ -351,8 +385,57 @@ test('server router: hanya nama valid dan jenis hotspot/pppoe yang disimpan', as
   const insert = calls.find((item) => item.sql.includes('INSERT INTO router_servers'));
   assert.deepEqual(insert.params, [1, 'pppoe', 'PPP-1']);
 
+  // Hotspot & PPPoE sekaligus: string 'both', array, atau 'hotspot,pppoe' -> disimpan 'both'.
+  for (const jenis of ['both', ['hotspot', 'pppoe'], 'hotspot,pppoe']) {
+    const bothCalls = serverPool();
+    const both = await call('POST', '/api/routers/1/servers', { token, body: { jenis, nama: 'SRV-1' } });
+    assert.equal(both.status, 200, JSON.stringify(jenis));
+    const bothInsert = bothCalls.find((item) => item.sql.includes('INSERT INTO router_servers'));
+    assert.deepEqual(bothInsert.params, [1, 'both', 'SRV-1'], JSON.stringify(jenis));
+  }
+
+  // Nama yang sama untuk layanan yang tumpang tindih ditolak.
+  const dupCalls = serverPool(true);
+  const dup = await call('POST', '/api/routers/1/servers', { token, body: { jenis: 'both', nama: 'SRV-1' } });
+  assert.equal(dup.status, 409);
+  assert.equal(dupCalls.some((item) => item.sql.includes('INSERT INTO router_servers')), false);
+
+  // Edit: jenis diubah ke both.
+  const putCalls = serverPool();
+  const put = await call('PUT', '/api/routers/servers/5', {
+    token,
+    body: { router_id: 1, jenis: ['hotspot', 'pppoe'], nama: 'SRV-1' },
+  });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const update = putCalls.find((item) => item.sql.includes('UPDATE router_servers'));
+  assert.deepEqual(update.params, [1, 'both', 'SRV-1', 5]);
+  const renamed = putCalls.filter((item) => item.sql.includes("attribute = 'Called-Station-Id'"));
+  assert.ok(renamed.length >= 1);
+  assert.ok(renamed.every((item) => item.params[0] === 'SRV-1' && item.params[1] === 'LAMA'));
+  const putBad = await call('PUT', '/api/routers/servers/5', {
+    token,
+    body: { router_id: 1, jenis: [], nama: 'SRV-1' },
+  });
+  assert.equal(putBad.status, 400);
+
   const list = await call('GET', '/api/routers/servers?jenis=lain', { token: sign('petugas') });
   assert.equal(list.status, 400);
+});
+
+test('daftar server: filter hotspot/pppoe ikut menyertakan server both', async () => {
+  for (const jenis of ['hotspot', 'pppoe']) {
+    const calls = installPool({ execute: async () => [[]] });
+    const res = await call('GET', `/api/routers/servers?jenis=${jenis}`, { token: sign('petugas') });
+    assert.equal(res.status, 200);
+    const select = calls.find((item) => item.sql.includes('FROM router_servers'));
+    assert.match(select.sql, /s\.jenis IN \(\?, 'both'\)/);
+    assert.deepEqual(select.params, [jenis]);
+  }
+
+  const all = installPool({ execute: async () => [[]] });
+  await call('GET', '/api/routers/servers', { token: sign('petugas') });
+  const select = all.find((item) => item.sql.includes('FROM router_servers'));
+  assert.doesNotMatch(select.sql, /WHERE/);
 });
 
 test('generate voucher mencatat username dari token, bukan dari body', async () => {

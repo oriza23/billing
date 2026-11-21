@@ -29,6 +29,7 @@ const SECRET_FIELDS = /(password|secret|api_key|private_key|token|pass|pin)/i;
 // Aturan path diperiksa lebih dulu (mis. Anda menghapus lewat POST /delete), baru jatuh ke metode HTTP.
 const ACTION_BY_PATH = [
   { re: /^\/api\/auth\/login$/i, action: 'login' },
+  { re: /^\/api\/sistem\/restart-service$/i, action: 'restart' },
   // POST .../delete, /delete-massal, /hapus, /disconnect, /putus = hapus data.
   { re: /\/(?:delete|hapus)(?:$|[/-])/i, action: 'hapus' },
   { re: /\/(?:disconnect|putus)(?:$|[/-])/i, action: 'hapus' },
@@ -46,6 +47,7 @@ const ENTITY_BY_PATH = [
   [/^\/api\/outlets/i, 'outlet'],
   [/^\/api\/wilayah/i, 'wilayah'],
   [/^\/api\/settings/i, 'pengaturan'],
+  [/^\/api\/sistem\/restart-service$/i, 'layanan'],
   [/^\/api\/acs/i, 'perangkat ACS'],
   [/^\/api\/pelanggan/i, 'pelanggan'],
   [/^\/api\/users/i, 'user'],
@@ -57,13 +59,14 @@ const ACTION_VERB = {
   tambah: 'Menambah',
   edit: 'Mengubah',
   hapus: 'Menghapus',
+  restart: 'Me-restart',
   akses: 'Mengakses',
 };
 
 // Kunci yang paling mungkin menjadi "nama objek" aksi, berurutan dari paling spesifik.
 const SUBJECT_KEYS = [
   'nolayanan', 'username', 'pelanggan', 'nama', 'nama_outlet', 'nama_router', 'nama_profile',
-  'kode_batch', 'nama_wilayah', 'deviceId', 'device_id', 'sn', 'email', 'id',
+  'kode_batch', 'nama_wilayah', 'deviceId', 'device_id', 'sn', 'email', 'service', 'id',
 ];
 
 const ACTION_LABEL = {

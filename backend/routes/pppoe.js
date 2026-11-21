@@ -1,7 +1,7 @@
 const express = require('express');
 const pool = require('../../database');
 const { MAX_GROUP_NAME, writeProfileReply } = require('../radius_group');
-const { ALL_ROUTER, buildScopeRows } = require('../langganan_radius');
+const { ALL_ROUTER, buildScopeRows, replaceFramedProtocol } = require('../langganan_radius');
 const { ALL_SERVER, serverAllowed } = require('../router_servers');
 const { sendDisconnectRequest } = require('../../utils/radius_coa');
 
@@ -268,6 +268,8 @@ router.post('/pelanggan', async (req, res) => {
         [username, attribute, op, value],
       );
     }
+    // Akun halaman ini selalu PPPoE: tidak boleh lolos di login Hotspot.
+    await replaceFramedProtocol(connection, username, 'PPP');
 
     await connection.execute(
       'INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, 1)',
@@ -362,6 +364,8 @@ router.put('/pelanggan/:username', async (req, res) => {
     if (scopeRows) {
       await replaceScopeRows(connection, username, scopeRows);
     }
+    // ALL SERVER menghapus Called-Station-Id lewat replaceScopeRows. Protokol tetap PPP.
+    await replaceFramedProtocol(connection, username, 'PPP');
 
     await connection.execute('DELETE FROM radusergroup WHERE username = ?', [username]);
 

@@ -4,15 +4,80 @@ import Swal from 'sweetalert2'
 import { fireError, fireSuccess } from './swals.js'
 import './PppoeProfil.css'
 import './RouterMaster.css'
+import { jenisDariLayanan, layananDariJenis } from './serverJenis.js'
 
 const API_URL = '/routers'
 const SERVER_URL = '/routers/servers'
-const JENIS_LABEL = { hotspot: 'Hotspot', pppoe: 'PPPoE' }
+const LAYANAN_OPTIONS = [
+  { key: 'hotspot', label: 'Hotspot', hint: 'IP > Hotspot > Servers' },
+  { key: 'pppoe', label: 'PPPoE', hint: 'PPP > PPPoE Servers' },
+]
 
 const MODAL_OVERLAY =
   'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm'
 const MODAL_CARD =
   'max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-xl dark:bg-slate-900'
+
+const emptyServerForm = { routerId: '', hotspot: false, pppoe: false, nama: '' }
+
+function ServerBadges({ jenis }) {
+  const layanan = layananDariJenis(jenis)
+  if (layanan.length === 0) {
+    return <span>{jenis || '-'}</span>
+  }
+  return (
+    <span className="server-badges">
+      {layanan.includes('hotspot') && <span className="server-badge server-badge-hotspot">Hotspot</span>}
+      {layanan.includes('pppoe') && <span className="server-badge server-badge-pppoe">PPPoE</span>}
+    </span>
+  )
+}
+
+// Checkbox Jenis Server: satu server boleh melayani Hotspot, PPPoE, atau keduanya.
+function JenisServerField({ value, onChange, disabled }) {
+  const noneSelected = !value.hotspot && !value.pppoe
+  return (
+    <fieldset className="server-jenis" disabled={disabled}>
+      <legend>Jenis Server</legend>
+      <div className="server-jenis-options">
+        {LAYANAN_OPTIONS.map((option) => (
+          <label
+            key={option.key}
+            className={`server-jenis-option${value[option.key] ? ' is-checked' : ''}`}
+          >
+            <input
+              type="checkbox"
+              name={`jenis_${option.key}`}
+              checked={value[option.key]}
+              onChange={(event) => onChange(option.key, event.target.checked)}
+            />
+            <span className="server-jenis-text">
+              <strong>{option.label}</strong>
+              <small>{option.hint}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+      {noneSelected && (
+        <p className="server-jenis-error" role="alert">Pilih minimal satu layanan (Hotspot atau PPPoE).</p>
+      )}
+    </fieldset>
+  )
+}
+
+// Label & placeholder kolom nama mengikuti layanan yang dipilih.
+function serverNameLabels({ hotspot, pppoe }) {
+  if (hotspot && pppoe) {
+    return {
+      label: 'Nama Server / Service Name',
+      placeholder: 'Sama dengan nama server Hotspot dan Service Name PPPoE di MikroTik',
+    }
+  }
+  if (pppoe) {
+    return { label: 'Service Name', placeholder: 'Sama dengan PPP > PPPoE Servers > Service Name' }
+  }
+  return { label: 'Nama Server', placeholder: 'Sama dengan IP > Hotspot > Servers > Name' }
+}
 
 const emptyForm = {
   namaRouter: '',
@@ -31,7 +96,7 @@ function RouterMaster() {
   const [editMode, setEditMode] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [servers, setServers] = useState([])
-  const [serverForm, setServerForm] = useState({ routerId: '', jenis: '', nama: '' })
+  const [serverForm, setServerForm] = useState(emptyServerForm)
   const [serverSaving, setServerSaving] = useState(false)
   const [deletingServerId, setDeletingServerId] = useState(null)
   const [isRouterModalOpen, setIsRouterModalOpen] = useState(false)
@@ -210,6 +275,14 @@ function RouterMaster() {
     setServerForm((current) => ({ ...current, [key]: value }))
   }
 
+  function updateServerLayanan(key, checked) {
+    setServerForm((current) => ({ ...current, [key]: checked }))
+  }
+
+  function updateEditServerLayanan(key, checked) {
+    setEditServerData((current) => (current ? { ...current, [key]: checked } : current))
+  }
+
   function updateEditServerField(key, value) {
     setEditServerData((current) => (current ? { ...current, [key]: value } : current))
   }
@@ -223,7 +296,8 @@ function RouterMaster() {
     setEditServerData({
       id: item.id,
       routerId: String(item.router_id ?? ''),
-      jenis: item.jenis || '',
+      hotspot: layananDariJenis(item.jenis).includes('hotspot'),
+      pppoe: layananDariJenis(item.jenis).includes('pppoe'),
       nama: item.nama || '',
     })
     setIsEditServerModalOpen(true)
@@ -233,11 +307,12 @@ function RouterMaster() {
     event.preventDefault()
 
     const nama = serverForm.nama.trim()
-    if (!serverForm.routerId || !serverForm.jenis || !nama) {
+    const jenis = jenisDariLayanan(serverForm)
+    if (!serverForm.routerId || !jenis || !nama) {
       Swal.fire({
         icon: 'warning',
         title: 'Data belum lengkap',
-        text: 'Pilih router, jenis server, dan isi nama server.',
+        text: 'Pilih router, minimal satu jenis server, dan isi nama server.',
       })
       return
     }
@@ -245,7 +320,7 @@ function RouterMaster() {
     setServerSaving(true)
     try {
       await api.post(`${API_URL}/${serverForm.routerId}/servers`, {
-        jenis: serverForm.jenis,
+        jenis,
         nama,
       })
       // Router dan jenis dipertahankan supaya beberapa server bisa diinput berurutan.
@@ -265,11 +340,12 @@ function RouterMaster() {
     }
 
     const nama = String(editServerData.nama || '').trim()
-    if (!editServerData.routerId || !editServerData.jenis || !nama) {
+    const jenis = jenisDariLayanan(editServerData)
+    if (!editServerData.routerId || !jenis || !nama) {
       Swal.fire({
         icon: 'warning',
         title: 'Data belum lengkap',
-        text: 'Pilih router, jenis server, dan isi nama server.',
+        text: 'Pilih router, minimal satu jenis server, dan isi nama server.',
       })
       return
     }
@@ -278,7 +354,7 @@ function RouterMaster() {
     try {
       await api.put(`${SERVER_URL}/${editServerData.id}`, {
         router_id: editServerData.routerId,
-        jenis: editServerData.jenis,
+        jenis,
         nama,
       })
       closeEditServerModal()
@@ -444,7 +520,7 @@ function RouterMaster() {
                     <tr key={item.id}>
                       <td>{index + 1}</td>
                       <td>{item.nama_router}</td>
-                      <td>{JENIS_LABEL[item.jenis] || item.jenis}</td>
+                      <td><ServerBadges jenis={item.jenis} /></td>
                       <td>{item.nama}</td>
                       <td>
                         <div className="profil-actions">
@@ -571,28 +647,19 @@ function RouterMaster() {
                   </select>
                 </label>
 
-                <label className="profil-field">
-                  <span>Jenis Server</span>
-                  <select
-                    name="jenis"
-                    value={editServerData.jenis}
-                    onChange={(event) => updateEditServerField('jenis', event.target.value)}
-                  >
-                    <option value="">-Pilih-</option>
-                    <option value="hotspot">Hotspot</option>
-                    <option value="pppoe">PPPoE</option>
-                  </select>
-                </label>
+                <JenisServerField
+                  value={editServerData}
+                  onChange={updateEditServerLayanan}
+                  disabled={serverSaving}
+                />
 
                 <label className="profil-field">
-                  <span>{editServerData.jenis === 'pppoe' ? 'Service Name' : 'Nama Server'}</span>
+                  <span>{serverNameLabels(editServerData).label}</span>
                   <input
                     type="text"
                     name="nama"
                     maxLength="100"
-                    placeholder={editServerData.jenis === 'pppoe'
-                      ? 'Sama dengan PPP > PPPoE Servers > Service Name'
-                      : 'Sama dengan IP > Hotspot > Servers > Name'}
+                    placeholder={serverNameLabels(editServerData).placeholder}
                     value={editServerData.nama}
                     onChange={(event) => updateEditServerField('nama', event.target.value)}
                   />
@@ -601,7 +668,8 @@ function RouterMaster() {
 
               <p className="server-hint">
                 Isi persis seperti di MikroTik (huruf besar kecil dibedakan). Hotspot: IP &gt; Hotspot &gt; Servers &gt; Name.
-                PPPoE: PPP &gt; PPPoE Servers &gt; Service Name. Pilihan &quot;ALL SERVER&quot; selalu tersedia di form lain.
+                PPPoE: PPP &gt; PPPoE Servers &gt; Service Name. Bila keduanya dicentang, nama di MikroTik harus sama untuk
+                Hotspot dan PPPoE. Pilihan &quot;ALL SERVER&quot; selalu tersedia di form lain.
               </p>
 
               <div className="profil-form-actions">
@@ -613,7 +681,11 @@ function RouterMaster() {
                 >
                   Batal
                 </button>
-                <button className="profil-save" type="submit" disabled={serverSaving}>
+                <button
+                  className="profil-save"
+                  type="submit"
+                  disabled={serverSaving || !jenisDariLayanan(editServerData)}
+                >
                   {serverSaving ? 'Menyimpan...' : 'Simpan Perubahan'}
                 </button>
               </div>
@@ -646,28 +718,19 @@ function RouterMaster() {
                   </select>
                 </label>
 
-                <label className="profil-field">
-                  <span>Jenis Server</span>
-                  <select
-                    name="jenis"
-                    value={serverForm.jenis}
-                    onChange={(event) => updateServerField('jenis', event.target.value)}
-                  >
-                    <option value="">-Pilih-</option>
-                    <option value="hotspot">Hotspot</option>
-                    <option value="pppoe">PPPoE</option>
-                  </select>
-                </label>
+                <JenisServerField
+                  value={serverForm}
+                  onChange={updateServerLayanan}
+                  disabled={serverSaving}
+                />
 
                 <label className="profil-field">
-                  <span>{serverForm.jenis === 'pppoe' ? 'Service Name' : 'Nama Server'}</span>
+                  <span>{serverNameLabels(serverForm).label}</span>
                   <input
                     type="text"
                     name="nama"
                     maxLength="100"
-                    placeholder={serverForm.jenis === 'pppoe'
-                      ? 'Sama dengan PPP > PPPoE Servers > Service Name'
-                      : 'Sama dengan IP > Hotspot > Servers > Name'}
+                    placeholder={serverNameLabels(serverForm).placeholder}
                     value={serverForm.nama}
                     onChange={(event) => updateServerField('nama', event.target.value)}
                   />
@@ -676,7 +739,8 @@ function RouterMaster() {
 
               <p className="server-hint">
                 Isi persis seperti di MikroTik (huruf besar kecil dibedakan). Hotspot: IP &gt; Hotspot &gt; Servers &gt; Name.
-                PPPoE: PPP &gt; PPPoE Servers &gt; Service Name. Pilihan &quot;ALL SERVER&quot; selalu tersedia di form lain.
+                PPPoE: PPP &gt; PPPoE Servers &gt; Service Name. Bila keduanya dicentang, nama di MikroTik harus sama untuk
+                Hotspot dan PPPoE. Pilihan &quot;ALL SERVER&quot; selalu tersedia di form lain.
               </p>
 
               <div className="profil-form-actions">
@@ -688,7 +752,11 @@ function RouterMaster() {
                 >
                   Batal
                 </button>
-                <button className="profil-save" type="submit" disabled={serverSaving}>
+                <button
+                  className="profil-save"
+                  type="submit"
+                  disabled={serverSaving || !jenisDariLayanan(serverForm)}
+                >
                   {serverSaving ? 'Menyimpan...' : 'Simpan Server'}
                 </button>
               </div>

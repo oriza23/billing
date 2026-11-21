@@ -13,7 +13,7 @@ const router = express.Router();
 
 const MAX_PAGE_LIMIT = 200;
 const LATEST_LIMIT = 100;
-const ACTIONS = ['login', 'tambah', 'edit', 'hapus', 'akses'];
+const ACTIONS = ['login', 'tambah', 'edit', 'hapus', 'restart', 'akses'];
 const SEARCH_COLUMNS = ['username', 'nama_lengkap', 'info_aktivitas', 'entity', 'subject', 'ip', 'message'];
 
 function readText(value) {
@@ -45,7 +45,7 @@ function readDate(value) {
 }
 
 function labelOf(action) {
-  return { login: 'Login', tambah: 'Tambah', edit: 'Edit', hapus: 'Hapus', akses: 'Akses' }[action] || 'Aksi';
+  return { login: 'Login', tambah: 'Tambah', edit: 'Edit', hapus: 'Hapus', restart: 'Restart', akses: 'Akses' }[action] || 'Aksi';
 }
 
 router.get('/', async (req, res) => {

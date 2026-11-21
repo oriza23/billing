@@ -17,6 +17,7 @@ const ACTION_OPTIONS = [
   { value: 'tambah', label: 'Tambah data' },
   { value: 'edit', label: 'Edit data' },
   { value: 'hapus', label: 'Hapus data' },
+  { value: 'restart', label: 'Restart layanan' },
 ]
 
 // Ikon kecil di dalam kotak biru, mengikuti gaya tiap baris "Info Aktivitas".
@@ -25,6 +26,7 @@ const ACTION_STYLE = {
   tambah: { icon: FilePlus2, box: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400' },
   edit: { icon: Pencil, box: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400' },
   hapus: { icon: Trash2, box: 'bg-rose-500/10 text-rose-600 dark:bg-rose-500/15 dark:text-rose-400' },
+  restart: { icon: RotateCcw, box: 'bg-violet-500/10 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400' },
   akses: { icon: Eye, box: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/15 dark:text-slate-300' },
 }
 

@@ -58,12 +58,14 @@ test('classifyAction: hapus lewat POST /delete tetap terbaca "hapus"', () => {
   assert.equal(classifyAction('PUT', '/api/admins/budi'), 'edit');
   assert.equal(classifyAction('DELETE', '/api/routers/3'), 'hapus');
   assert.equal(classifyAction('POST', '/api/auth/login'), 'login');
+  assert.equal(classifyAction('POST', '/api/sistem/restart-service'), 'restart');
 });
 
 test('entityOf: petakan prefix path ke label entitas', () => {
   assert.equal(entityOf('/api/langganan/data'), 'data langganan');
   assert.equal(entityOf('/api/hotspot/voucher/delete-massal'), 'voucher hotspot');
   assert.equal(entityOf('/api/entah/apa'), 'data');
+  assert.equal(entityOf('/api/sistem/restart-service'), 'layanan');
 });
 
 test('composeInfo: kalimat login memuat platform & kata "Berhasil/Gagal"', () => {

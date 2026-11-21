@@ -178,4 +178,57 @@ router.post('/action', async (req, res) => {
   }
 });
 
+// POST /api/sistem/vpn/restart  { protocol? } — bila protocol kosong, pakai protokol yang sedang aktif.
+router.post('/restart', async (req, res) => {
+  const rawProtocol = req.body?.protocol;
+  const protocolGiven = rawProtocol !== undefined && rawProtocol !== null && String(rawProtocol).trim() !== '';
+  let protocol = protocolOf(rawProtocol);
+  try {
+    if (protocolGiven && !protocol) {
+      return res.status(400).json({ success: false, message: 'Protokol tidak dikenal.' });
+    }
+    const { profiles, selected } = await vpn.loadProfiles(pool);
+    const current = await vpn.service.getStatus();
+    if (!protocol) {
+      protocol = current.protocol || selected || '';
+    }
+    if (!protocol) {
+      return res.status(400).json({ success: false, message: 'Tidak ada protokol VPN aktif untuk di-restart.' });
+    }
+    const unitLife = current.units?.[protocol];
+    const mayRestart = protocol === current.protocol
+      || (protocol === selected && ['active', 'activating', 'reloading', 'failed'].includes(unitLife));
+    if (!mayRestart) {
+      return res.status(400).json({
+        success: false,
+        message: `${LABELS[protocol]} tidak sedang aktif${current.protocol ? ` (${LABELS[current.protocol]} sedang berjalan)` : ''}.`,
+      });
+    }
+    const { status, log, connected } = await vpn.service.restart(protocol, profiles[protocol] || null, { selectedProtocol: selected });
+    const diagnosis = connected ? null : vpn.diagnoseLog(log, protocol);
+    let message;
+    if (connected) {
+      message = `VPN ${LABELS[protocol]} di-restart${status.ip ? ` (IP ${status.ip})` : ''}.`;
+    } else if (diagnosis) {
+      message = `Restart ${LABELS[protocol]} selesai, tetapi belum tersambung. Dugaan penyebab: ${diagnosis.text}`;
+    } else if (status?.units?.[protocol] === 'failed') {
+      message = `Layanan ${LABELS[protocol]} gagal setelah restart. Periksa log unit.`;
+    } else {
+      message = `Restart ${LABELS[protocol]} dijalankan, tetapi belum mendapat IP dari CHR.`;
+    }
+    return res.json({
+      success: true,
+      protocol,
+      connected,
+      state: status?.state || 'disconnected',
+      status,
+      message,
+      diagnosis: diagnosis ? diagnosis.code : null,
+      log: connected ? [] : (Array.isArray(log) ? log : []),
+    });
+  } catch (error) {
+    return sendError(res, error, 'Gagal me-restart VPN.');
+  }
+});
+
 module.exports = router;

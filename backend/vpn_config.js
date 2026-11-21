@@ -788,8 +788,11 @@ function renderSstpUnit(cfg, pppd = PPPD_CANDIDATES[0]) {
     '',
     '[Service]',
     'Type=simple',
+    'KillMode=control-group',
+    'TimeoutStopSec=5',
     `ExecStartPre=/bin/sh -c 'test -c /dev/ppp || { echo "${SSTP_NO_PPP_MESSAGE}" >&2; exit 1; }'`,
     `ExecStart=${pppd} call raniah-sstp nodetach`,
+    `ExecStopPost=-/sbin/ip link delete ${INTERFACES.sstp}`,
     'Restart=always',
     `RestartSec=${PPP_RESTART_SEC}`,
     '',
@@ -1096,6 +1099,7 @@ start() {
 stop() {
   ctl "d $LAC" >/dev/null 2>&1
   ipsec_down
+  ip link delete "$IFACE" 2>/dev/null || true
   exit 0
 }
 
@@ -1117,11 +1121,14 @@ function renderL2tpUnit() {
     '',
     '[Service]',
     'Type=simple',
+    'KillMode=control-group',
+    'TimeoutStopSec=5',
     `ExecStartPre=/bin/sh -c 'test -c /dev/ppp || { echo "${SSTP_NO_PPP_MESSAGE}" >&2; exit 1; }'`,
     // xl2tpd hanya membaca xl2tpd.conf saat start, dan restart membuang sisa sesi sebelumnya.
     'ExecStartPre=/bin/systemctl restart xl2tpd.service',
     `ExecStart=${PATHS.l2tpRunner} start`,
     `ExecStopPost=${PATHS.l2tpRunner} stop`,
+    `ExecStopPost=-/sbin/ip link delete ${INTERFACES.l2tp}`,
     'Restart=always',
     `RestartSec=${PPP_RESTART_SEC}`,
     '',
@@ -1181,6 +1188,109 @@ function backupOnce(file) {
   }
 }
 
+// Aksi yang boleh diminta aplikasi ke helper root. Tidak ada argumen bebas: pola pkill dan
+// nama interface dikunci di tabel ini, bukan dari input pengguna.
+const CYCLE_ACTIONS = ['stop', 'start', 'restart', 'disable'];
+const IFACE_GONE_POLLS = 20;
+const IFACE_GONE_INTERVAL_MS = 250;
+// Pola pkill sengaja sempit. "raniah-vpn" tanpa path akan mengenai helper itu sendiri
+// (/usr/local/lib/raniah-vpn dan raniah-vpn-helper) sehingga OpenVPN memakai path berkas conf.
+const TEARDOWN = {
+  wireguard: { pkill: [] },
+  openvpn: { pkill: ['/etc/openvpn/client/raniah-vpn.conf'] },
+  sstp: { pkill: ['raniah-sstp'] },
+  l2tp: { pkill: ['options.l2tpd.client'] },
+};
+
+function cycleError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function defaultCycleExec(file, args, { timeout = 20000 } = {}) {
+  try {
+    const stdout = execFileSync(file, args, {
+      timeout,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, code: 0, stdout: String(stdout || ''), stderr: '' };
+  } catch (error) {
+    return {
+      ok: false,
+      code: typeof error.status === 'number' ? error.status : 1,
+      stdout: String(error.stdout || ''),
+      stderr: String(error.stderr || error.message || ''),
+    };
+  }
+}
+
+// Stop bersih: hentikan unit (dan companion), bunuh proses yatim, hapus interface, lalu tunggu
+// sampai kernel tidak lagi punya nama interface itu. Start hanya jalan setelah itu.
+async function cycleVpn(protocol, action, deps = {}) {
+  if (!PROTOCOLS.includes(protocol)) {
+    throw cycleError(400, 'Protokol tidak dikenal.');
+  }
+  if (!CYCLE_ACTIONS.includes(action)) {
+    throw cycleError(400, 'Aksi VPN tidak dikenal.');
+  }
+  const exec = deps.exec || defaultCycleExec;
+  const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const unit = UNITS[protocol];
+  const iface = INTERFACES[protocol];
+  const companions = COMPANION_UNITS[protocol] || [];
+  const patterns = TEARDOWN[protocol].pkill;
+
+  if (action !== 'start') {
+    const verb = action === 'disable' ? ['disable', '--now'] : ['stop'];
+    await exec('systemctl', [...verb, unit], { timeout: 20000 });
+    await exec('systemctl', ['reset-failed', unit], { timeout: 8000 });
+    for (const companion of companions) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('systemctl', [...verb, companion], { timeout: 20000 });
+      // eslint-disable-next-line no-await-in-loop
+      await exec('systemctl', ['reset-failed', companion], { timeout: 8000 });
+    }
+    for (const pattern of patterns) {
+      // pkill keluar 1 bila tidak ada proses: itu sukses untuk teardown.
+      // eslint-disable-next-line no-await-in-loop
+      await exec('pkill', ['-f', pattern], { timeout: 8000 });
+    }
+    await exec('ip', ['link', 'delete', iface], { timeout: 8000 });
+  }
+
+  if (action === 'stop' || action === 'disable' || action === 'restart' || action === 'start') {
+    let gone = false;
+    for (let i = 0; i < IFACE_GONE_POLLS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const show = await exec('ip', ['link', 'show', iface], { timeout: 4000 });
+      if (!show.ok) {
+        gone = true;
+        break;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ip', ['link', 'delete', iface], { timeout: 8000 });
+      if (i < IFACE_GONE_POLLS - 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(IFACE_GONE_INTERVAL_MS);
+      }
+    }
+    if (!gone) {
+      throw cycleError(500, `Interface ${iface} masih ada setelah teardown. Start dibatalkan supaya tidak bentrok "File exists".`);
+    }
+  }
+
+  if (action === 'start' || action === 'restart') {
+    const started = await exec('systemctl', ['start', unit], { timeout: 20000 });
+    if (!started.ok) {
+      const detail = (started.stderr || started.stdout || '').trim().slice(0, 240);
+      throw cycleError(500, `systemctl start ${unit} gagal${detail ? `: ${detail}` : ''}.`);
+    }
+  }
+  return { ok: true, protocol, action };
+}
+
 function applyToDisk(protocol, cfg, { root = '', exec = execFileSync, existsSync = fs.existsSync } = {}) {
   const at = (target) => path.join(root, target);
   const written = [];
@@ -1236,6 +1346,8 @@ module.exports = {
   COMPANION_UNITS,
   INTERFACES,
   PATHS,
+  CYCLE_ACTIONS,
+  cycleVpn,
   MIN_ROUTE_PREFIX,
   WG_KEY_RE,
   VpnValidationError,

@@ -480,7 +480,7 @@ else
     for VPN_UNIT in "${VPN_UNITS[@]}"; do
       SUDO_CMDS+=(
         "${SYSTEMCTL_BIN} enable --now ${VPN_UNIT}"
-        "${SYSTEMCTL_BIN} restart ${VPN_UNIT}"
+        "${SYSTEMCTL_BIN} restart ${VPN_UNIT}"  # menu Koneksi VPN: Restart VPN / Hubungkan ulang
         "${SYSTEMCTL_BIN} disable --now ${VPN_UNIT}"
         "${SYSTEMCTL_BIN} reset-failed ${VPN_UNIT}"
       )
@@ -489,6 +489,13 @@ else
     SUDO_CMDS+=("${SYSTEMCTL_BIN} disable --now xl2tpd" "${SYSTEMCTL_BIN} reset-failed xl2tpd")
   done
   SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
+  # Restart/connect/disconnect tidak memakai systemctl restart mentah. Helper root yang
+  # menghentikan unit, membunuh proses yatim, menunggu interface hilang, lalu start.
+  for VPN_PROTO in wireguard openvpn sstp l2tp; do
+    for VPN_ACTION in stop start restart disable; do
+      SUDO_CMDS+=("/usr/local/sbin/raniah-vpn-helper cycle ${VPN_PROTO} ${VPN_ACTION}")
+    done
+  done
   # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP/L2TP 20 baris
   # supaya pesan TLS/sertifikat/auth tidak terpotong baris Exit pppd. Log L2TP menggabungkan
   # xl2tpd karena pppd dan xl2tpd berjalan di bawah xl2tpd.service.

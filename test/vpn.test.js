@@ -330,6 +330,9 @@ test('sstp: peer pppd, unit systemd, hook rute', () => {
   const unit = cfg.renderSstpUnit(out, '/usr/sbin/pppd');
   assert.match(unit, /^ExecStart=\/usr\/sbin\/pppd call raniah-sstp nodetach$/m);
   assert.match(unit, /^ExecStartPre=.*test -c \/dev\/ppp.*\/dev\/ppp tidak ada/m);
+  assert.match(unit, /^KillMode=control-group$/m);
+  assert.match(unit, /^TimeoutStopSec=5$/m);
+  assert.match(unit, /^ExecStopPost=-\/sbin\/ip link delete raniah-sstp$/m);
   assert.match(unit, /^Restart=always$/m);
   assert.match(unit, /^RestartSec=3$/m);
   assert.match(unit, /^StartLimitIntervalSec=0$/m);
@@ -477,6 +480,12 @@ function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null
     const bin = file === 'sudo' ? args[1] : file;
     const ok = (stdout = '') => ({ ok: true, code: 0, stdout, stderr: '' });
     if (file === 'sudo' && bin === '/usr/local/sbin/raniah-vpn-helper') {
+      const protocol = args[3];
+      const action = args[4];
+      if (args[2] === 'cycle' && protocol) {
+        if (action === 'start' || action === 'restart') state.active[protocol] = 'active';
+        if (action === 'stop' || action === 'disable') state.active[protocol] = 'inactive';
+      }
       return ok('{"ok":true}\n');
     }
     if (bin === 'systemctl') {
@@ -488,9 +497,16 @@ function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null
       const unit = rest[rest.length - 1];
       const proto = unitOf(unit);
       if (verb === 'enable') { state.active[proto] = 'active'; state.enabled[proto] = true; }
-      if (verb === 'disable') { state.active[proto] = 'inactive'; state.enabled[proto] = false; }
+      if (verb === 'disable' && proto) { state.active[proto] = 'inactive'; state.enabled[proto] = false; }
+      if ((verb === 'restart' || verb === 'start') && proto) state.active[proto] = 'active';
+      if (verb === 'stop' && proto) state.active[proto] = 'inactive';
       if (verb === 'reset-failed' && proto) state.active[proto] = 'inactive';
       return ok();
+    }
+    if (bin === 'pkill') return { ok: false, code: 1, stdout: '', stderr: 'no process' };
+    if (bin === 'ip' && full[0] === 'link') {
+      if (full[1] === 'delete') return ok();
+      return { ok: false, code: 1, stdout: '', stderr: 'Device does not exist' };
     }
     if (bin === 'ip' && full.includes('addr')) {
       const iface = full[full.length - 1];
@@ -674,15 +690,40 @@ test('connect: disable --now protokol lain (selalu), lalu enable --now unit terp
   assert.equal(result.status.protocol, 'wireguard');
   assert.deepEqual(applied, [], 'non-root menulis lewat helper sudo, bukan langsung');
   const sudoCalls = system.calls.filter((call) => call.startsWith('sudo -n '));
-  const disableSstp = sudoCalls.indexOf('sudo -n systemctl disable --now raniah-sstp');
+  const disableSstp = sudoCalls.indexOf('sudo -n /usr/local/sbin/raniah-vpn-helper cycle sstp disable');
+  const stopWg = sudoCalls.indexOf('sudo -n /usr/local/sbin/raniah-vpn-helper cycle wireguard stop');
   const enableWg = sudoCalls.indexOf('sudo -n systemctl enable --now wg-quick@wg-billing');
-  assert.ok(disableSstp >= 0 && enableWg > disableSstp, sudoCalls.join('\n'));
+  assert.ok(disableSstp >= 0 && stopWg > disableSstp && enableWg > stopWg, sudoCalls.join('\n'));
   assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper apply'), sudoCalls.join('\n'));
-  assert.equal(sudoCalls.some((call) => call.includes('restart wg-quick')), false);
-  assert.ok(sudoCalls.includes('sudo -n systemctl disable --now openvpn-client@raniah-vpn'));
-  assert.ok(sudoCalls.includes('sudo -n systemctl disable --now raniah-sstp'));
-  assert.ok(sudoCalls.includes('sudo -n systemctl reset-failed raniah-sstp'), sudoCalls.join('\n'));
-  assert.ok(sudoCalls.includes('sudo -n systemctl reset-failed openvpn-client@raniah-vpn'));
+  assert.equal(sudoCalls.some((call) => call.includes('systemctl restart')), false);
+  assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper cycle openvpn disable'));
+  assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper cycle l2tp disable'));
+});
+
+test('restart: helper cycle tanpa systemctl restart dan tanpa disable protokol lain', async () => {
+  const dump = 'PRIV\tPUB\t51820\toff\nPEER\tPSK\t203.0.113.10:51820\ta\t1700000095\t1\t2\t25\n';
+  const system = fakeSystem({
+    active: { wireguard: 'failed' },
+    ip: { 'wg-billing': '10.10.99.2/24' },
+    wg: dump,
+    journal: 'restart-fail\n',
+  });
+  const { service } = serviceWith(system, { isRoot: false });
+  const ok = await service.restart(
+    'wireguard',
+    cfg.validateWireguard(wgInput()),
+    { selectedProtocol: 'wireguard' },
+  );
+  assert.equal(ok.connected, true);
+  const sudoCalls = system.calls.filter((call) => call.startsWith('sudo -n '));
+  assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper cycle wireguard restart'), sudoCalls.join('\n'));
+  assert.equal(sudoCalls.some((call) => call.includes('systemctl restart')), false);
+  assert.equal(sudoCalls.some((call) => call.includes('disable')), false);
+
+  await assert.rejects(
+    () => service.restart('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' })),
+    (error) => error.status === 400 && /tidak sedang aktif/.test(error.message),
+  );
 });
 
 test('connect: root menulis konfigurasi langsung dan restart bila sudah aktif', async () => {
@@ -695,8 +736,13 @@ test('connect: root menulis konfigurasi langsung dan restart bila sudah aktif', 
   const config = cfg.validateWireguard(wgInput());
   await service.connect('wireguard', config);
   assert.deepEqual(applied, [['wireguard', config]]);
+  assert.ok(system.calls.includes('systemctl stop wg-quick@wg-billing'));
+  assert.ok(system.calls.includes('ip link delete wg-billing'));
   assert.ok(system.calls.includes('systemctl enable --now wg-quick@wg-billing'));
-  assert.ok(system.calls.includes('systemctl restart wg-quick@wg-billing'));
+  assert.equal(system.calls.some((call) => call.includes('systemctl restart')), false);
+  const stopAt = system.calls.indexOf('systemctl stop wg-quick@wg-billing');
+  const enableAt = system.calls.indexOf('systemctl enable --now wg-quick@wg-billing');
+  assert.ok(stopAt >= 0 && enableAt > stopAt);
 });
 
 test('connect: dibatalkan bila VPN membelokkan default route server', async () => {
@@ -876,7 +922,7 @@ async function withServer(fn) {
 
 test('route: non-administrator ditolak 403 di semua endpoint', async () => {
   await withServer(async (call) => {
-    for (const [method, route] of [['GET', '/status'], ['GET', '/config'], ['POST', '/wg/keygen'], ['POST', '/save'], ['POST', '/action']]) {
+    for (const [method, route] of [['GET', '/status'], ['GET', '/config'], ['POST', '/wg/keygen'], ['POST', '/save'], ['POST', '/action'], ['POST', '/restart']]) {
       const response = await call(method, route, 'operator', method === 'POST' ? {} : undefined);
       assert.equal(response.status, 403, `${method} ${route}`);
     }
@@ -894,6 +940,7 @@ test('route: administrator bisa keygen; input aksi/protokol divalidasi', async (
 
     assert.equal((await call('POST', '/action', 'admin', { protocol: 'pptp', action: 'connect' })).status, 400);
     assert.equal((await call('POST', '/action', 'admin', { protocol: 'wireguard', action: 'restart' })).status, 400);
+    assert.equal((await call('POST', '/restart', 'admin', { protocol: 'pptp' })).status, 400);
     assert.equal((await call('POST', '/save', 'admin', { protocol: '../etc', config: {} })).status, 400);
   });
 });
@@ -1081,14 +1128,78 @@ test('l2tp: xl2tpd.conf, options pppd, hook rute, unit systemd, runner', () => {
   assert.match(unit, /^ExecStartPre=\/bin\/systemctl restart xl2tpd\.service$/m);
   assert.match(unit, /^ExecStart=\/etc\/xl2tpd\/raniah-l2tp-run\.sh start$/m);
   assert.match(unit, /^ExecStopPost=\/etc\/xl2tpd\/raniah-l2tp-run\.sh stop$/m);
+  assert.match(unit, /^ExecStopPost=-\/sbin\/ip link delete raniah-l2tp$/m);
+  assert.match(unit, /^KillMode=control-group$/m);
+  assert.match(unit, /^TimeoutStopSec=5$/m);
   assert.doesNotMatch(unit, /hasdin22|103\.195|rahasia|p"a/);
 
   const runner = cfg.renderL2tpRunner();
   assert.match(runner, /^#!\/bin\/sh$/m);
   assert.match(runner, /^CTL=\/var\/run\/xl2tpd\/l2tp-control$/m);
   assert.match(runner, /ctl "c \$LAC"/);
+  assert.match(runner, /ip link delete "\$IFACE"/);
   assert.match(runner, /printf "%s\\n"/, 'newline harus literal untuk shell, bukan newline JS');
   assert.doesNotMatch(runner, /hasdin22|103\.195|rahasia/, 'runner tidak memuat nilai konfigurasi');
+});
+
+test('cycleVpn: stop, bunuh sisa, tunggu interface hilang, baru start', async () => {
+  const patterns = {
+    wireguard: null,
+    openvpn: 'pkill -f /etc/openvpn/client/raniah-vpn.conf',
+    sstp: 'pkill -f raniah-sstp',
+    l2tp: 'pkill -f options.l2tpd.client',
+  };
+  for (const protocol of cfg.PROTOCOLS) {
+    const calls = [];
+    // eslint-disable-next-line no-await-in-loop
+    await cfg.cycleVpn(protocol, 'restart', {
+      sleep: async () => {},
+      exec: async (file, args) => {
+        calls.push([file, ...args].join(' '));
+        if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    });
+    const stopAt = calls.indexOf(`systemctl stop ${cfg.UNITS[protocol]}`);
+    const resetAt = calls.indexOf(`systemctl reset-failed ${cfg.UNITS[protocol]}`);
+    const deleteAt = calls.indexOf(`ip link delete ${cfg.INTERFACES[protocol]}`);
+    const showAt = calls.indexOf(`ip link show ${cfg.INTERFACES[protocol]}`);
+    const startAt = calls.indexOf(`systemctl start ${cfg.UNITS[protocol]}`);
+    assert.ok(stopAt >= 0 && resetAt > stopAt && deleteAt > resetAt && showAt > deleteAt && startAt > showAt, calls.join('\n'));
+    assert.equal(calls.some((call) => call.startsWith('systemctl restart')), false, protocol);
+    if (patterns[protocol]) assert.ok(calls.includes(patterns[protocol]), calls.join('\n'));
+    else assert.equal(calls.some((call) => call.startsWith('pkill')), false);
+  }
+});
+
+test('cycleVpn: L2TP menghentikan xl2tpd; start dibatalkan bila interface masih ada', async () => {
+  const calls = [];
+  await cfg.cycleVpn('l2tp', 'disable', {
+    sleep: async () => {},
+    exec: async (file, args) => {
+      calls.push([file, ...args].join(' '));
+      if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.ok(calls.includes('systemctl disable --now raniah-l2tp'));
+  assert.ok(calls.includes('systemctl disable --now xl2tpd'));
+  assert.ok(calls.includes('pkill -f options.l2tpd.client'));
+  assert.equal(calls.some((call) => call.startsWith('systemctl start')), false);
+
+  const blocked = [];
+  await assert.rejects(
+    () => cfg.cycleVpn('l2tp', 'restart', {
+      sleep: async () => {},
+      exec: async (file, args) => {
+        blocked.push([file, ...args].join(' '));
+        if (file === 'ip' && args[1] === 'show') return { ok: true, code: 0, stdout: 'still-there', stderr: '' };
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    }),
+    /masih ada/,
+  );
+  assert.equal(blocked.some((call) => call.startsWith('systemctl start')), false);
 });
 
 test('l2tp: runner lolos sintaks sh dan unit lolos systemd-analyze (bila tersedia)', () => {
@@ -1186,11 +1297,13 @@ test('connect l2tp: protokol lain di-disable --now + reset-failed, lalu enable -
 
   const sudoCalls = system.calls.filter((call) => call.startsWith('sudo -n '));
   const enable = sudoCalls.indexOf('sudo -n systemctl enable --now raniah-l2tp');
-  for (const unit of ['wg-quick@wg-billing', 'openvpn-client@raniah-vpn', 'raniah-sstp']) {
-    const disable = sudoCalls.indexOf(`sudo -n systemctl disable --now ${unit}`);
-    assert.ok(disable >= 0 && disable < enable, `${unit}\n${sudoCalls.join('\n')}`);
-    assert.ok(sudoCalls.includes(`sudo -n systemctl reset-failed ${unit}`), unit);
+  const stopSelf = sudoCalls.indexOf('sudo -n /usr/local/sbin/raniah-vpn-helper cycle l2tp stop');
+  for (const protocol of ['wireguard', 'openvpn', 'sstp']) {
+    const disable = sudoCalls.indexOf(`sudo -n /usr/local/sbin/raniah-vpn-helper cycle ${protocol} disable`);
+    assert.ok(disable >= 0 && disable < enable, `${protocol}\n${sudoCalls.join('\n')}`);
   }
+  assert.ok(stopSelf > 0 && stopSelf < enable, sudoCalls.join('\n'));
+  assert.equal(sudoCalls.some((call) => call.includes('systemctl restart')), false);
   assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper apply'));
 });
 
@@ -1288,8 +1401,8 @@ test('connect l2tp: belum dapat IP -> 20 baris journalctl -u raniah-l2tp -u xl2t
   assert.ok(system.calls.includes('sudo -n journalctl -u raniah-l2tp -u xl2tpd -n 20 --no-pager'), system.calls.join('\n'));
 });
 
-test('connect l2tp: tunggu 8 detik tanpa IPsec, 15 detik dengan IPsec', async () => {
-  for (const [extra, expected] of [[{}, 8], [{ ipsec_secret: 'psk' }, 15]]) {
+test('connect l2tp: tunggu 12 detik tanpa IPsec, 15 detik dengan IPsec', async () => {
+  for (const [extra, expected] of [[{}, 12], [{ ipsec_secret: 'psk' }, 15]]) {
     const sleeps = [];
     const { service } = serviceWith(fakeSystem(), { sleep: async (ms) => sleeps.push(ms) });
     await service.connect('l2tp', cfg.validateL2tp(l2tpInput(extra)));
@@ -1379,6 +1492,7 @@ test('sudoers: semua perintah sudo yang dikeluarkan service tercakup di deploy/s
     const { service } = serviceWith(system, { isRoot: false });
     await service.getStatus();
     await service.connect(protocol, cases[protocol]);
+    await service.restart(protocol, cases[protocol], { selectedProtocol: protocol });
     await service.disconnect(protocol);
     for (const call of system.calls.filter((item) => item.startsWith('sudo -n '))) {
       if (!allowed.has(toSudoers(call))) missing.add(toSudoers(call));

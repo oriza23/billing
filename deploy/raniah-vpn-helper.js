@@ -3,13 +3,13 @@
 /**
  * Helper root untuk menu Sistem > Koneksi VPN. Dipasang ROOT-OWNED di
  * /usr/local/sbin/raniah-vpn-helper (lihat deploy/install-vpn-helper.sh) dan hanya boleh
- * dipanggil lewat sudoers: `sudo -n /usr/local/sbin/raniah-vpn-helper apply`.
+ * dipanggil lewat sudoers:
+ *   sudo -n /usr/local/sbin/raniah-vpn-helper apply
+ *   sudo -n /usr/local/sbin/raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp> <stop|start|restart|disable>
  *
- * Input (stdin, JSON): { "protocol": "wireguard|openvpn|sstp|l2tp", "config": { ... } }
- *
- * Helper TIDAK menulis isi mentah dari proses aplikasi. Konfigurasi divalidasi ulang dengan
- * vpn_config.js (salinan root-owned) lalu semua berkas dirender dari template di sini, sehingga
- * aplikasi yang dibobol pun tidak bisa menyuruh root menulis skrip/unit/perintah sembarang.
+ * apply  — stdin JSON: { "protocol", "config" }. Isi divalidasi ulang lalu dirender dari template.
+ * cycle  — stop bersih (unit, proses yatim, hapus interface, tunggu hilang) lalu start bila diminta.
+ *          Pola proses dan nama interface dikunci di vpn_config.js, bukan dari argumen bebas.
  */
 
 const fs = require('fs');
@@ -30,7 +30,35 @@ function die(message, code = 1) {
 }
 
 function main() {
-  if (process.argv[2] !== 'apply' || process.argv.length !== 3) {
+  const cmd = process.argv[2];
+  if (cmd === 'cycle') {
+    const protocol = process.argv[3];
+    const action = process.argv[4];
+    if (process.argv.length !== 5) {
+      die('Pemakaian: raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp> <stop|start|restart|disable>', 2);
+    }
+    let vpn;
+    try {
+      vpn = loadConfigModule();
+    } catch (error) {
+      die(error.message || String(error), 1);
+    }
+    if (!vpn.PROTOCOLS.includes(protocol) || !vpn.CYCLE_ACTIONS.includes(action)) {
+      die('Protokol atau aksi tidak dikenal.', 5);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    vpn.cycleVpn(protocol, action)
+      .then((result) => {
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      })
+      .catch((error) => {
+        die(error.message || String(error), error.status === 400 ? 6 : 1);
+      });
+    return;
+  }
+  if (cmd !== 'apply' || process.argv.length !== 3) {
     die('Pemakaian: raniah-vpn-helper apply  (JSON dari stdin)', 2);
   }
   if (typeof process.getuid === 'function' && process.getuid() !== 0) {

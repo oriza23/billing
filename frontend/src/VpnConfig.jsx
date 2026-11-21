@@ -35,6 +35,7 @@ const BTN = 'inline-flex h-10 items-center justify-center gap-2 rounded-lg px-4 
 const BTN_PRIMARY = `${BTN} bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500/40`
 const BTN_SUCCESS = `${BTN} bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-500/40`
 const BTN_DANGER = `${BTN} bg-rose-600 text-white hover:bg-rose-700 focus:ring-rose-500/40`
+const BTN_AMBER = `${BTN} bg-amber-500 text-white shadow-sm hover:bg-amber-600 focus:ring-amber-500/40 dark:bg-amber-600 dark:hover:bg-amber-500`
 const BTN_NEUTRAL = `${BTN} border border-gray-300 bg-white text-slate-700 hover:bg-gray-50 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-slate-800 dark:text-gray-200 dark:hover:bg-slate-700`
 
 function formatBytes(value) {
@@ -468,6 +469,40 @@ function VpnConfig() {
     }
   }
 
+  async function runRestart(protocol) {
+    busyRef.current = true
+    setBusy(true)
+    Swal.fire({
+      title: `Me-restart ${LABEL[protocol]}...`,
+      text: 'Layanan VPN di-restart, tunggu sampai IP/handshake kembali.',
+      allowOutsideClick: false,
+      allowEscapeKey: false,
+      didOpen: () => Swal.showLoading(),
+    })
+    try {
+      const response = await api.post(`${API}/restart`, { protocol }, { timeout: 60000 })
+      if (response.data.status) rememberStatus(response.data.status)
+      const connected = Boolean(response.data.connected)
+      const lines = Array.isArray(response.data.log) ? response.data.log : []
+      setConnectLog(!connected && lines.length ? { protocol, lines } : { protocol: '', lines: [] })
+      const popup = !connected && lines.length
+        ? { title: 'Restart gagal', html: logHtml(response.data.message, lines), icon: 'error', width: 640 }
+        : { title: 'Restart berhasil', text: response.data.message, icon: 'success' }
+      await fireSuccess(popup, () => loadStatus({ quiet: true }))
+    } catch (error) {
+      const lines = error.response?.data?.log
+      if (Array.isArray(lines) && lines.length) {
+        await Swal.fire({ title: 'Restart gagal', html: logHtml(error.response?.data?.message || 'Restart VPN gagal.', lines), icon: 'error', width: 640 })
+      } else {
+        fireError({ title: 'Restart gagal', text: error.response?.data?.message || 'Restart VPN gagal dijalankan.' })
+      }
+      loadStatus({ quiet: true })
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+
   async function runAction(protocol, action) {
     busyRef.current = true
     setBusy(true)
@@ -544,14 +579,76 @@ function VpnConfig() {
     await runAction(protocol, 'disconnect')
   }
 
-  const form = forms[tab]
+  async function handleRestartVpn() {
+    const units = status?.units || {}
+    const foreignActive = PROTOCOLS.some(
+      (item) => item.id !== tab && ['active', 'activating', 'reloading'].includes(units[item.id]),
+    )
+    const protocol =
+      status?.protocol ||
+      (units[tab] === 'failed' && !foreignActive ? tab : null)
+    if (!protocol) {
+      await Swal.fire({
+        title: 'Tidak ada VPN untuk di-restart',
+        text: 'Hubungkan VPN terlebih dahulu, atau pilih protokol yang status unit-nya failed.',
+        icon: 'info',
+        confirmButtonText: 'OK',
+      })
+      return
+    }
+    if (dirty && tab === protocol) {
+      await Swal.fire({
+        title: 'Konfigurasi belum disimpan',
+        text: 'Simpan konfigurasi terlebih dahulu sebelum me-restart VPN.',
+        icon: 'warning',
+        confirmButtonText: 'OK',
+      })
+      return
+    }
+    if (!profiles?.[protocol]) {
+      await Swal.fire({
+        title: 'Belum ada konfigurasi',
+        text: `Simpan konfigurasi ${LABEL[protocol]} terlebih dahulu.`,
+        icon: 'warning',
+        confirmButtonText: 'OK',
+      })
+      return
+    }
+    const confirm = await Swal.fire({
+      title: `Restart ${LABEL[protocol]}?`,
+      text: 'Koneksi VPN akan terputus sebentar lalu disambung ulang dengan konfigurasi yang sama. Trafik RADIUS mungkin terhambat beberapa detik.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Ya, restart',
+      cancelButtonText: 'Batal',
+    })
+    if (!confirm.isConfirmed) return
+    await runRestart(protocol)
+  }
+
+  const form = forms?.[tab] || EMPTY_FORMS[tab] || {}
   const active = status?.protocol
   const state = status?.state || 'disconnected'
   const tools = status?.tools?.[tab]
-  const profile = profiles[tab]
+  const profile = profiles?.[tab]
   const toolsMissing = tools && !tools.installed
   const helperMissing = status && !status.is_root && !status.helper_installed
   const wg = status?.wireguard
+  // Semua nilai dibaca setelah deklarasi di atas (const tidak di-hoist) dan aman saat status/profil
+  // belum dimuat dari API (status null, units/profiles undefined).
+  const unitStates = status?.units || {}
+  const otherVpnRunning = PROTOCOLS.some(
+    (item) => item.id !== tab && ['active', 'activating', 'reloading'].includes(unitStates[item.id]),
+  )
+  const restartProtocol =
+    active || (unitStates[tab] === 'failed' && !otherVpnRunning ? tab : null)
+  const canRestartVpn = Boolean(
+    restartProtocol &&
+      profiles?.[restartProtocol] &&
+      !loading &&
+      !(dirty && tab === restartProtocol) &&
+      (active === restartProtocol || (unitStates[restartProtocol] === 'failed' && !otherVpnRunning)),
+  )
 
   return (
     <section className="mx-auto max-w-4xl pb-8">
@@ -632,6 +729,20 @@ function VpnConfig() {
           <button type="button" className={BTN_DANGER} onClick={handleDisconnect} disabled={loading || busy || saving || !active}>
             <Unplug size={16} aria-hidden="true" />
             Putuskan
+          </button>
+          <button
+            type="button"
+            className={BTN_AMBER}
+            onClick={handleRestartVpn}
+            disabled={loading || saving || busy || !canRestartVpn}
+            title={
+              canRestartVpn
+                ? `Restart layanan ${LABEL[restartProtocol] || 'VPN'} yang sedang aktif`
+                : 'Tersedia bila ada VPN terhubung atau protokol terpilih dalam status failed (dengan konfigurasi tersimpan)'
+            }
+          >
+            <RefreshCw size={16} className={busy || loading ? 'animate-spin' : ''} aria-hidden="true" />
+            Restart VPN
           </button>
         </div>
       </div>

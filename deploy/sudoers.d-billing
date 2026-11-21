@@ -27,4 +27,20 @@ billing ALL=(root) NOPASSWD: \
   /usr/bin/journalctl -u openvpn-client@raniah-vpn -n 10 --no-pager, \
   /usr/bin/journalctl -u raniah-sstp -n 20 --no-pager, \
   /usr/bin/journalctl -u raniah-l2tp -u xl2tpd -n 20 --no-pager, \
-  /usr/local/sbin/raniah-vpn-helper apply
+  /usr/local/sbin/raniah-vpn-helper apply, \
+  /usr/local/sbin/raniah-vpn-helper cycle wireguard stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle wireguard start, \
+  /usr/local/sbin/raniah-vpn-helper cycle wireguard restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle wireguard disable, \
+  /usr/local/sbin/raniah-vpn-helper cycle openvpn stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle openvpn start, \
+  /usr/local/sbin/raniah-vpn-helper cycle openvpn restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle openvpn disable, \
+  /usr/local/sbin/raniah-vpn-helper cycle sstp stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle sstp start, \
+  /usr/local/sbin/raniah-vpn-helper cycle sstp restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle sstp disable, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp start, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp disable

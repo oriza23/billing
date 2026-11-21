@@ -3,7 +3,7 @@
  * Koneksi VPN client server billing -> MikroTik CHR (WireGuard / OpenVPN / SSTP / L2TP).
  *
  * - Status  : systemctl is-active, ip -4 addr, wg show (dump), sysfs counter.
- * - Aksi    : connect/disconnect lewat systemctl, protokol lain dimatikan lebih dulu.
+ * - Aksi    : connect/disconnect/restart lewat helper root (stop bersih, tunggu interface hilang, baru start).
  * - Berkas  : root menulis langsung; non-root lewat helper `sudo -n` yang memvalidasi ulang.
  * - Simpan  : tabel vpn_profiles (PostgreSQL), rahasia tidak pernah dikirim balik ke browser.
  *
@@ -17,7 +17,7 @@ const { IS_ROOT } = require('./privileged');
 const vpnConfig = require('./vpn_config');
 
 const {
-  PROTOCOLS, UNITS, COMPANION_UNITS, INTERFACES,
+  PROTOCOLS, UNITS, INTERFACES,
 } = vpnConfig;
 
 const HELPER_PATH = '/usr/local/sbin/raniah-vpn-helper';
@@ -43,11 +43,16 @@ const LABELS = {
   wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP', l2tp: 'L2TP',
 };
 // Detik menunggu interface mendapat IP sebelum log unit diambil dan dikirim ke UI.
+// SSTP/L2TP/OpenVPN butuh lebih lama: negosiasi PPP/TLS tidak selesai dalam beberapa detik.
 const CONNECT_WAIT_SECONDS = {
-  wireguard: 8, sstp: 8, l2tp: 8, openvpn: 15,
+  wireguard: 8, sstp: 12, l2tp: 12, openvpn: 15,
 };
 // L2TP/IPsec menegosiasikan IKE + ESP dulu sebelum L2TP didial, jadi diberi waktu lebih panjang.
 const CONNECT_WAIT_SECONDS_IPSEC = 15;
+// Setelah start bersih: WireGuard cepat; PPP/TLS diberi 12 detik sampai IP dari CHR muncul.
+const RESTART_WAIT_SECONDS = {
+  wireguard: 8, sstp: 12, l2tp: 12, openvpn: 12,
+};
 // SSTP/L2TP butuh lebih banyak baris: pesan TLS/sertifikat/auth ada di atas baris "Exit" pppd,
 // jadi 10 baris sering memotong penyebab aslinya.
 const LOG_LINES = {
@@ -365,28 +370,25 @@ function createVpnService(overrides = {}) {
     return result.stdout.trim();
   }
 
-  // Matikan unit protokol + hapus dari boot, lalu bersihkan status failed lama di systemd.
-  // Unit pendamping (xl2tpd untuk L2TP) dimatikan sesudahnya dan tidak pernah menggagalkan
-  // pelepasan unit utama (paketnya bisa saja belum terpasang).
+  // Root menjalankan urutan teardown di proses ini. Selain root, satu panggilan sudo ke helper
+  // yang menjalankan urutan yang sama (pkill/ip tidak pernah masuk sudoers sebagai perintah bebas).
+  async function cleanCycle(protocol, action) {
+    if (isRoot) {
+      await vpnConfig.cycleVpn(protocol, action, { exec: run, sleep });
+      return;
+    }
+    const result = await run('sudo', ['-n', helperPath, 'cycle', protocol, action], { timeout: 60000 });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout || '').trim();
+      throw httpError(
+        sudoDenied(detail) ? 503 : 500,
+        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 300) || `Teardown ${LABELS[protocol] || protocol} gagal.`),
+      );
+    }
+  }
+
   async function disableUnit(protocol) {
-    const unit = UNITS[protocol];
-    try {
-      await systemctlPriv(['disable', '--now', unit]);
-    } finally {
-      await runPriv('systemctl', ['reset-failed', unit], { timeout: 8000 }).catch(() => {});
-    }
-    for (const companion of COMPANION_UNITS[protocol] || []) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        await systemctlPriv(['disable', '--now', companion]);
-      } catch (error) {
-        if (error.status === 503) {
-          throw error;
-        }
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await runPriv('systemctl', ['reset-failed', companion], { timeout: 8000 }).catch(() => {});
-    }
+    await cleanCycle(protocol, 'disable');
   }
 
   function findBinary(name) {
@@ -691,12 +693,9 @@ function createVpnService(overrides = {}) {
       await ensureDevices(protocol);
       await applyConfig(protocol, cfg);
       await stopOthers(protocol);
-      const unit = UNITS[protocol];
-      const wasActive = (await unitState(protocol)) === 'active';
-      await systemctlPriv(['enable', '--now', unit]);
-      if (wasActive) {
-        await systemctlPriv(['restart', unit]);
-      }
+      // Lepas interface lama dulu. enable --now baru dijalankan setelah nama interface hilang.
+      await cleanCycle(protocol, 'stop');
+      await systemctlPriv(['enable', '--now', UNITS[protocol]]);
 
       const attempts = protocol === 'l2tp' && cfg.ipsec_secret
         ? CONNECT_WAIT_SECONDS_IPSEC
@@ -737,8 +736,59 @@ function createVpnService(overrides = {}) {
     });
   }
 
+  // Restart unit VPN yang sedang dipakai (tanpa mematikan protokol lain atau menulis ulang konfigurasi).
+  // Bukan systemctl restart mentah: stop, bunuh proses yatim, tunggu interface hilang, baru start.
+  async function restart(protocol, cfg, { selectedProtocol = null } = {}) {
+    if (!PROTOCOLS.includes(protocol)) {
+      throw httpError(400, 'Protokol tidak dikenal.');
+    }
+    if (cfg) {
+      ensureTools(protocol, cfg);
+    }
+    return exclusive(async () => {
+      const snapshot = await getStatus();
+      const unitLife = snapshot.units?.[protocol] || 'unknown';
+      const ownsSlot = snapshot.protocol === protocol
+        || (selectedProtocol === protocol && ['active', 'activating', 'reloading', 'failed'].includes(unitLife));
+      if (!ownsSlot) {
+        throw httpError(
+          400,
+          `${LABELS[protocol]} tidak sedang aktif${snapshot.protocol ? ` (${LABELS[snapshot.protocol]} sedang berjalan)` : ''}. Gunakan Hubungkan untuk mengaktifkannya.`,
+        );
+      }
+      await ensureDevices(protocol);
+      await cleanCycle(protocol, 'restart');
+
+      const attempts = protocol === 'l2tp' && cfg && cfg.ipsec_secret
+        ? CONNECT_WAIT_SECONDS_IPSEC
+        : RESTART_WAIT_SECONDS[protocol] || 12;
+      let status = null;
+      for (let i = 0; i < attempts; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(1000);
+        // eslint-disable-next-line no-await-in-loop
+        if (await routeHijack(protocol)) {
+          // eslint-disable-next-line no-await-in-loop
+          await disableUnit(protocol).catch(() => {});
+          throw httpError(409, `${LABELS[protocol]} dibatalkan: CHR mengalihkan default route server.`);
+        }
+        // eslint-disable-next-line no-await-in-loop
+        status = await getStatus();
+        if (status.protocol === protocol && status.connected) {
+          break;
+        }
+        if (status.units[protocol] === 'failed') {
+          break;
+        }
+      }
+      const connected = Boolean(status && status.protocol === protocol && status.connected);
+      const log = connected ? [] : await readUnitLog(protocol);
+      return { status, protocol, log, connected };
+    });
+  }
+
   return {
-    getStatus, connect, disconnect, applyConfig, toolsInfo, measurePing, isRoot,
+    getStatus, connect, disconnect, restart, applyConfig, toolsInfo, measurePing, isRoot,
   };
 }
 

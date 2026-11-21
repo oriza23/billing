@@ -35,7 +35,19 @@ const EMPTY_PROFILES = { wireguard: null, openvpn: null, sstp: null };
 // Selalu 200. Paket belum terpasang atau interface belum ada bukan error halaman.
 router.get('/status', async (req, res) => {
   try {
-    res.json(await vpn.service.getStatus());
+    const status = await vpn.service.getStatus();
+    try {
+      const { profiles } = await vpn.loadProfiles(pool);
+      status.ping = await vpn.service.measurePing(
+        status.protocol,
+        status.protocol ? profiles[status.protocol] || null : null,
+        status.ip,
+      );
+    } catch (error) {
+      console.error('[vpn] ping:', error.message);
+      status.ping = vpn.emptyPing();
+    }
+    res.json(status);
   } catch (error) {
     console.error('[vpn] status:', error);
     res.json({
@@ -49,6 +61,7 @@ router.get('/status', async (req, res) => {
       uptime_seconds: null,
       traffic: null,
       wireguard: null,
+      ping: vpn.emptyPing(),
     });
   }
 });

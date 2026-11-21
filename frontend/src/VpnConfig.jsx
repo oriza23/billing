@@ -7,7 +7,7 @@ import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
 
 const API = '/sistem/vpn'
-const AUTO_REFRESH_MS = 10000
+const LIVE_POLL_MS = 2000
 const MAX_OVPN_BYTES = 64 * 1024
 
 const PROTOCOLS = [
@@ -67,6 +67,29 @@ function formatDuration(seconds) {
 function formatAge(seconds) {
   if (seconds === null || seconds === undefined) return 'Belum ada handshake'
   return `${formatDuration(seconds)} lalu`
+}
+
+function formatRate(deltaBytes, elapsedMs) {
+  if (!Number.isFinite(deltaBytes) || !Number.isFinite(elapsedMs) || elapsedMs <= 0 || deltaBytes < 0) return null
+  const kbps = (deltaBytes * 8) / elapsedMs
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(2)} Mbps`
+  return `${(kbps >= 10 ? kbps.toFixed(0) : kbps.toFixed(1))} Kbps`
+}
+
+function formatMs(ping) {
+  if (!ping || ping.status !== 'ok' || ping.ms == null || !Number.isFinite(Number(ping.ms))) return 'Timeout'
+  const ms = Math.round(Number(ping.ms) * 10) / 10
+  return `${Number.isInteger(ms) ? ms.toFixed(0) : ms.toFixed(1)} ms`
+}
+
+function latencyClass(ping) {
+  if (!ping || ping.status !== 'ok' || ping.ms == null || !Number.isFinite(Number(ping.ms))) {
+    return 'text-rose-600 dark:text-rose-400'
+  }
+  const ms = Number(ping.ms)
+  if (ms < 50) return 'text-emerald-600 dark:text-emerald-400'
+  if (ms <= 150) return 'text-amber-600 dark:text-amber-400'
+  return 'text-rose-600 dark:text-rose-400'
 }
 
 async function copyText(text) {
@@ -169,6 +192,43 @@ function InfoItem({ label, value, mono = false }) {
   )
 }
 
+function PingPublic({ ping }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs font-bold text-slate-500 dark:text-gray-400">Ping Public CHR</dt>
+      <dd className="m-0 mt-1 flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm font-semibold">
+        <span className={`truncate text-slate-900 dark:text-gray-100${MONO}`}>{ping?.target || '-'}</span>
+        <span className={latencyClass(ping)}>{ping?.target ? formatMs(ping) : '-'}</span>
+      </dd>
+    </div>
+  )
+}
+
+function PingTunnel({ ping }) {
+  const ok = ping?.status === 'ok'
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs font-bold text-slate-500 dark:text-gray-400">Ping Tunnel VPN</dt>
+      <dd className="m-0 mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">
+        <span className={`truncate text-slate-900 dark:text-gray-100${MONO}`}>{ping?.target || '-'}</span>
+        {ping?.target && (
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${ok ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'}`}>
+            {ok ? 'Terhubung' : 'Timeout'}
+          </span>
+        )}
+        <span className={latencyClass(ping)}>{ping?.target ? formatMs(ping) : '-'}</span>
+      </dd>
+    </div>
+  )
+}
+
+function trafficLabel(traffic, direction, rate) {
+  if (!traffic) return ''
+  const bytes = direction === 'rx' ? traffic.rx_bytes : traffic.tx_bytes
+  const text = traffic[direction] || formatBytes(bytes)
+  return rate ? `${text} · ${rate}` : text
+}
+
 function VpnConfig() {
   const [status, setStatus] = useState(null)
   const [statusError, setStatusError] = useState('')
@@ -185,19 +245,49 @@ function VpnConfig() {
   const [copied, setCopied] = useState(false)
   const busyRef = useRef(false)
   const fileRef = useRef(null)
+  const sampleRef = useRef(null)
+  const inflightRef = useRef(false)
+  const [rates, setRates] = useState({ rx: null, tx: null })
+
+  const rememberStatus = useCallback((data) => {
+    setStatus(data)
+    const traffic = data?.traffic
+    const live = data?.state === 'connected' && traffic && Number.isFinite(Number(traffic.rx_bytes)) && Number.isFinite(Number(traffic.tx_bytes))
+    if (!live) {
+      sampleRef.current = null
+      setRates({ rx: null, tx: null })
+      return
+    }
+    const rx = Number(traffic.rx_bytes)
+    const tx = Number(traffic.tx_bytes)
+    const now = Date.now()
+    const prev = sampleRef.current
+    if (prev && prev.iface === data.interface && now > prev.at) {
+      setRates({
+        rx: formatRate(rx - prev.rx, now - prev.at),
+        tx: formatRate(tx - prev.tx, now - prev.at),
+      })
+    } else if (prev && prev.iface !== data.interface) {
+      setRates({ rx: null, tx: null })
+    }
+    sampleRef.current = { rx, tx, at: now, iface: data.interface }
+  }, [])
 
   const loadStatus = useCallback(async ({ quiet = false } = {}) => {
+    if (inflightRef.current) return
+    inflightRef.current = true
     if (!quiet) setRefreshing(true)
     try {
       const response = await api.get(`${API}/status`)
-      setStatus(response.data)
+      rememberStatus(response.data)
       setStatusError('')
     } catch (error) {
       setStatusError(error.response?.data?.message || 'Status VPN gagal dimuat.')
     } finally {
+      inflightRef.current = false
       if (!quiet) setRefreshing(false)
     }
-  }, [])
+  }, [rememberStatus])
 
   const applyProfiles = useCallback((nextProfiles, selected) => {
     setProfiles(nextProfiles || {})
@@ -217,10 +307,10 @@ function VpnConfig() {
         ])
         if (ignore) return
         if (statusResult.status === 'fulfilled') {
-          setStatus(statusResult.value.data)
+          rememberStatus(statusResult.value.data)
           setStatusError('')
         } else {
-          setStatus({ state: 'disconnected', connected: false, ip: null, protocol: null })
+          rememberStatus({ state: 'disconnected', connected: false, ip: null, protocol: null })
           setStatusError(statusResult.reason?.response?.data?.message || 'Status VPN gagal dimuat.')
         }
         if (configResult.status === 'fulfilled') {
@@ -231,7 +321,7 @@ function VpnConfig() {
         }
       } catch (error) {
         if (!ignore) {
-          setStatus({ state: 'disconnected', connected: false, ip: null, protocol: null })
+          rememberStatus({ state: 'disconnected', connected: false, ip: null, protocol: null })
           setStatusError(error.response?.data?.message || 'Konfigurasi VPN gagal dimuat.')
         }
       } finally {
@@ -240,16 +330,38 @@ function VpnConfig() {
     }
     init()
     return () => { ignore = true }
-  }, [applyProfiles])
+  }, [applyProfiles, rememberStatus])
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible' && !busyRef.current) {
-        loadStatus({ quiet: true })
+    if (status?.state !== 'connected') return undefined
+    let timer = null
+    const stop = () => {
+      if (timer) clearInterval(timer)
+      timer = null
+    }
+    const tick = () => {
+      if (document.hidden || busyRef.current) return
+      loadStatus({ quiet: true })
+    }
+    const start = () => {
+      stop()
+      timer = setInterval(tick, LIVE_POLL_MS)
+    }
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop()
+        return
       }
-    }, AUTO_REFRESH_MS)
-    return () => clearInterval(timer)
-  }, [loadStatus])
+      tick()
+      start()
+    }
+    if (!document.hidden) start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [status?.state, loadStatus])
 
   function setField(protocol, name, value) {
     setForms((current) => ({ ...current, [protocol]: { ...current[protocol], [name]: value } }))
@@ -340,7 +452,7 @@ function VpnConfig() {
     })
     try {
       const response = await api.post(`${API}/action`, { protocol, action }, { timeout: 60000 })
-      if (response.data.status) setStatus(response.data.status)
+      if (response.data.status) rememberStatus(response.data.status)
       const stillWaiting = action === 'connect' && !response.data.connected
       await fireSuccess(
         { title: stillWaiting ? 'Belum tersambung' : 'Berhasil', text: response.data.message, ...(stillWaiting ? { icon: 'warning' } : {}) },
@@ -447,10 +559,16 @@ function VpnConfig() {
                 <InfoItem label="Endpoint CHR" value={wg?.endpoint || ''} mono />
               </>
             )}
-            {status.traffic && (
+            {(status.traffic || state === 'connected') && (
               <>
-                <InfoItem label="Diterima (RX)" value={formatBytes(status.traffic.rx_bytes)} />
-                <InfoItem label="Terkirim (TX)" value={formatBytes(status.traffic.tx_bytes)} />
+                <InfoItem label="Diterima (RX)" value={trafficLabel(status.traffic, 'rx', rates.rx)} />
+                <InfoItem label="Terkirim (TX)" value={trafficLabel(status.traffic, 'tx', rates.tx)} />
+              </>
+            )}
+            {state === 'connected' && (
+              <>
+                <PingPublic ping={status.ping?.public} />
+                <PingTunnel ping={status.ping?.tunnel} />
               </>
             )}
           </dl>

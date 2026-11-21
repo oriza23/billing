@@ -13,6 +13,7 @@ const vpnRouter = require('../backend/routes/vpn');
 const cfg = require('../backend/vpn_config');
 const {
   createVpnService, parseIpAddr, parseWgDump, hijacksDefaultRoute, publicProfiles,
+  hostOf, isSafePingTarget, tunnelGateway, publicPingTarget, tunnelPingTarget, parsePingMs,
 } = require('../backend/vpn');
 
 const KEY_A = 'A'.repeat(43) + '=';
@@ -391,7 +392,10 @@ test('status wireguard: handshake segar = terhubung, basi = menunggu', async () 
   assert.equal(status.state, 'connected');
   assert.equal(status.ip, '10.10.99.2');
   assert.equal(status.wireguard.handshake_age_seconds, 10);
-  assert.deepEqual(status.traffic, { rx_bytes: 100, tx_bytes: 200 });
+  assert.equal(status.traffic.rx_bytes, 100);
+  assert.equal(status.traffic.tx_bytes, 200);
+  assert.equal(status.traffic.rx, '100 B');
+  assert.equal(status.traffic.tx, '200 B');
   assert.equal(status.uptime_seconds, 8996);
   assert.equal(JSON.stringify(status).includes('PRIV'), false);
 
@@ -402,6 +406,68 @@ test('status wireguard: handshake segar = terhubung, basi = menunggu', async () 
   system = fakeSystem({ active: { wireguard: 'active' }, ip: { 'wg-billing': '10.10.99.2/24' }, wg: dump(0) });
   status = await serviceWith(system).service.getStatus();
   assert.equal(status.state, 'connecting');
+});
+
+test('ping: target publik dan gateway tunnel diambil dari konfigurasi, bukan IP tetap', () => {
+  assert.equal(hostOf('chr.domain.com:51820'), 'chr.domain.com');
+  assert.equal(hostOf('203.0.113.10:55722'), '203.0.113.10');
+  assert.equal(hostOf('chr.domain.com'), 'chr.domain.com');
+  assert.equal(hostOf('10.210.0.2;id'), null);
+  assert.equal(hostOf('$(reboot)'), null);
+  assert.equal(isSafePingTarget('chr.domain.com;id'), false);
+
+  assert.equal(tunnelGateway('10.210.0.2/24'), '10.210.0.1');
+  assert.equal(tunnelGateway('172.16.50.15/24'), '172.16.50.1');
+  assert.equal(tunnelGateway('10.10.99.2'), '10.10.99.1');
+  assert.equal(tunnelGateway('bukan-ip'), null);
+
+  assert.equal(publicPingTarget('wireguard', { endpoint: 'chr.domain.com:51820' }), 'chr.domain.com');
+  assert.equal(publicPingTarget('sstp', { server: '203.0.113.10:443' }), '203.0.113.10');
+  assert.equal(publicPingTarget('openvpn', { ovpn_config: 'client\nremote vpn.chr.local 1194\n' }), 'vpn.chr.local');
+  assert.equal(tunnelPingTarget('wireguard', { address: '10.210.0.2/24' }, '10.210.0.9'), '10.210.0.1');
+  assert.equal(tunnelPingTarget('openvpn', {}, '172.16.50.15'), '172.16.50.1');
+  assert.equal(tunnelPingTarget('sstp', {}, '10.8.0.6'), '10.8.0.1');
+  assert.equal(parsePingMs('64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=24.5 ms'), 24.5);
+  assert.equal(parsePingMs(''), null);
+});
+
+test('ping: dua target dijalankan paralel dan host berbahaya tidak dieksekusi', async () => {
+  const calls = [];
+  let started = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const service = createVpnService({
+    isRoot: true,
+    existsSync: () => true,
+    run: async (file, args) => {
+      calls.push([file, args]);
+      if (file !== 'ping') return { ok: true, code: 0, stdout: '', stderr: '' };
+      started += 1;
+      if (started === 2) release();
+      await gate;
+      const target = args[args.length - 1];
+      return { ok: true, code: 0, stdout: `time=${target.endsWith('.1') ? '25.1' : '24.5'} ms\n`, stderr: '' };
+    },
+  });
+  const pending = service.measurePing('wireguard', {
+    endpoint: 'chr.domain.com:51820',
+    address: '10.210.0.2/24',
+  }, '10.210.0.2');
+  await gate;
+  assert.equal(started, 2);
+  const ping = await pending;
+  assert.deepEqual(ping.public, { target: 'chr.domain.com', ms: 24.5, status: 'ok' });
+  assert.deepEqual(ping.tunnel, { target: '10.210.0.1', ms: 25.1, status: 'ok' });
+  assert.deepEqual(
+    calls.filter(([file]) => file === 'ping').map(([, args]) => args),
+    [['-c', '1', '-W', '1', 'chr.domain.com'], ['-c', '1', '-W', '1', '10.210.0.1']],
+  );
+
+  calls.length = 0;
+  const blocked = await service.measurePing('wireguard', { endpoint: 'evil.com;reboot:51820', address: 'nope' }, null);
+  assert.equal(blocked.public.status, 'timeout');
+  assert.equal(blocked.tunnel.status, 'timeout');
+  assert.equal(calls.some(([file]) => file === 'ping'), false);
 });
 
 test('status openvpn/sstp: terhubung bila interface punya IP', async () => {

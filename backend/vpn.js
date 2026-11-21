@@ -98,6 +98,124 @@ function hijacksDefaultRoute(routeOutput) {
   return String(routeOutput || '').split('\n').some((line) => /^(default|0\.0\.0\.0\/[01]|128\.0\.0\.0\/1)\b/.test(line.trim()));
 }
 
+const PING_HOST_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const PING_NAME_RE = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+function emptyPing() {
+  return {
+    public: { target: null, ms: null, status: 'timeout' },
+    tunnel: { target: null, ms: null, status: 'timeout' },
+  };
+}
+
+// Host saja: buang :port. Menerima IPv4 dan domain. Bukan string yang lolos = null.
+function hostOf(value) {
+  const raw = String(value || '').trim();
+  if (!raw || /[\s/\\]/.test(raw)) {
+    return null;
+  }
+  const bracket = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(raw);
+  let host = raw;
+  if (bracket) {
+    host = bracket[1];
+  } else {
+    const colon = raw.lastIndexOf(':');
+    if (colon > 0 && /^\d{1,5}$/.test(raw.slice(colon + 1))) {
+      const port = Number(raw.slice(colon + 1));
+      if (port < 1 || port > 65535) {
+        return null;
+      }
+      host = raw.slice(0, colon);
+    }
+  }
+  return isSafePingTarget(host) ? host : null;
+}
+
+function isSafePingTarget(value) {
+  const host = String(value || '');
+  return PING_HOST_RE.test(host) || PING_NAME_RE.test(host);
+}
+
+// 10.210.0.2/24 -> 10.210.0.1. Oktet terakhir selalu .1 (gateway CHR).
+function tunnelGateway(value) {
+  const raw = String(value || '').trim().split('/')[0].trim();
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+  if (!match) {
+    return null;
+  }
+  const octets = match.slice(1).map(Number);
+  if (octets.some((octet) => octet > 255)) {
+    return null;
+  }
+  return `${octets[0]}.${octets[1]}.${octets[2]}.1`;
+}
+
+function publicPingTarget(protocol, profile) {
+  if (!profile) {
+    return null;
+  }
+  if (protocol === 'wireguard') {
+    return hostOf(profile.endpoint);
+  }
+  if (protocol === 'sstp') {
+    return hostOf(profile.server);
+  }
+  if (protocol === 'openvpn') {
+    const remote = /^[ \t]*remote[ \t]+(\S+)/im.exec(profile.ovpn_config || '');
+    return remote ? hostOf(remote[1]) : null;
+  }
+  return null;
+}
+
+function tunnelPingTarget(protocol, profile, activeIp) {
+  if (protocol === 'wireguard') {
+    return tunnelGateway(profile?.address) || tunnelGateway(activeIp);
+  }
+  if (protocol === 'openvpn' || protocol === 'sstp') {
+    return tunnelGateway(activeIp) || tunnelGateway(profile?.address);
+  }
+  return null;
+}
+
+function parsePingMs(output) {
+  const match = /time[=<]([0-9]+(?:[.,][0-9]+)?)\s*ms/i.exec(String(output || ''));
+  if (!match) {
+    return null;
+  }
+  const ms = Number(match[1].replace(',', '.'));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatByteCount(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) {
+    return null;
+  }
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(size >= 100 ? 0 : 2)} ${units[index]}`;
+}
+
+function presentTraffic(traffic) {
+  if (!traffic) {
+    return null;
+  }
+  return {
+    rx_bytes: Number(traffic.rx_bytes) || 0,
+    tx_bytes: Number(traffic.tx_bytes) || 0,
+    rx: formatByteCount(traffic.rx_bytes),
+    tx: formatByteCount(traffic.tx_bytes),
+  };
+}
+
 function createVpnService(overrides = {}) {
   const isRoot = overrides.isRoot ?? IS_ROOT;
   const run = overrides.run || defaultRun;
@@ -206,6 +324,7 @@ function createVpnService(overrides = {}) {
       is_root: isRoot,
       helper_installed: false,
       checked_at: new Date(now()).toISOString(),
+      ping: emptyPing(),
       ...extra,
     };
   }
@@ -247,6 +366,7 @@ function createVpnService(overrides = {}) {
       checked_at: new Date(now()).toISOString(),
     };
     if (!activeProtocol) {
+      status.ping = emptyPing();
       return status;
     }
 
@@ -278,7 +398,36 @@ function createVpnService(overrides = {}) {
       status.state = status.ip && states[activeProtocol] === 'active' ? 'connected' : 'connecting';
     }
     status.connected = status.state === 'connected';
+    status.traffic = presentTraffic(status.traffic);
+    status.ping = emptyPing();
     return status;
+  }
+
+  async function pingOnce(target) {
+    if (!target || !isSafePingTarget(target)) {
+      return { target: target || null, ms: null, status: 'timeout' };
+    }
+    try {
+      const result = await run('ping', ['-c', '1', '-W', '1', target], { timeout: 4000 });
+      const ms = result && result.ok ? parsePingMs(result.stdout) : null;
+      return { target, ms, status: ms === null ? 'timeout' : 'ok' };
+    } catch {
+      return { target, ms: null, status: 'timeout' };
+    }
+  }
+
+  // Dua ping sekaligus. Target hanya dari konfigurasi/interface, dan hanya argv yang lolos validasi.
+  async function measurePing(protocol, profile, activeIp) {
+    if (!protocol) {
+      return emptyPing();
+    }
+    const publicTarget = publicPingTarget(protocol, profile);
+    const tunnelTarget = tunnelPingTarget(protocol, profile, activeIp);
+    const [pub, tunnel] = await Promise.all([
+      pingOnce(publicTarget),
+      pingOnce(tunnelTarget),
+    ]);
+    return { public: pub, tunnel };
   }
 
   // Tulis konfigurasi ke OS: langsung bila root, selain itu lewat helper root-owned.
@@ -406,7 +555,7 @@ function createVpnService(overrides = {}) {
   }
 
   return {
-    getStatus, connect, disconnect, applyConfig, toolsInfo, isRoot,
+    getStatus, connect, disconnect, applyConfig, toolsInfo, measurePing, isRoot,
   };
 }
 
@@ -526,6 +675,14 @@ module.exports = {
   parseIpAddr,
   parseWgDump,
   hijacksDefaultRoute,
+  hostOf,
+  isSafePingTarget,
+  tunnelGateway,
+  publicPingTarget,
+  tunnelPingTarget,
+  parsePingMs,
+  presentTraffic,
+  emptyPing,
   ensureTable,
   loadProfiles,
   saveProfile,

@@ -1,0 +1,41 @@
+---
+description: Cara start/stop/restart billing (dev systemd vs manual vs produksi) — wajib dibaca sebelum menyarankan node server.js atau systemctl
+alwaysApply: true
+---
+
+# Runtime billing (dev / produksi)
+
+## Cek dulu
+
+```bash
+cat /var/www/billing/.billing-runtime-mode 2>/dev/null
+systemctl is-active billing 2>/dev/null
+ss -tlnp sport = :5000 || true
+```
+
+## Mode dev dengan systemd (disarankan di server lab Hasdin)
+
+Setelah `sudo deploy/install-dev-service.sh`, file `.billing-runtime-mode` berisi `dev`.
+
+**Satu perintah mengelola backend (:5000) dan Vite (:5173):**
+
+| User minta | Sarankan persis ini |
+|------------|---------------------|
+| start | `sudo systemctl start billing` |
+| stop | `sudo systemctl stop billing` |
+| restart backend / reload setelah edit kode | `sudo systemctl restart billing` |
+| cek | `systemctl status billing` · `journalctl -u billing -n 30 --no-pager` |
+
+**Jangan** sarankan `node server.js` atau `cd frontend && npm run dev -- --host` bersamaan dengan service aktif (port bentrok, crash-loop).
+
+## Mode manual (dua terminal)
+
+Bila user **sengaja** menjalankan manual dan **tidak** memakai dev systemd: restart = Ctrl+C lalu jalankan lagi di masing-masing terminal. **Jangan** `systemctl restart billing` (bentrok port 5000).
+
+## Produksi (nanti)
+
+Satu port **5000** (+ opsional Nginx **80/443**). PM2 (`USE_PM2=1`) atau `deploy/install-service.sh` — **bukan** `install-dev-service.sh`.
+
+## Dokumentasi lengkap
+
+`/var/www/billing/docs/DEV-RUNTIME.md`

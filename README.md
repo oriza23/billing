@@ -132,25 +132,37 @@ graph TD
 
 Gunakan **Node.js 22.x** dan **npm 12.x**. Pastikan PostgreSQL sudah berjalan dan siapkan database/role sesuai variabel di `.env`.
 
+### Disarankan di server dev: satu perintah systemd (backend + Vite)
+
+Backend **5000** dan UI Vite **5173** dijalankan bersama; start/stop/restart cukup sekali:
+
+```bash
+sudo deploy/install-dev-service.sh   # sekali
+sudo systemctl restart billing       # start / stop / restart harian
+```
+
+| Aksi | Perintah |
+|------|----------|
+| Mulai | `sudo systemctl start billing` |
+| Berhenti | `sudo systemctl stop billing` |
+| Restart (setelah ubah kode) | `sudo systemctl restart billing` |
+| Log | `journalctl -u billing -f` |
+
+Buka UI di `http://<IP>:5173`. Jangan jalankan `node server.js` atau `npm run dev` bersamaan dengan service ini (port bentrok).
+
+Panduan untuk developer dan agen AI: **[docs/DEV-RUNTIME.md](docs/DEV-RUNTIME.md)** · aturan Cursor: `.cursor/rules/billing-dev-runtime.mdc`.
+
+### Alternatif: dua terminal manual
+
 ```bash
 cp .env.example .env
-# Edit .env: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, dan JWT_SECRET
-# Ganti semua nilai contoh dengan kredensial kuat; jangan commit .env.
-npm install
-npm start
+npm install && npm start              # terminal 1 — :5000
+cd frontend && npm install && npm run dev -- --host   # terminal 2 — :5173
 ```
 
-Backend berjalan di `http://localhost:5000`. Perintah `npm start` menjalankan `node server.js`; bila `frontend/dist/index.html` tersedia, Express juga menyajikan aplikasi React pada port yang sama.
+Backend berjalan di `http://localhost:5000`. Bila `frontend/dist/index.html` ada, Express juga bisa menyajikan build pada port yang sama tanpa Vite.
 
-Untuk hot reload frontend, buka terminal kedua:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Buka `http://localhost:5173`. Vite mengarahkan permintaan API ke backend pada port **5000**. Port `5173` adalah server development dan jangan dibuka ke jaringan publik untuk deployment.
+Buka `http://localhost:5173` untuk hot reload. Port `5173` jangan dibuka ke publik (UFW tidak membukanya).
 
 Untuk build frontend dan menyajikannya melalui Node:
 
@@ -251,7 +263,7 @@ Catatan keamanan tambahan:
 - `server.js` mengirim header `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, dan HSTS saat lewat HTTPS.
 - fail2ban (jail `sshd`) melindungi SSH yang masih memakai login root/password.
 - Panel saat ini masih tahap pengembangan dan diakses lewat HTTP; HSTS baru berlaku setelah dipasang reverse proxy TLS.
-- Port GenieACS (3000/7547/7567) sudah dibuka di UFW **secara sengaja** sebagai persiapan; layanan ACS menyusul, jadi port itu wajar belum ada yang listen.
+- Port GenieACS (3000/7547/7567) sudah dibuka di UFW **secara sengaja** sebagai persiapan (lihat [Firewall (UFW)](#firewall-ufw)); layanan ACS menyusul, jadi port itu wajar belum ada yang listen.
 - `/api/system/health` berada di belakang `requireAuth`, sehingga monitoring eksternal perlu token JWT.
 - Untuk monitoring tanpa JWT tersedia `GET /healthz`: publik, hanya membalas `{ status: "ok" }` (200) atau `{ status: "degraded" }` (503) tanpa detail internal. Set `HEALTH_TOKEN` dan kirim header `X-Health-Token` bila ingin detail database/RADIUS (latensi, state layanan).
 
@@ -283,6 +295,8 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 | Domain/IP reverse proxy | `server_name` | `_` | Hanya jika `USE_NGINX=1` |
 | Lanjut? | — | `N` | Ketik `y` untuk melanjutkan |
 
+Variabel lingkungan opsional (tanpa prompt): `APP_PORT`, `USE_NGINX`, `USE_PM2`, `GENIEACS_UI_PORT`, `GENIEACS_CWMP_PORT`, `GENIEACS_FS_PORT`, `GENIEACS_OPEN_NBI`, dan `VPN_SUBNET` (subnet tunnel VPN untuk aturan UFW, default `10.210.0.0/24`, kosongkan untuk melewati; harus CIDR IPv4 prefix `/16`–`/32`), mis. `sudo VPN_SUBNET=10.99.0.0/24 ./install.sh`.
+
 ---
 
 ## Kebutuhan sistem & pasca-instalasi
@@ -309,6 +323,21 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 | 5432/tcp | PostgreSQL (localhost) |
 | 1812/1813 UDP | FreeRADIUS |
 | 7547, 7567, 3000/tcp | GenieACS (jika di host yang sama) |
+
+### Firewall (UFW)
+
+Server ini adalah VPN **client** ke MikroTik CHR, sehingga **tidak ada port inbound VPN** yang dibuka (1194, 1701, 500/4500, 51820, atau port server SSTP seperti 9921). Koneksi VPN keluar tidak butuh aturan karena kebijakan outgoing `allow`. `install.sh` menyetel UFW ke daftar berikut:
+
+| Aturan | Keterangan |
+|--------|------------|
+| `OpenSSH` (22/tcp) | Dibuka sebelum `ufw enable` agar sesi SSH tidak terputus |
+| `5000/tcp` | Billing web (`APP_PORT`) |
+| `80/tcp`, `443/tcp` | Hanya bila `USE_NGINX=1` |
+| `1812/udp`, `1813/udp` | FreeRADIUS auth dan acct |
+| `7547/tcp`, `7567/tcp`, `3000/tcp` | GenieACS CWMP, File Server, UI (persiapan; port NBI 7557 tertutup kecuali `GENIEACS_OPEN_NBI=1`) |
+| `from <VPN_SUBNET>` | Semua port dari subnet tunnel VPN (default `10.210.0.0/24`) |
+
+Kebijakan bawaan: `deny incoming`, `allow outgoing`. Installer hanya menambah aturan dan tidak menghapus aturan yang sudah ada. Pada server lama, hapus sisa uji coba secara manual, mis. `sudo ufw delete allow 1194/udp`, lalu cek `sudo ufw status numbered`.
 
 ### Pasca-instalasi
 

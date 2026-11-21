@@ -1,0 +1,27 @@
+# Unit DEV: satu perintah systemctl mengelola backend (:5000) + Vite (:5173).
+# Pasang: sudo deploy/install-dev-service.sh
+# Produksi: deploy/billing.service + deploy/install-service.sh (satu proses, frontend/dist).
+[Unit]
+Description=RANIAH Billing DEV — API :5000 + Vite :5173
+Documentation=file:///var/www/billing/docs/DEV-RUNTIME.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/billing
+Environment=NODE_ENV=development
+Environment=APP_PORT=5000
+Environment=VITE_DEV_PORT=5173
+EnvironmentFile=-/var/www/billing/.env
+ExecStart=/var/www/billing/scripts/billing-dev-stack.sh
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+SyslogIdentifier=billing
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

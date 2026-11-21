@@ -1430,3 +1430,27 @@ test('install.sh: sysctl tuning VPN ditulis ke /etc/sysctl.d/99-raniah-vpn.conf 
   assert.match(installer, /if ! \$SUDO sysctl --system/);
   assert.match(installer, /sysctl -w "\$\{SYSCTL_KEY\}=\$\{SYSCTL_VAL\}"[^\n]*\|\| SYSCTL_DENIED/);
 });
+
+test('install.sh: UFW hanya port yang dibutuhkan, tanpa port inbound VPN, SSH tidak pernah diputus', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
+  const block = installer
+    .slice(installer.indexOf('info "=== UFW ==="'), installer.indexOf('$SUDO ufw reload'))
+    .split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+  assert.ok(block.length > 200, 'blok UFW ditemukan');
+  const allowed = [...block.matchAll(/ufw allow\s+("?[^\s"]+"?)/g)].map((m) => m[1].replace(/"/g, ''));
+  assert.deepEqual(allowed.sort(), [
+    '${APP_PORT}/tcp', '${GENIEACS_CWMP_PORT}/tcp', '${GENIEACS_FS_PORT}/tcp', '${GENIEACS_NBI_PORT}/tcp',
+    '${GENIEACS_UI_PORT}/tcp', '1812/udp', '1813/udp', '443/tcp', '80/tcp', 'OpenSSH', 'from',
+  ].sort());
+  assert.doesNotMatch(block, /\b(1194|1701|4500|51820|9921|9929)\b|\b500\/udp/);
+  assert.match(block, /ufw default deny incoming/);
+  assert.match(block, /ufw default allow outgoing/);
+  // SSH harus diizinkan sebelum ufw enable, dan reload dijalankan setelahnya.
+  assert.ok(block.indexOf('ufw allow OpenSSH') > -1 && block.indexOf('ufw allow OpenSSH') < block.indexOf('ufw --force enable'));
+  assert.ok(block.indexOf('ufw --force enable') < installer.indexOf('$SUDO ufw reload'));
+  // Subnet VPN wajib divalidasi prefix >= /16 sebelum dipakai.
+  assert.match(installer, /VPN_SUBNET="\$\{VPN_SUBNET-10\.210\.0\.0\/24\}"/);
+  assert.match(block, />= 16 && 10#\$\{BASH_REMATCH\[6\]\} <= 32/);
+  assert.doesNotMatch(block, /ufw (delete|reset)/);
+});
+

@@ -26,6 +26,10 @@ GENIEACS_NBI_PORT="${GENIEACS_NBI_PORT:-7557}"
 GENIEACS_FS_PORT="${GENIEACS_FS_PORT:-7567}"
 GENIEACS_OPEN_NBI="${GENIEACS_OPEN_NBI:-0}"
 
+# Subnet tunnel VPN (server ini VPN client ke CHR) yang boleh mengakses semua port server lewat UFW.
+# Kosongkan (VPN_SUBNET="") untuk tidak membuat aturan itu. Harus CIDR IPv4 dengan prefix /16../32.
+VPN_SUBNET="${VPN_SUBNET-10.210.0.0/24}"
+
 RADDB="${RADDB:-/etc/freeradius/3.0}"
 RADIUS_SCHEMA="${RADIUS_SCHEMA:-${RADDB}/mods-config/sql/main/postgresql/schema.sql}"
 CLIENTS_MARKER="BEGIN-ORIZABIL-BILLING-INSTALL"
@@ -420,23 +424,39 @@ fi
 # 7. UFW & restart layanan
 # =============================================================================
 info "=== UFW ==="
+# Hanya port yang dibutuhkan billing, FreeRADIUS, dan GenieACS. Server ini adalah VPN CLIENT,
+# jadi tidak ada port inbound VPN (1194, 1701, 500/4500, 51820, 9921, dst. tidak dibuka).
+# Aturan yang sudah ada tidak dihapus oleh installer; hapus sisa uji coba dengan: ufw delete allow <port>/<proto>.
+$SUDO ufw default deny incoming
+$SUDO ufw default allow outgoing
+# SSH dibuka lebih dulu, sebelum ufw enable, supaya sesi tidak terputus.
 $SUDO ufw allow OpenSSH
+$SUDO ufw allow "${APP_PORT}/tcp" comment 'Billing web' 2>/dev/null || true
 if [[ "$USE_NGINX" == "1" ]]; then
-  $SUDO ufw allow 80/tcp comment 'RANIAH billing HTTP'
-  $SUDO ufw allow 443/tcp comment 'RANIAH billing HTTPS' 2>/dev/null || true
-else
-  $SUDO ufw allow "${APP_PORT}/tcp" comment 'RANIAH billing'
+  $SUDO ufw allow 80/tcp comment 'Web HTTP (Nginx/reverse proxy)' 2>/dev/null || true
+  $SUDO ufw allow 443/tcp comment 'Web HTTPS (Nginx/reverse proxy)' 2>/dev/null || true
 fi
 $SUDO ufw allow 1812/udp comment 'FreeRADIUS auth' 2>/dev/null || true
 $SUDO ufw allow 1813/udp comment 'FreeRADIUS acct' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS FS' 2>/dev/null || true
+$SUDO ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP (TR-069)' 2>/dev/null || true
+$SUDO ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS File Server' 2>/dev/null || true
 $SUDO ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI' 2>/dev/null || true
 if [[ "${GENIEACS_OPEN_NBI}" == "1" ]]; then
   warn "Port NBI GenieACS ${GENIEACS_NBI_PORT} dibuka ke publik tanpa auth bawaan."
   $SUDO ufw allow "${GENIEACS_NBI_PORT}/tcp" comment 'GenieACS NBI'
 fi
+if [[ -n "$VPN_SUBNET" ]]; then
+  # Validasi ketat: /0../15 akan membuka semua port ke sebagian besar internet.
+  if [[ "$VPN_SUBNET" =~ ^(([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3}))/([0-9]{1,2})$ ]] \
+    && (( 10#${BASH_REMATCH[2]} <= 255 && 10#${BASH_REMATCH[3]} <= 255 && 10#${BASH_REMATCH[4]} <= 255 && 10#${BASH_REMATCH[5]} <= 255 )) \
+    && (( 10#${BASH_REMATCH[6]} >= 16 && 10#${BASH_REMATCH[6]} <= 32 )); then
+    $SUDO ufw allow from "$VPN_SUBNET" comment 'Subnet VPN (client ke CHR)' 2>/dev/null || true
+  else
+    warn "VPN_SUBNET='${VPN_SUBNET}' tidak valid (wajib CIDR IPv4 prefix /16../32); aturan UFW subnet VPN dilewati."
+  fi
+fi
 $SUDO ufw --force enable || true
+$SUDO ufw reload || true
 
 $SUDO systemctl enable freeradius
 $SUDO systemctl restart freeradius

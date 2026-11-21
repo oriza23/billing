@@ -1,0 +1,535 @@
+'use strict';
+/**
+ * Koneksi VPN client server billing -> MikroTik CHR (WireGuard / OpenVPN / SSTP).
+ *
+ * - Status  : systemctl is-active, ip -4 addr, wg show (dump), sysfs counter.
+ * - Aksi    : connect/disconnect lewat systemctl, protokol lain dimatikan lebih dulu.
+ * - Berkas  : root menulis langsung; non-root lewat helper `sudo -n` yang memvalidasi ulang.
+ * - Simpan  : tabel vpn_profiles (PostgreSQL), rahasia tidak pernah dikirim balik ke browser.
+ *
+ * Semua perintah memakai execFile (tanpa shell). Deteksi root sama seperti restart layanan:
+ * root langsung, selain itu `sudo -n` (gagal cepat bila sudoers belum dipasang).
+ */
+
+const fs = require('fs');
+const { execFile } = require('child_process');
+const { IS_ROOT } = require('./privileged');
+const vpnConfig = require('./vpn_config');
+
+const {
+  PROTOCOLS, UNITS, INTERFACES,
+} = vpnConfig;
+
+const HELPER_PATH = '/usr/local/sbin/raniah-vpn-helper';
+const SUDOERS_HINT = 'Izin sudoers VPN belum terpasang untuk user server. Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.';
+const HANDSHAKE_FRESH_SECONDS = 180;
+const BIN_DIRS = ['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin'];
+const REQUIRED_TOOLS = {
+  wireguard: ['wg', 'wg-quick'],
+  openvpn: ['openvpn'],
+  sstp: ['sstpc', 'pppd'],
+};
+const PACKAGES = {
+  wireguard: 'wireguard-tools',
+  openvpn: 'openvpn',
+  sstp: 'sstp-client ppp',
+};
+const LABELS = { wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP' };
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function defaultRun(file, args = [], { input, timeout = 15000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile(file, args, { timeout, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+        resolve({
+          ok: !error,
+          code: error ? (typeof error.code === 'number' ? error.code : 1) : 0,
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+        });
+      });
+    } catch (error) {
+      resolve({ ok: false, code: 1, stdout: '', stderr: String(error.message || error) });
+      return;
+    }
+    child.stdin.on('error', () => {});
+    try {
+      child.stdin.end(input === undefined ? undefined : String(input));
+    } catch {
+      // Proses tanpa stdin (perintah tidak ditemukan) tetap diselesaikan lewat callback.
+    }
+  });
+}
+
+function sudoDenied(output) {
+  return /password is required|a terminal is required|not allowed to execute|is not in the sudoers/i.test(String(output || ''));
+}
+
+function parseIpAddr(output) {
+  const match = /\binet\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?/.exec(String(output || ''));
+  return match ? { ip: match[1], prefix: match[2] ? Number(match[2]) : null } : null;
+}
+
+// `wg show <if> dump`: baris 1 = interface (berisi private key, JANGAN dikembalikan),
+// baris berikut = peer: pub psk endpoint allowed-ips handshake rx tx keepalive.
+function parseWgDump(output) {
+  const lines = String(output || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    return null;
+  }
+  const cols = lines[1].split('\t');
+  const handshake = Number(cols[4]) || 0;
+  return {
+    endpoint: cols[2] && cols[2] !== '(none)' ? cols[2] : null,
+    latest_handshake: handshake > 0 ? handshake : null,
+    rx_bytes: Number(cols[5]) || 0,
+    tx_bytes: Number(cols[6]) || 0,
+  };
+}
+
+// Rute yang membelokkan seluruh trafik server lewat VPN (default / 0.0.0.0/1 / 128.0.0.0/1).
+function hijacksDefaultRoute(routeOutput) {
+  return String(routeOutput || '').split('\n').some((line) => /^(default|0\.0\.0\.0\/[01]|128\.0\.0\.0\/1)\b/.test(line.trim()));
+}
+
+function createVpnService(overrides = {}) {
+  const isRoot = overrides.isRoot ?? IS_ROOT;
+  const run = overrides.run || defaultRun;
+  const existsSync = overrides.existsSync || fs.existsSync;
+  const readText = overrides.readText || ((file) => {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch {
+      return '';
+    }
+  });
+  const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = overrides.now || (() => Date.now());
+  const applyDisk = overrides.applyToDisk || vpnConfig.applyToDisk;
+  const helperPath = overrides.helperPath || HELPER_PATH;
+
+  let busy = false;
+
+  // Root: langsung. Selain root: `sudo -n` (aturan: process.getuid() === 0 ? '' : 'sudo -n ').
+  function runPriv(binary, args, options) {
+    return isRoot ? run(binary, args, options) : run('sudo', ['-n', binary, ...args], options);
+  }
+
+  async function systemctlPriv(args) {
+    const result = await runPriv('systemctl', args);
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `systemctl ${args.join(' ')} gagal: ${detail.slice(0, 240)}`);
+    }
+    return result.stdout.trim();
+  }
+
+  function findBinary(name) {
+    return BIN_DIRS.some((dir) => existsSync(`${dir}/${name}`));
+  }
+
+  function toolsInfo() {
+    const tools = {};
+    for (const protocol of PROTOCOLS) {
+      const missing = REQUIRED_TOOLS[protocol].filter((name) => !findBinary(name));
+      tools[protocol] = {
+        installed: missing.length === 0,
+        missing,
+        package: PACKAGES[protocol],
+        hint: missing.length ? `apt install -y ${PACKAGES[protocol]}` : null,
+      };
+    }
+    return tools;
+  }
+
+  async function unitState(protocol) {
+    try {
+      const result = await run('systemctl', ['is-active', UNITS[protocol]], { timeout: 8000 });
+      return (result.stdout || '').trim() || 'unknown';
+    } catch {
+      // systemctl tidak ada, atau unit belum dikenal: anggap tidak aktif.
+      return 'unknown';
+    }
+  }
+
+  async function interfaceInfo(protocol) {
+    try {
+      const result = await run('ip', ['-4', '-o', 'addr', 'show', 'dev', INTERFACES[protocol]], { timeout: 8000 });
+      return result.ok ? parseIpAddr(result.stdout) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function uptimeSeconds(protocol) {
+    try {
+      const result = await run('systemctl', ['show', UNITS[protocol], '-p', 'ActiveEnterTimestampMonotonic', '--value'], { timeout: 8000 });
+      const micros = Number(result.stdout.trim());
+      const bootSeconds = Number(readText('/proc/uptime').split(' ')[0]);
+      if (!micros || !bootSeconds) {
+        return null;
+      }
+      return Math.max(0, Math.round(bootSeconds - micros / 1e6));
+    } catch {
+      return null;
+    }
+  }
+
+  function trafficOf(protocol) {
+    const base = `/sys/class/net/${INTERFACES[protocol]}/statistics`;
+    const rx = readText(`${base}/rx_bytes`).trim();
+    const tx = readText(`${base}/tx_bytes`).trim();
+    return rx !== '' && tx !== '' ? { rx_bytes: Number(rx) || 0, tx_bytes: Number(tx) || 0 } : null;
+  }
+
+  function disconnectedStatus(extra = {}) {
+    return {
+      success: true,
+      state: 'disconnected',
+      connected: false,
+      protocol: null,
+      interface: null,
+      ip: null,
+      prefix: null,
+      uptime_seconds: null,
+      traffic: null,
+      wireguard: null,
+      units: {},
+      failed: [],
+      tools: {},
+      is_root: isRoot,
+      helper_installed: false,
+      checked_at: new Date(now()).toISOString(),
+      ...extra,
+    };
+  }
+
+  async function getStatus() {
+    try {
+      return await collectStatus();
+    } catch (error) {
+      // Perintah OS gagal (paket belum terpasang, interface belum ada, sudo ditolak).
+      // Halaman harus tetap bisa dibuka: HTTP 200, bukan popup error.
+      console.error('[vpn] status:', error.message);
+      return disconnectedStatus();
+    }
+  }
+
+  async function collectStatus() {
+    const states = {};
+    await Promise.all(PROTOCOLS.map(async (protocol) => {
+      states[protocol] = await unitState(protocol);
+    }));
+    const activeProtocol = PROTOCOLS.find((protocol) => ['active', 'activating', 'reloading'].includes(states[protocol])) || null;
+
+    const status = {
+      success: true,
+      state: 'disconnected',
+      connected: false,
+      protocol: activeProtocol,
+      interface: activeProtocol ? INTERFACES[activeProtocol] : null,
+      ip: null,
+      prefix: null,
+      uptime_seconds: null,
+      traffic: null,
+      wireguard: null,
+      units: states,
+      failed: PROTOCOLS.filter((protocol) => states[protocol] === 'failed'),
+      tools: toolsInfo(),
+      is_root: isRoot,
+      helper_installed: isRoot || existsSync(helperPath),
+      checked_at: new Date(now()).toISOString(),
+    };
+    if (!activeProtocol) {
+      return status;
+    }
+
+    const [addr, uptime] = await Promise.all([interfaceInfo(activeProtocol), uptimeSeconds(activeProtocol)]);
+    status.ip = addr?.ip || null;
+    status.prefix = addr?.prefix ?? null;
+    status.uptime_seconds = uptime;
+    status.traffic = trafficOf(activeProtocol);
+
+    if (activeProtocol === 'wireguard') {
+      const dump = await runPriv('wg', ['show', INTERFACES.wireguard, 'dump'], { timeout: 8000 });
+      const peer = dump.ok ? parseWgDump(dump.stdout) : null;
+      if (peer) {
+        const age = peer.latest_handshake ? Math.max(0, Math.round(now() / 1000 - peer.latest_handshake)) : null;
+        status.wireguard = {
+          endpoint: peer.endpoint,
+          latest_handshake: peer.latest_handshake ? new Date(peer.latest_handshake * 1000).toISOString() : null,
+          handshake_age_seconds: age,
+          rx_bytes: peer.rx_bytes,
+          tx_bytes: peer.tx_bytes,
+        };
+        status.traffic = { rx_bytes: peer.rx_bytes, tx_bytes: peer.tx_bytes };
+        status.state = status.ip && age !== null && age <= HANDSHAKE_FRESH_SECONDS ? 'connected' : 'connecting';
+      } else {
+        // `wg` tidak bisa dibaca (mis. sudoers belum ada): andalkan interface naik.
+        status.state = status.ip ? 'connected' : 'connecting';
+      }
+    } else {
+      status.state = status.ip && states[activeProtocol] === 'active' ? 'connected' : 'connecting';
+    }
+    status.connected = status.state === 'connected';
+    return status;
+  }
+
+  // Tulis konfigurasi ke OS: langsung bila root, selain itu lewat helper root-owned.
+  async function applyConfig(protocol, cfg) {
+    if (isRoot) {
+      try {
+        applyDisk(protocol, cfg);
+      } catch (error) {
+        if (error.status) {
+          throw error;
+        }
+        throw httpError(500, `Gagal menulis konfigurasi VPN: ${String(error.message).slice(0, 240)}`);
+      }
+      return;
+    }
+    if (!existsSync(helperPath)) {
+      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
+    }
+    const result = await run('sudo', ['-n', helperPath, 'apply'], {
+      input: JSON.stringify({ protocol, config: cfg }),
+      timeout: 30000,
+    });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi VPN: ${detail.slice(0, 240)}`);
+    }
+  }
+
+  function ensureTools(protocol) {
+    const info = toolsInfo()[protocol];
+    if (!info.installed) {
+      throw httpError(503, `Paket ${LABELS[protocol]} belum terpasang di server (${info.missing.join(', ')}). Jalankan: ${info.hint}`);
+    }
+  }
+
+  // Satu operasi VPN pada satu waktu, supaya connect/disconnect tidak saling menimpa.
+  async function exclusive(task) {
+    if (busy) {
+      throw httpError(409, 'Operasi VPN lain sedang berjalan. Coba lagi sebentar lagi.');
+    }
+    busy = true;
+    try {
+      return await task();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function stopOthers(protocol) {
+    for (const other of PROTOCOLS.filter((item) => item !== protocol)) {
+      // eslint-disable-next-line no-await-in-loop
+      const [state, enabled] = await Promise.all([
+        unitState(other),
+        run('systemctl', ['is-enabled', UNITS[other]], { timeout: 8000 }).then((result) => result.stdout.trim()),
+      ]);
+      if (state !== 'inactive' || enabled === 'enabled') {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await systemctlPriv(['disable', '--now', UNITS[other]]);
+        } catch (error) {
+          if (error.status === 503) {
+            throw error;
+          }
+          // Unit belum pernah dibuat: tidak ada yang perlu dimatikan.
+        }
+      }
+    }
+  }
+
+  async function routeHijack(protocol) {
+    const result = await run('ip', ['-4', 'route', 'show', 'dev', INTERFACES[protocol]], { timeout: 8000 });
+    return result.ok && hijacksDefaultRoute(result.stdout);
+  }
+
+  async function connect(protocol, cfg) {
+    if (!PROTOCOLS.includes(protocol)) {
+      throw httpError(400, 'Protokol tidak dikenal.');
+    }
+    if (!cfg) {
+      throw httpError(400, `Konfigurasi ${LABELS[protocol]} belum disimpan. Simpan konfigurasi dulu.`);
+    }
+    ensureTools(protocol);
+    return exclusive(async () => {
+      await applyConfig(protocol, cfg);
+      await stopOthers(protocol);
+      const unit = UNITS[protocol];
+      const wasActive = (await unitState(protocol)) === 'active';
+      await systemctlPriv(['enable', '--now', unit]);
+      if (wasActive) {
+        await systemctlPriv(['restart', unit]);
+      }
+
+      const attempts = protocol === 'wireguard' ? 8 : 20;
+      let status = null;
+      for (let i = 0; i < attempts; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(1000);
+        // eslint-disable-next-line no-await-in-loop
+        if (await routeHijack(protocol)) {
+          // eslint-disable-next-line no-await-in-loop
+          await systemctlPriv(['disable', '--now', unit]).catch(() => {});
+          throw httpError(409, `${LABELS[protocol]} dibatalkan: CHR mencoba mengalihkan default route server sehingga akses VPS bisa terputus. Periksa konfigurasi di CHR.`);
+        }
+        // eslint-disable-next-line no-await-in-loop
+        status = await getStatus();
+        if (status.protocol === protocol && status.connected) {
+          break;
+        }
+        if (status.units[protocol] === 'failed' || status.units[protocol] === 'inactive') {
+          break;
+        }
+      }
+      return { status, protocol };
+    });
+  }
+
+  async function disconnect(protocol) {
+    if (!PROTOCOLS.includes(protocol)) {
+      throw httpError(400, 'Protokol tidak dikenal.');
+    }
+    return exclusive(async () => {
+      await systemctlPriv(['disable', '--now', UNITS[protocol]]);
+      return { status: await getStatus(), protocol };
+    });
+  }
+
+  return {
+    getStatus, connect, disconnect, applyConfig, toolsInfo, isRoot,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Penyimpanan konfigurasi (PostgreSQL)
+// ---------------------------------------------------------------------------
+async function ensureTable(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_profiles (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      protocol VARCHAR(12) NOT NULL UNIQUE,
+      config TEXT NOT NULL,
+      selected SMALLINT NOT NULL DEFAULT 0,
+      updated_by VARCHAR(50) DEFAULT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+}
+
+async function loadProfiles(pool) {
+  await ensureTable(pool);
+  let rows = [];
+  try {
+    const result = await pool.query('SELECT protocol, config, selected FROM vpn_profiles');
+    rows = result[0] || [];
+  } catch (error) {
+    // Tabel kosong atau belum siap: form tetap tampil dengan nilai default.
+    console.error('[vpn] config:', error.message);
+    return { profiles: {}, selected: null };
+  }
+  const profiles = {};
+  let selected = null;
+  for (const row of rows) {
+    try {
+      profiles[row.protocol] = JSON.parse(row.config);
+    } catch {
+      continue;
+    }
+    if (Number(row.selected) === 1) {
+      selected = row.protocol;
+    }
+  }
+  return { profiles, selected };
+}
+
+async function saveProfile(pool, protocol, cfg, username) {
+  const json = JSON.stringify(cfg);
+  const [updated] = await pool.execute(
+    'UPDATE vpn_profiles SET config = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE protocol = ?',
+    [json, username || null, protocol],
+  );
+  if (!updated.affectedRows) {
+    await pool.execute(
+      'INSERT INTO vpn_profiles (protocol, config, updated_by) VALUES (?, ?, ?)',
+      [protocol, json, username || null],
+    );
+  }
+  await markSelected(pool, protocol);
+}
+
+async function markSelected(pool, protocol) {
+  await pool.execute('UPDATE vpn_profiles SET selected = CASE WHEN protocol = ? THEN 1 ELSE 0 END', [protocol]);
+}
+
+// Bentuk aman untuk browser: rahasia diganti penanda *_set, tidak pernah ikut dikirim.
+function publicProfiles(profiles, deps = {}) {
+  const derive = deps.derivePublicKey || vpnConfig.derivePublicKey;
+  const out = { wireguard: null, openvpn: null, sstp: null };
+  const wg = profiles.wireguard;
+  if (wg) {
+    let publicKey = '';
+    try {
+      publicKey = derive(wg.private_key);
+    } catch {
+      publicKey = '';
+    }
+    out.wireguard = {
+      endpoint: wg.endpoint,
+      server_public_key: wg.server_public_key,
+      address: wg.address,
+      allowed_ips: wg.allowed_ips,
+      keepalive: wg.keepalive,
+      mtu: wg.mtu || '',
+      public_key: publicKey,
+      private_key_set: Boolean(wg.private_key),
+      preshared_key_set: Boolean(wg.preshared_key),
+    };
+  }
+  const ovpn = profiles.openvpn;
+  if (ovpn) {
+    const remote = /^remote\s+(\S+)(?:\s+(\S+))?/im.exec(ovpn.ovpn_config || '');
+    out.openvpn = {
+      username: ovpn.username || '',
+      password_set: Boolean(ovpn.password),
+      ovpn_set: Boolean(ovpn.ovpn_config),
+      ovpn_lines: String(ovpn.ovpn_config || '').split('\n').filter(Boolean).length,
+      ovpn_remote: remote ? `${remote[1]}${remote[2] ? `:${remote[2]}` : ''}` : '',
+    };
+  }
+  const sstp = profiles.sstp;
+  if (sstp) {
+    out.sstp = {
+      server: sstp.server,
+      username: sstp.username,
+      password_set: Boolean(sstp.password),
+      routes: sstp.routes || '',
+      ignore_cert: Boolean(sstp.ignore_cert),
+    };
+  }
+  return out;
+}
+
+module.exports = {
+  HELPER_PATH,
+  LABELS,
+  createVpnService,
+  parseIpAddr,
+  parseWgDump,
+  hijacksDefaultRoute,
+  ensureTable,
+  loadProfiles,
+  saveProfile,
+  markSelected,
+  publicProfiles,
+  service: createVpnService(),
+};

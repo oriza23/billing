@@ -89,3 +89,21 @@ test('composeInfo: kalimat hapus memuat entitas & subjek', () => {
   assert.match(info, /Menghapus data langganan: 26000013501/);
   assert.match(info, /Langganan dihapus/);
 });
+
+test('audit VPN: save/action tercatat sebagai edit "koneksi VPN" dan rahasia disamarkan', () => {
+  assert.equal(classifyAction('POST', '/api/sistem/vpn/save'), 'edit');
+  assert.equal(classifyAction('POST', '/api/sistem/vpn/action'), 'edit');
+  assert.equal(entityOf('/api/sistem/vpn/save'), 'koneksi VPN');
+  assert.equal(entityOf('/api/sistem/vpn/action'), 'koneksi VPN');
+
+  const summary = summarizeRequest({
+    protocol: 'wireguard',
+    private_key: 'PRIVKEY-RAHASIA',
+    preshared_key: 'PSK-RAHASIA',
+    password: 'PASS-RAHASIA',
+    ovpn_config: '<secret>RAHASIA</secret>',
+    config: { password: 'PASS-RAHASIA' },
+  });
+  assert.match(summary, /protocol=wireguard/);
+  assert.equal(summary.includes('RAHASIA'), false);
+});

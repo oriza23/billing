@@ -85,6 +85,7 @@ const settingsRouter = require('./backend/routes/settings');
 app.use('/api/settings', settingsRouter);
 app.use('/api/system', require('./backend/routes/system_health'));
 app.use('/api/sistem', require('./backend/routes/service_restart'));
+app.use('/api/sistem/vpn', require('./backend/routes/vpn'));
 app.use('/api/logs', require('./backend/routes/logs'));
 app.use('/api/acs', require('./backend/routes/acs'));
 
@@ -185,6 +186,7 @@ async function start() {
   await pelangganRouter.ensureTable();
   await settingsRouter.ensureTable();
   await ensureActivityLogTable();
+  await require('./backend/vpn').ensureTable(pool);
   // Baris lama (versi sebelumnya) belum punya action/info: isi ulang agar tampil utuh.
   await backfillLegacy();
   if (String(process.env.BILLING_SCHEMA_ONLY || '') === '1') {

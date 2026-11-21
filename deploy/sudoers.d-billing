@@ -3,4 +3,15 @@ billing ALL=(root) NOPASSWD: \
   /usr/bin/systemctl restart freeradius, \
   /usr/bin/timedatectl set-timezone *, \
   /usr/bin/ln -sfn /usr/share/zoneinfo/* /etc/localtime, \
-  /usr/bin/install -m 0644 * /etc/timezone
+  /usr/bin/install -m 0644 * /etc/timezone, \
+  /usr/bin/systemctl enable --now wg-quick@wg-billing, \
+  /usr/bin/systemctl restart wg-quick@wg-billing, \
+  /usr/bin/systemctl disable --now wg-quick@wg-billing, \
+  /usr/bin/systemctl enable --now openvpn-client@raniah-vpn, \
+  /usr/bin/systemctl restart openvpn-client@raniah-vpn, \
+  /usr/bin/systemctl disable --now openvpn-client@raniah-vpn, \
+  /usr/bin/systemctl enable --now raniah-sstp, \
+  /usr/bin/systemctl restart raniah-sstp, \
+  /usr/bin/systemctl disable --now raniah-sstp, \
+  /usr/bin/wg show wg-billing dump, \
+  /usr/local/sbin/raniah-vpn-helper apply

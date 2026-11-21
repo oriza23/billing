@@ -18,6 +18,7 @@ import PppoeProfil from './PppoeProfil.jsx'
 import RouterMaster from './RouterMaster.jsx'
 import SistemPengaturan from './SistemPengaturan.jsx'
 import TambahLanggananPppoe from './TambahLanggananPppoe.jsx'
+import VpnConfig from './VpnConfig.jsx'
 import RegistrasiPelanggan from './RegistrasiPelanggan.jsx'
 import IsolirPage from './IsolirPage.jsx'
 
@@ -63,6 +64,7 @@ function App() {
           </Route>
           <Route path="/sistem" element={<Dashboard />}>
             <Route path="pengaturan" element={<SistemPengaturan />} />
+            <Route path="vpn" element={<VpnConfig />} />
           </Route>
           <Route path="/manajemen-admin" element={<Dashboard />}>
             <Route index element={<ManajemenAdmin />} />

@@ -14,6 +14,7 @@ import {
   ScrollText,
   Settings,
   Shield,
+  ShieldCheck,
   Ticket,
   User,
   Users,
@@ -44,6 +45,7 @@ const hotspotMenu = [
 const sistemMenu = [
   { to: '/manajemen-admin', label: 'Manajemen Admin', icon: Shield },
   { to: '/sistem/pengaturan', label: 'Pengaturan', icon: Settings },
+  { to: '/sistem/vpn', label: 'Koneksi VPN', icon: ShieldCheck },
 ]
 
 const navLinkClass = ({ isActive }) =>

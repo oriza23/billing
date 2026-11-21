@@ -23,13 +23,18 @@ const MAX_INFO = 500;
 const APP_NAME = (process.env.APP_NAME || 'Sistem Billing').slice(0, 60);
 
 // Field yang isinya rahasia: nilai ditulis sebagai "***".
-const SECRET_FIELDS = /(password|secret|api_key|private_key|token|pass|pin)/i;
+const SECRET_FIELDS = /(password|secret|api_key|private_key|preshared|ovpn_config|token|pass|pin)/i;
+
+// Endpoint yang responsnya berisi rahasia (keypair WireGuard) dan tidak perlu dicatat.
+const SKIP_PATHS = [/^\/api\/sistem\/vpn\/wg\/keygen$/i];
 
 // ---- Klasifikasi aksi & entitas -------------------------------------------
 // Aturan path diperiksa lebih dulu (mis. Anda menghapus lewat POST /delete), baru jatuh ke metode HTTP.
 const ACTION_BY_PATH = [
   { re: /^\/api\/auth\/login$/i, action: 'login' },
   { re: /^\/api\/sistem\/restart-service$/i, action: 'restart' },
+  // Simpan konfigurasi & connect/disconnect VPN dicatat sebagai perubahan koneksi VPN.
+  { re: /^\/api\/sistem\/vpn\/(?:save|action)$/i, action: 'edit' },
   // POST .../delete, /delete-massal, /hapus, /disconnect, /putus = hapus data.
   { re: /\/(?:delete|hapus)(?:$|[/-])/i, action: 'hapus' },
   { re: /\/(?:disconnect|putus)(?:$|[/-])/i, action: 'hapus' },
@@ -48,6 +53,7 @@ const ENTITY_BY_PATH = [
   [/^\/api\/wilayah/i, 'wilayah'],
   [/^\/api\/settings/i, 'pengaturan'],
   [/^\/api\/sistem\/restart-service$/i, 'layanan'],
+  [/^\/api\/sistem\/vpn/i, 'koneksi VPN'],
   [/^\/api\/acs/i, 'perangkat ACS'],
   [/^\/api\/pelanggan/i, 'pelanggan'],
   [/^\/api\/users/i, 'user'],
@@ -66,7 +72,7 @@ const ACTION_VERB = {
 // Kunci yang paling mungkin menjadi "nama objek" aksi, berurutan dari paling spesifik.
 const SUBJECT_KEYS = [
   'nolayanan', 'username', 'pelanggan', 'nama', 'nama_outlet', 'nama_router', 'nama_profile',
-  'kode_batch', 'nama_wilayah', 'deviceId', 'device_id', 'sn', 'email', 'service', 'id',
+  'kode_batch', 'nama_wilayah', 'deviceId', 'device_id', 'sn', 'email', 'service', 'protocol', 'id',
 ];
 
 const ACTION_LABEL = {
@@ -403,6 +409,9 @@ async function write(req, res, durationMs) {
 function activityLogger({ includeReads = false } = {}) {
   return function activityLog(req, res, next) {
     if (!includeReads && req.method === 'GET') {
+      return next();
+    }
+    if (SKIP_PATHS.some((re) => re.test(String(req.originalUrl || req.url || '').split('?')[0]))) {
       return next();
     }
     const started = Date.now();

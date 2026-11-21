@@ -158,6 +158,12 @@ $SUDO apt-get install -y \
   postgresql postgresql-contrib \
   build-essential
 
+# Paket VPN client untuk menu Sistem > Koneksi VPN (WireGuard / OpenVPN / SSTP ke MikroTik CHR).
+# Dipasang terpisah: bila satu paket tidak tersedia di repo, instalasi billing tetap lanjut.
+info "=== Paket VPN client: wireguard-tools, openvpn, sstp-client, ppp ==="
+$SUDO apt-get install -y wireguard-tools openvpn sstp-client ppp \
+  || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client ppp"
+
 if [[ "$USE_NGINX" == "1" ]]; then
   info "=== Nginx reverse proxy ==="
   $SUDO apt-get install -y nginx
@@ -388,17 +394,38 @@ $SUDO systemctl enable freeradius
 $SUDO systemctl restart freeradius
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
-# Root tidak perlu sudoers. User lain hanya boleh restart postgresql dan freeradius.
+# Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)
+# dan mengelola 3 unit VPN tetap (menu Koneksi VPN), semuanya tanpa wildcard.
 if [[ "$APP_USER" == "root" ]]; then
   info "Node berjalan sebagai root, /etc/sudoers.d/raniah-services tidak diperlukan."
 elif [[ ! "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
   warn "User ${APP_USER} tidak dipakai untuk sudoers restart."
 else
-  info "=== sudoers restart PostgreSQL & FreeRADIUS untuk ${APP_USER} ==="
+  info "=== Helper VPN (root-owned) ==="
+  $SUDO bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
+
+  info "=== sudoers layanan & VPN untuk ${APP_USER} ==="
+  VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp)
+  SUDO_CMDS=()
+  for SYSTEMCTL_BIN in /bin/systemctl /usr/bin/systemctl; do
+    SUDO_CMDS+=("${SYSTEMCTL_BIN} restart postgresql" "${SYSTEMCTL_BIN} restart freeradius")
+    for VPN_UNIT in "${VPN_UNITS[@]}"; do
+      SUDO_CMDS+=(
+        "${SYSTEMCTL_BIN} enable --now ${VPN_UNIT}"
+        "${SYSTEMCTL_BIN} restart ${VPN_UNIT}"
+        "${SYSTEMCTL_BIN} disable --now ${VPN_UNIT}"
+      )
+    done
+  done
+  SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
+  printf -v SUDO_LIST '%s, ' "${SUDO_CMDS[@]}"
+  SUDO_LIST="${SUDO_LIST%, }"
+
   SUDOERS_TMP=$(mktemp)
   cat > "$SUDOERS_TMP" <<EOF
-# RANIAH billing: restart layanan dari menu Pengaturan, tanpa password.
-${APP_USER} ALL=(root) NOPASSWD: /bin/systemctl restart postgresql, /usr/bin/systemctl restart postgresql, /bin/systemctl restart freeradius, /usr/bin/systemctl restart freeradius
+# RANIAH billing: restart layanan (Pengaturan) dan koneksi VPN (Sistem > Koneksi VPN), tanpa password.
+# Penulisan konfigurasi VPN hanya lewat helper root-owned yang memvalidasi ulang inputnya.
+${APP_USER} ALL=(root) NOPASSWD: ${SUDO_LIST}
 EOF
   $SUDO visudo -cf "$SUDOERS_TMP"
   $SUDO install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/raniah-services

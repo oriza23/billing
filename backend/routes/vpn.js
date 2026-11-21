@@ -143,12 +143,15 @@ router.post('/action', async (req, res) => {
     }
 
     const { profiles } = await vpn.loadProfiles(pool);
-    const { status } = await vpn.service.connect(protocol, profiles[protocol] || null);
+    const { status, log } = await vpn.service.connect(protocol, profiles[protocol] || null);
     await vpn.markSelected(pool, protocol);
     const connected = Boolean(status?.connected && status.protocol === protocol);
+    const diagnosis = connected ? null : vpn.diagnoseLog(log);
     let message;
     if (connected) {
       message = `VPN ${label} terhubung${status.ip ? ` (IP ${status.ip})` : ''}.`;
+    } else if (diagnosis) {
+      message = `VPN ${label} belum tersambung. Dugaan penyebab: ${diagnosis.text}`;
     } else if (status?.units?.[protocol] === 'failed') {
       message = `Layanan VPN ${label} gagal berjalan. Periksa konfigurasi dan log: journalctl -u ${vpnConfig.UNITS[protocol]} -n 30.`;
     } else {
@@ -164,6 +167,9 @@ router.post('/action', async (req, res) => {
       state: status?.state || 'disconnected',
       status,
       message,
+      diagnosis: diagnosis ? diagnosis.code : null,
+      // Baris terakhir journal unit (SSTP: 20); kosong bila sudah tersambung.
+      log: connected ? [] : (Array.isArray(log) ? log : []),
     });
   } catch (error) {
     return sendError(res, error, `Gagal ${action === 'connect' ? 'menghubungkan' : 'memutuskan'} VPN.`);

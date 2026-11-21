@@ -200,23 +200,45 @@ test('sstp: validasi, port default 443, route dinormalkan', () => {
   }
 });
 
+test('sstp: ignore_cert aktif default, hormati pilihan eksplisit dan profil tersimpan', () => {
+  const base = { server: 'chr.contoh.net', username: 'u', password: 'p' };
+  assert.equal(cfg.validateSstp(base).ignore_cert, true, 'profil baru: aktif');
+  assert.equal(cfg.validateSstp({ ...base, ignore_cert: false }).ignore_cert, false);
+  assert.equal(cfg.validateSstp({ ...base, ignore_cert: 'true' }).ignore_cert, true);
+  assert.equal(cfg.validateSstp(base, { password: 'p', ignore_cert: false }).ignore_cert, false, 'tanpa input: ikut profil tersimpan');
+});
+
 test('sstp: peer pppd, unit systemd, hook rute', () => {
   const out = cfg.validateSstp({
     server: 'chr.contoh.net:4443', username: 'vpn-user', password: 'p"a\\ss', routes: '10.10.99.0/24', ignore_cert: true,
   });
-  const peer = cfg.renderSstpPeer(out);
+  const peer = cfg.renderSstpPeer(out, '/usr/sbin/sstpc');
   assert.match(peer, /^name "vpn-user"$/m);
   assert.match(peer, /^password "p\\"a\\\\ss"$/m);
   assert.match(peer, /^ifname raniah-sstp$/m);
-  assert.match(peer, /^nodefaultroute$/m);
+  assert.match(peer, /^pty "\/usr\/sbin\/sstpc --log-stderr --log-level 2 --tls-ext --cert-warn --nolaunchpppd chr\.contoh\.net:4443"$/m);
+  assert.match(peer, /^nopersist$/m);
+  for (const flag of ['noauth', 'nodefaultroute', 'nobsdcomp', 'nodeflate', 'refuse-eap',
+    'lcp-echo-interval 10', 'lcp-echo-failure 3']) {
+    assert.match(peer, new RegExp(`^${flag}$`, 'm'), flag);
+  }
+  assert.doesNotMatch(peer, /^persist$/m, 'persist membuat pppd membuka ulang /dev/pts yang sudah ditutup');
+  assert.doesNotMatch(peer, /maxfail/);
+  assert.doesNotMatch(peer, /^lock$/m);
+  assert.doesNotMatch(peer, /require-mschap-v2/, 'tidak memaksa satu metode auth: CHR bawaan boleh mschap2/chap/pap');
+  assert.doesNotMatch(peer, /^noccp$/m, 'MPPE harus tetap bisa dinegosiasikan');
   assert.doesNotMatch(peer, /usepeerdns/);
   assert.doesNotMatch(peer, /^defaultroute$/m);
 
-  const unit = cfg.renderSstpUnit(out, '/usr/sbin/sstpc');
-  assert.match(unit, /^ExecStart=\/usr\/sbin\/sstpc --log-stderr --cert-warn chr\.contoh\.net:4443 call raniah-sstp$/m);
+  const unit = cfg.renderSstpUnit(out, '/usr/sbin/pppd');
+  assert.match(unit, /^ExecStart=\/usr\/sbin\/pppd call raniah-sstp nodetach$/m);
+  assert.match(unit, /^ExecStartPre=.*test -c \/dev\/ppp.*\/dev\/ppp tidak ada/m);
   assert.match(unit, /^Restart=always$/m);
-  assert.doesNotMatch(unit, /vpn-user|p"a/, 'kredensial tidak boleh ada di unit');
-  assert.doesNotMatch(cfg.renderSstpUnit({ ...out, ignore_cert: false }), /--cert-warn/);
+  assert.match(unit, /^RestartSec=5$/m);
+  assert.doesNotMatch(unit, /sstpc|chr\.contoh|vpn-user|p"a/, 'unit hanya menjalankan pppd; sstpc dan kredensial ada di peer');
+  const strictPeer = cfg.renderSstpPeer({ ...out, ignore_cert: false }, '/usr/sbin/sstpc');
+  assert.doesNotMatch(strictPeer, /--cert-warn/);
+  assert.match(strictPeer, /--tls-ext --nolaunchpppd/, '--tls-ext selalu ada untuk RouterOS v7');
 
   assert.equal(cfg.renderSstpRoutes(out), '10.10.99.0/24\n');
   assert.match(cfg.renderSstpHook(), /\[ "\$PPP_IFACE" = "raniah-sstp" \] \|\| exit 0/);
@@ -316,7 +338,7 @@ test('publicProfiles tidak membocorkan rahasia', () => {
 // ---------------------------------------------------------------------------
 // Service: status + aksi dengan perintah palsu
 // ---------------------------------------------------------------------------
-function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null } = {}) {
+function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null, journal = null } = {}) {
   const calls = [];
   const state = { active: { ...active }, enabled: { ...enabled } };
   const unitOf = (name) => Object.entries(cfg.UNITS).find(([, unit]) => unit === name)?.[0];
@@ -346,6 +368,9 @@ function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null
       return found ? ok(`2: ${iface}    inet ${found} scope global ${iface}\n`) : { ok: false, code: 1, stdout: '', stderr: 'no dev' };
     }
     if (bin === 'ip' && full.includes('route')) return ok(routes);
+    if (bin === 'journalctl') {
+      return journal === null ? { ok: false, code: 1, stdout: '', stderr: 'denied' } : ok(journal);
+    }
     if (bin === 'wg') return wg ? ok(wg) : { ok: false, code: 1, stdout: '', stderr: 'denied' };
     return { ok: false, code: 127, stdout: '', stderr: 'unknown' };
   }
@@ -545,6 +570,51 @@ test('connect: tolak tanpa konfigurasi tersimpan / paket belum terpasang / proto
   );
 });
 
+test('connect sstp: /dev/ppp tidak ada -> 503 berisi petunjuk LXC, unit dimatikan, tidak di-enable', async () => {
+  const system = fakeSystem({ active: { sstp: 'active' }, enabled: { sstp: true } });
+  const noPpp = (file) => file !== '/dev/ppp';
+  const { service, applied } = serviceWith(system, { existsSync: noPpp });
+  await assert.rejects(
+    () => service.connect('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' })),
+    (error) => error.status === 503 && /\/dev\/ppp/.test(error.message) && /lxc\.cgroup2\.devices\.allow/.test(error.message) && /ppp_async/.test(error.message) && /Privileged/.test(error.message),
+  );
+  assert.ok(system.calls.includes('systemctl disable --now raniah-sstp'), 'unit yang berulang-gagal harus dihentikan');
+  assert.equal(system.calls.some((call) => call.includes('enable --now raniah-sstp')), false);
+  assert.deepEqual(applied, [], 'konfigurasi tidak ditulis bila device tidak ada');
+});
+
+test('connect sstp: belum dapat IP -> kembalikan 20 baris terakhir journalctl (sudo bila bukan root)', async () => {
+  const journal = [
+    '-- Journal begins --',
+    ...Array.from({ length: 24 }, (_, i) => `Nov 21 17:00:${String(i).padStart(2, '0')} Bil sstpc[1]: baris ${i}`),
+    'Nov 21 17:00:59 Bil pppd[2]: peer password=rahasia123 ditolak',
+    '',
+  ].join('\n');
+  const system = fakeSystem({ journal });
+  const { service } = serviceWith(system, { isRoot: false });
+  const result = await service.connect('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' }));
+  assert.equal(result.status.connected, false);
+  assert.equal(result.log.length, 20);
+  assert.match(result.log[0], /baris 5/, 'baris awal sstpc ikut, tidak hanya Exit pppd');
+  assert.match(result.log[19], /password=\*\*\*/);
+  assert.doesNotMatch(result.log.join('\n'), /rahasia123/);
+  assert.ok(system.calls.includes('sudo -n journalctl -u raniah-sstp -n 20 --no-pager'), system.calls.join('\n'));
+});
+
+test('connect: log kosong bila tersambung, dan journalctl yang ditolak tidak menggagalkan respons', async () => {
+  const ok = fakeSystem({
+    ip: { 'raniah-sstp': '172.16.0.5 peer 172.16.0.1/32' }, journal: 'tidak dipakai\n',
+  });
+  const connected = await serviceWith(ok).service.connect('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' }));
+  assert.equal(connected.status.connected, true);
+  assert.deepEqual(connected.log, []);
+  assert.equal(ok.calls.some((call) => call.includes('journalctl')), false);
+
+  const denied = await serviceWith(fakeSystem({ journal: null }), { isRoot: false })
+    .service.connect('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' }));
+  assert.deepEqual(denied.log, []);
+});
+
 test('connect: sudoers belum dipasang -> pesan jelas, bukan hang', async () => {
   const system = fakeSystem();
   const denyingRun = async (file, args) => {
@@ -674,4 +744,98 @@ test('route: administrator bisa keygen; input aksi/protokol divalidasi', async (
     assert.equal((await call('POST', '/action', 'admin', { protocol: 'wireguard', action: 'restart' })).status, 400);
     assert.equal((await call('POST', '/save', 'admin', { protocol: '../etc', config: {} })).status, 400);
   });
+});
+
+test('diagnoseLog: mengenali penyebab dari log unit', () => {
+  const { diagnoseLog } = require('../backend/vpn');
+  assert.equal(diagnoseLog([]), null);
+  assert.equal(diagnoseLog(['pppd: Couldn\'t open the /dev/ppp device: No such file or directory']).code, 'device');
+  assert.equal(diagnoseLog([
+    'SSL certificate verification failed: self-signed certificate (18)',
+    'Server certificated failed verification, ignoring',
+    'pppd: Couldn\'t set tty to PPP discipline: Operation not permitted',
+  ]).code, 'discipline');
+  assert.equal(diagnoseLog(['sstpc: Could not connect to server: Connection refused']).code, 'network');
+  assert.equal(diagnoseLog(['pppd: Connection terminated.', 'CHAP authentication failed']).code, 'auth');
+  assert.equal(diagnoseLog(['SSL_connect: handshake failure']).code, 'tls');
+  assert.equal(diagnoseLog(['SSL certificate verification failed: self-signed certificate']).code, 'certificate');
+  // Mode --cert-warn: sertifikat diabaikan, bukan penyebab kegagalan.
+  assert.equal(diagnoseLog(['SSL certificate verification failed: self-signed certificate', 'Server certificated failed verification, ignoring']), null);
+});
+
+test('monitoring: RX/TX dibaca dari /sys/class/net/<iface> untuk OpenVPN dan SSTP, bukan hanya WireGuard', async () => {
+  const cases = [
+    ['openvpn', 'raniah-ovpn', '10.8.0.6/24'],
+    ['sstp', 'raniah-sstp', '172.16.0.5 peer 172.16.0.1/32'],
+  ];
+  for (const [protocol, iface, addr] of cases) {
+    const reads = [];
+    const system = fakeSystem({ active: { [protocol]: 'active' }, ip: { [iface]: addr } });
+    const { service } = serviceWith(system, {
+      readText: (file) => {
+        reads.push(file);
+        if (file === '/proc/uptime') return '9000.5 100\n';
+        if (file.endsWith('/rx_bytes')) return '2048\n';
+        if (file.endsWith('/tx_bytes')) return '4096\n';
+        return '';
+      },
+    });
+    const status = await service.getStatus();
+    assert.equal(status.state, 'connected', protocol);
+    assert.equal(status.interface, iface);
+    assert.ok(reads.includes(`/sys/class/net/${iface}/statistics/rx_bytes`), reads.join('\n'));
+    assert.ok(reads.includes(`/sys/class/net/${iface}/statistics/tx_bytes`), reads.join('\n'));
+    assert.equal(status.traffic.rx_bytes, 2048);
+    assert.equal(status.traffic.tx_bytes, 4096);
+    assert.equal(status.traffic.rx, '2.00 KiB');
+  }
+});
+
+test('monitoring: dual ping OpenVPN/SSTP memakai remote/server profil dan gateway .1 dari IP interface', async () => {
+  const pinged = [];
+  const service = createVpnService({
+    isRoot: true,
+    existsSync: () => true,
+    run: async (file, args) => {
+      if (file === 'ping') {
+        pinged.push(args[args.length - 1]);
+        return { ok: true, code: 0, stdout: 'time=12.5 ms\n', stderr: '' };
+      }
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    },
+  });
+  const ovpn = await service.measurePing('openvpn', { ovpn_config: 'client\nremote vpn.chr.local 1194\n' }, '10.8.0.6');
+  assert.deepEqual([ovpn.public.target, ovpn.tunnel.target], ['vpn.chr.local', '10.8.0.1']);
+  const sstp = await service.measurePing('sstp', { server: '103.195.65.78:9921' }, '10.210.0.7');
+  assert.deepEqual([sstp.public.target, sstp.tunnel.target], ['103.195.65.78', '10.210.0.1']);
+  assert.equal(sstp.tunnel.status, 'ok');
+  assert.deepEqual(pinged.sort(), ['10.210.0.1', '10.8.0.1', '103.195.65.78', 'vpn.chr.local'].sort());
+});
+
+test('openvpn: /dev/net/tun tidak ada -> status memberi peringatan dan connect 503 berisi perintah passthrough LXC', async () => {
+  const noTun = (file) => file !== '/dev/net/tun';
+  const system = fakeSystem({ active: { openvpn: 'active' }, enabled: { openvpn: true } });
+  const { service, applied } = serviceWith(system, { existsSync: noTun });
+
+  const status = await service.getStatus();
+  assert.equal(status.tools.openvpn.device_missing, '/dev/net/tun');
+  assert.match(status.tools.openvpn.device_hint, /lxc\.cgroup2\.devices\.allow: c 10:200 rwm/);
+  assert.match(status.tools.openvpn.device_hint, /lxc\.mount\.entry: \/dev\/net\/tun dev\/net\/tun none bind,create=file/);
+  assert.equal(status.tools.sstp.device_missing, null, '/dev/ppp ada pada existsSync palsu ini');
+  assert.equal(status.tools.wireguard.device_missing, null);
+
+  await assert.rejects(
+    () => service.connect('openvpn', cfg.validateOpenvpn({ ovpn_config: 'client\nremote a.b 1194\n' })),
+    (error) => error.status === 503
+      && /\/dev\/net\/tun/.test(error.message)
+      && /lxc\.cgroup2\.devices\.allow: c 10:200 rwm/.test(error.message)
+      && /lxc\.mount\.entry: \/dev\/net\/tun dev\/net\/tun none bind,create=file/.test(error.message),
+  );
+  assert.ok(system.calls.includes('systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.deepEqual(applied, []);
+
+  // Device ada: tidak ada peringatan.
+  const ok = await serviceWith(fakeSystem(), { existsSync: () => true }).service.getStatus();
+  assert.equal(ok.tools.openvpn.device_missing, null);
+  assert.equal(ok.tools.openvpn.device_hint, null);
 });

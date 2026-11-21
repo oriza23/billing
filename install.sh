@@ -418,6 +418,13 @@ else
     done
   done
   SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
+  # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP 20 baris
+  # supaya pesan TLS/sertifikat/auth sstpc tidak terpotong baris Exit pppd.
+  for VPN_UNIT in "${VPN_UNITS[@]}"; do
+    LOG_N=10
+    [[ "$VPN_UNIT" == "raniah-sstp" ]] && LOG_N=20
+    SUDO_CMDS+=("/usr/bin/journalctl -u ${VPN_UNIT} -n ${LOG_N} --no-pager")
+  done
   printf -v SUDO_LIST '%s, ' "${SUDO_CMDS[@]}"
   SUDO_LIST="${SUDO_LIST%, }"
 
@@ -459,4 +466,34 @@ else
 fi
 echo -e "${GREEN}RADIUS   : secret = (input Anda) · set sama di MikroTik${NC}"
 echo
+
+# Catatan Koneksi VPN di kontainer (LXC/Proxmox). Hanya informasi, tidak menggagalkan instalasi.
+# WireGuard langsung jalan. OpenVPN butuh /dev/net/tun. SSTP butuh /dev/ppp, modul
+# ppp_generic + ppp_async, dan kontainer Privileged. `|| true` karena
+# systemd-detect-virt keluar 1 di server fisik/VPS.
+CONTAINER_TYPE="$(systemd-detect-virt -c 2>/dev/null || true)"
+if [[ -n "$CONTAINER_TYPE" && "$CONTAINER_TYPE" != "none" ]]; then
+  echo -e "${CYAN}Catatan: terdeteksi kontainer (${CONTAINER_TYPE}). Menu Sistem > Koneksi VPN:${NC}"
+  echo "  WireGuard : langsung jalan di Unprivileged maupun Privileged, tanpa device tambahan."
+  echo "  OpenVPN   : Unprivileged maupun Privileged, wajib passthrough /dev/net/tun."
+  echo "  SSTP      : wajib modul ppp_generic + ppp_async, passthrough /dev/ppp, dan kontainer Privileged"
+  echo "              (unprivileged: 0). Tanpa itu pppd gagal: Couldn't set tty to PPP discipline: Operation not permitted."
+  echo "              Kontainer Unprivileged yang sudah ada: Backup & Restore, hilangkan centang Unprivileged container."
+  echo "  Di host Proxmox:"
+  echo "    modprobe ppp_generic && modprobe ppp_async"
+  echo "    printf 'ppp_generic\\nppp_async\\n' > /etc/modules-load.d/ppp.conf && chmod 666 /dev/ppp"
+  VPN_DEV_NOTES=()
+  [[ -c /dev/ppp ]] || VPN_DEV_NOTES+=("  SSTP    : /dev/ppp belum ada. Tambahkan ke /etc/pve/lxc/<CTID>.conf:
+              lxc.cgroup2.devices.allow: c 108:0 rwm
+              lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file")
+  [[ -c /dev/net/tun ]] || VPN_DEV_NOTES+=("  OpenVPN : /dev/net/tun belum ada. Tambahkan ke /etc/pve/lxc/<CTID>.conf:
+              lxc.cgroup2.devices.allow: c 10:200 rwm
+              lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file")
+  if (( ${#VPN_DEV_NOTES[@]} > 0 )); then
+    echo "  Device yang belum ada di kontainer ini (lalu pct reboot <CTID>):"
+    printf '%s\n' "${VPN_DEV_NOTES[@]}"
+  fi
+  echo "  Detail: ${APP_DIR}/README.md (Catatan Pengguna Proxmox LXC)."
+  echo
+fi
 echo "Dokumentasi: ${APP_DIR}/README.md"

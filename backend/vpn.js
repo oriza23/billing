@@ -35,6 +35,23 @@ const PACKAGES = {
   sstp: 'sstp-client ppp',
 };
 const LABELS = { wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP' };
+// Detik menunggu interface mendapat IP sebelum log unit diambil dan dikirim ke UI.
+const CONNECT_WAIT_SECONDS = { wireguard: 8, sstp: 8, openvpn: 15 };
+// SSTP butuh lebih banyak baris: pesan TLS/sertifikat/auth sstpc ada di atas
+// baris "Exit" pppd, jadi 10 baris sering memotong penyebab aslinya.
+const LOG_LINES = { wireguard: 10, openvpn: 10, sstp: 20 };
+const LOG_LINE_MAX = 300;
+// Device yang harus ada di OS. Di kontainer LXC/Proxmox keduanya harus diteruskan dari host.
+const REQUIRED_DEVICES = {
+  sstp: {
+    path: '/dev/ppp',
+    hint: 'SSTP butuh /dev/ppp. Di host Proxmox jalankan "modprobe ppp_generic", "modprobe ppp_async", dan "chmod 666 /dev/ppp", lalu tambahkan ke /etc/pve/lxc/<CTID>.conf: "lxc.cgroup2.devices.allow: c 108:0 rwm" dan "lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file". Kontainer harus Privileged (unprivileged: 0). Jika masih Unprivileged, Backup & Restore tanpa centang Unprivileged container, lalu "pct reboot <CTID>".',
+  },
+  openvpn: {
+    path: '/dev/net/tun',
+    hint: 'OpenVPN butuh /dev/net/tun, tetapi device ini tidak ada di server (umum pada kontainer LXC/Proxmox). Di host Proxmox tambahkan ke /etc/pve/lxc/<CTID>.conf: "lxc.cgroup2.devices.allow: c 10:200 rwm" dan "lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file", lalu restart kontainer.',
+  },
+};
 
 function httpError(status, message) {
   const error = new Error(message);
@@ -216,6 +233,54 @@ function presentTraffic(traffic) {
   };
 }
 
+// Journal bisa memuat karakter kontrol dan, jarang, kredensial. Bersihkan sebelum dikirim ke browser.
+function logLineCount(protocol) {
+  return LOG_LINES[protocol] || 10;
+}
+
+function sanitizeLog(output, max = 20) {
+  return String(output || '')
+    .split('\n')
+    // eslint-disable-next-line no-control-regex
+    .map((line) => line.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trimEnd())
+    .filter((line) => line.trim() !== '' && !/^-- (Logs begin|No entries|Journal)/i.test(line.trim()))
+    .map((line) => line
+      .replace(/\b(password|passwd|secret|private[_-]?key|preshared[_-]?key)(\s*[=:]\s*)\S+/gi, '$1$2***')
+      .slice(0, LOG_LINE_MAX))
+    .slice(-max);
+}
+
+// Tebak penyebab dari log unit: device, port/jaringan, handshake TLS, sertifikat, atau kredensial.
+// Urutan penting: pesan "certificate ... ignoring" (mode --cert-warn) bukan kegagalan.
+function diagnoseLog(lines) {
+  const text = (Array.isArray(lines) ? lines : []).join('\n');
+  if (!text) {
+    return null;
+  }
+  if (/\/dev\/ppp|\/dev\/net\/tun/i.test(text)) {
+    return { code: 'device', text: 'Device PPP/TUN tidak tersedia di server (kontainer LXC/Proxmox: teruskan device dari host).' };
+  }
+  if (/set tty to PPP discipline|TIOCSETD/i.test(text)) {
+    return {
+      code: 'discipline',
+      text: 'Kernel menolak line discipline PPP (Couldn\'t set tty to PPP discipline: Operation not permitted). Di host muat modul ppp_generic dan ppp_async. Kontainer LXC harus Privileged (unprivileged: 0); yang masih Unprivileged diubah lewat Backup & Restore di Proxmox (hilangkan centang Unprivileged container), lalu pct reboot <CTID>.',
+    };
+  }
+  if (/connection refused|timed out|timeout|could not connect|unable to connect|no route to host|network is unreachable|could not resolve|name or service not known|getaddrinfo|temporary failure in name resolution/i.test(text)) {
+    return { code: 'network', text: 'Server CHR tidak terjangkau. Periksa IP/domain, port (SSTP bawaan 443), service SSTP server aktif di CHR, dan firewall.' };
+  }
+  if (/authentication failed|authentication failure|peer refused to authenticate|chap authentication failed|mschap.*(fail|error)|auth.*(rejected|denied)|access-reject/i.test(text)) {
+    return { code: 'auth', text: 'Username/password ditolak CHR. Periksa /ppp secret (service=sstp atau any) dan profilnya.' };
+  }
+  if (/ssl_connect|handshake|ssl error|unsupported protocol|wrong version number|alert (handshake|protocol)/i.test(text)) {
+    return { code: 'tls', text: 'Handshake TLS gagal. Pastikan port itu memang SSTP server CHR dan versi TLS di CHR didukung.' };
+  }
+  if (/certificate.*(fail|error|verif)|verify failed|self[- ]signed/i.test(text) && !/ignoring/i.test(text)) {
+    return { code: 'certificate', text: 'Sertifikat TLS CHR ditolak. Centang "Abaikan validasi sertifikat" (--cert-warn) bila CHR memakai sertifikat self-signed.' };
+  }
+  return null;
+}
+
 function createVpnService(overrides = {}) {
   const isRoot = overrides.isRoot ?? IS_ROOT;
   const run = overrides.run || defaultRun;
@@ -256,11 +321,15 @@ function createVpnService(overrides = {}) {
     const tools = {};
     for (const protocol of PROTOCOLS) {
       const missing = REQUIRED_TOOLS[protocol].filter((name) => !findBinary(name));
+      const device = REQUIRED_DEVICES[protocol];
       tools[protocol] = {
         installed: missing.length === 0,
         missing,
         package: PACKAGES[protocol],
         hint: missing.length ? `apt install -y ${PACKAGES[protocol]}` : null,
+        // Device OS yang wajib ada (mis. /dev/ppp untuk SSTP); kosong = aman.
+        device_missing: device && !existsSync(device.path) ? device.path : null,
+        device_hint: device && !existsSync(device.path) ? device.hint : null,
       };
     }
     return tools;
@@ -463,6 +532,30 @@ function createVpnService(overrides = {}) {
     }
   }
 
+  // Tanpa device ini pppd/openvpn gagal seketika dan systemd memulai ulang tanpa henti.
+  // Hentikan unit yang terlanjur menyala supaya tidak membanjiri journal.
+  async function ensureDevices(protocol) {
+    const need = REQUIRED_DEVICES[protocol];
+    if (!need || existsSync(need.path)) {
+      return;
+    }
+    await systemctlPriv(['disable', '--now', UNITS[protocol]]).catch(() => {});
+    throw httpError(503, need.hint);
+  }
+
+  // Baris terakhir journal unit, untuk ditampilkan di UI saat koneksi belum tersambung.
+  async function readUnitLog(protocol, lines = logLineCount(protocol)) {
+    try {
+      const result = await runPriv('journalctl', ['-u', UNITS[protocol], '-n', String(lines), '--no-pager'], { timeout: 8000 });
+      if (!result || !result.ok) {
+        return [];
+      }
+      return sanitizeLog(result.stdout, lines);
+    } catch {
+      return [];
+    }
+  }
+
   // Satu operasi VPN pada satu waktu, supaya connect/disconnect tidak saling menimpa.
   async function exclusive(task) {
     if (busy) {
@@ -511,6 +604,7 @@ function createVpnService(overrides = {}) {
     }
     ensureTools(protocol);
     return exclusive(async () => {
+      await ensureDevices(protocol);
       await applyConfig(protocol, cfg);
       await stopOthers(protocol);
       const unit = UNITS[protocol];
@@ -520,7 +614,7 @@ function createVpnService(overrides = {}) {
         await systemctlPriv(['restart', unit]);
       }
 
-      const attempts = protocol === 'wireguard' ? 8 : 20;
+      const attempts = CONNECT_WAIT_SECONDS[protocol] || 8;
       let status = null;
       for (let i = 0; i < attempts; i += 1) {
         // eslint-disable-next-line no-await-in-loop
@@ -540,7 +634,10 @@ function createVpnService(overrides = {}) {
           break;
         }
       }
-      return { status, protocol };
+      const connected = Boolean(status && status.protocol === protocol && status.connected);
+      // Belum tersambung: sertakan log asli unit supaya penyebabnya (sertifikat, port, kredensial) terlihat.
+      const log = connected ? [] : await readUnitLog(protocol);
+      return { status, protocol, log };
     });
   }
 
@@ -683,6 +780,9 @@ module.exports = {
   parsePingMs,
   presentTraffic,
   emptyPing,
+  logLineCount,
+  sanitizeLog,
+  diagnoseLog,
   ensureTable,
   loadProfiles,
   saveProfile,

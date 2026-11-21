@@ -35,6 +35,7 @@ const PATHS = {
   sstpUnit: '/etc/systemd/system/raniah-sstp.service',
 };
 const SSTPC_CANDIDATES = ['/usr/sbin/sstpc', '/usr/bin/sstpc', '/usr/local/sbin/sstpc', '/usr/local/bin/sstpc'];
+const PPPD_CANDIDATES = ['/usr/sbin/pppd', '/usr/bin/pppd', '/usr/local/sbin/pppd'];
 
 // Prefix terkecil yang boleh dirutekan lewat tunnel. /0../7 ditolak karena bisa menelan
 // default route server (SSH/web ikut putus), termasuk trik 0.0.0.0/1 + 128.0.0.0/1.
@@ -575,7 +576,13 @@ function validateSstp(input = {}, existing = null) {
   }
   const routes = parseRouteList(input.routes, { field: 'routes', label: 'Subnet Route NAS', required: false });
   assertNotRoutingEndpoint(server.ip, routes, { field: 'routes', label: 'Subnet Route NAS' });
-  const ignore = input.ignore_cert === true || input.ignore_cert === 'true' || input.ignore_cert === 1;
+  // --cert-warn aktif secara default: sertifikat bawaan CHR umumnya self-signed.
+  let ignore = true;
+  if (input.ignore_cert !== undefined && input.ignore_cert !== null) {
+    ignore = input.ignore_cert === true || input.ignore_cert === 'true' || input.ignore_cert === 1;
+  } else if (existing && typeof existing.ignore_cert === 'boolean') {
+    ignore = existing.ignore_cert;
+  }
   return {
     server: `${server.host}:${server.port}`,
     username,
@@ -589,9 +596,17 @@ function pppQuote(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
-function renderSstpPeer(cfg) {
+function renderSstpPeer(cfg, sstpc = SSTPC_CANDIDATES[0]) {
+  // pppd membuka pty dan menjalankan sstpc di atasnya (--nolaunchpppd: sstpc tidak
+  // memanggil pppd lagi). stderr sstpc tetap ke journal, bukan ke pty.
+  const certFlag = cfg.ignore_cert ? ' --cert-warn' : '';
+  const pty = `${sstpc} --log-stderr --log-level 2 --tls-ext${certFlag} --nolaunchpppd ${cfg.server}`;
   return [
     HEADER,
+    // nopersist: pppd keluar saat putus. systemd (Restart=always) yang menyambung ulang.
+    // persist membuat pppd membuka ulang /dev/pts yang sudah ditutup sstpc
+    // ("Device or resource busy") dan menimpa pesan TLS/sertifikat/auth yang asli.
+    `pty ${pppQuote(pty)}`,
     `name ${pppQuote(cfg.username)}`,
     `password ${pppQuote(cfg.password)}`,
     'remotename raniah-sstp',
@@ -599,15 +614,19 @@ function renderSstpPeer(cfg) {
     'ipparam raniah-sstp',
     `ifname ${INTERFACES.sstp}`,
     'noauth',
+    // Tanpa require-mschap-v2: CHR dengan profil bawaan menawarkan mschap2/chap/pap, pppd
+    // memilih yang cocok. EAP ditolak karena SSTP MikroTik tidak memakainya.
     'refuse-eap',
-    'require-mschap-v2',
-    'noccp',
+    // MPPE (bila profil CHR mewajibkannya) tetap bisa dinegosiasikan lewat CCP.
+    'nobsdcomp',
+    'nodeflate',
     'noipdefault',
     'nodefaultroute',
+    'nopersist',
     'mtu 1400',
     'mru 1400',
-    'lcp-echo-interval 30',
-    'lcp-echo-failure 4',
+    'lcp-echo-interval 10',
+    'lcp-echo-failure 3',
     '',
   ].join('\n');
 }
@@ -616,8 +635,17 @@ function resolveSstpc(existsSync = fs.existsSync) {
   return SSTPC_CANDIDATES.find((candidate) => existsSync(candidate)) || SSTPC_CANDIDATES[0];
 }
 
-function renderSstpUnit(cfg, sstpc = SSTPC_CANDIDATES[0]) {
-  const certFlag = cfg.ignore_cert ? ' --cert-warn' : '';
+function resolvePppd(existsSync = fs.existsSync) {
+  return PPPD_CANDIDATES.find((candidate) => existsSync(candidate)) || PPPD_CANDIDATES[0];
+}
+
+// Pesan ini muncul di journalctl bila /dev/ppp tidak ada (umum di kontainer LXC/Proxmox).
+const SSTP_NO_PPP_MESSAGE = '/dev/ppp tidak ada. Pada kontainer LXC/Proxmox teruskan device ppp dari host ke kontainer.';
+
+function renderSstpUnit(cfg, pppd = PPPD_CANDIDATES[0]) {
+  // pppd proses utama, tetap di foreground (nodetach). sstpc ada di opsi pty peer file.
+  // cfg tetap dipakai pemanggil; server dan kredensial hanya ada di peer, bukan di unit.
+  void cfg;
   return [
     '[Unit]',
     'Description=RANIAH Billing - SSTP VPN client ke MikroTik CHR',
@@ -626,7 +654,8 @@ function renderSstpUnit(cfg, sstpc = SSTPC_CANDIDATES[0]) {
     '',
     '[Service]',
     'Type=simple',
-    `ExecStart=${sstpc} --log-stderr${certFlag} ${cfg.server} call raniah-sstp`,
+    `ExecStartPre=/bin/sh -c 'test -c /dev/ppp || { echo "${SSTP_NO_PPP_MESSAGE}" >&2; exit 1; }'`,
+    `ExecStart=${pppd} call raniah-sstp nodetach`,
     'Restart=always',
     'RestartSec=5',
     '',
@@ -709,10 +738,10 @@ function applyToDisk(protocol, cfg, { root = '', exec = execFileSync, existsSync
     }
     put(PATHS.ovpn, conf, 0o600);
   } else if (protocol === 'sstp') {
-    put(PATHS.sstpPeer, renderSstpPeer(cfg), 0o600);
+    put(PATHS.sstpPeer, renderSstpPeer(cfg, resolveSstpc(existsSync)), 0o600);
     put(PATHS.sstpRoutes, renderSstpRoutes(cfg), 0o644);
     put(PATHS.sstpHook, renderSstpHook(), 0o755);
-    put(PATHS.sstpUnit, renderSstpUnit(cfg, resolveSstpc(existsSync)), 0o644);
+    put(PATHS.sstpUnit, renderSstpUnit(cfg, resolvePppd(existsSync)), 0o644);
     if (!root) {
       exec('systemctl', ['daemon-reload'], { timeout: 15000 });
     }

@@ -315,6 +315,73 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 3. Jika memakai installer, cek proses dengan `pm2 ls`. Pada development, jalankan `npm start` di terminal.
 4. Backup rutin `pg_dump` dan file `.env`.
 
+### Koneksi VPN ke MikroTik CHR (Sistem → Koneksi VPN)
+
+Server billing dapat menjadi VPN client ke MikroTik CHR (ROS v7) lewat **WireGuard**, **OpenVPN**, atau **SSTP**. Satu protokol aktif pada satu waktu. Installer memasang `wireguard-tools`, `openvpn`, `sstp-client`, dan `ppp`.
+
+| Protokol | Interface | Kebutuhan OS |
+|----------|-----------|--------------|
+| WireGuard | `wg-billing` | Modul kernel `wireguard` (tidak butuh device tambahan) |
+| OpenVPN | `raniah-ovpn` | `/dev/net/tun` |
+| SSTP | `raniah-sstp` | `/dev/ppp` (di LXC: modul `ppp_async` dan kontainer Privileged) |
+
+Kartu **Status Koneksi** menampilkan RX/TX real-time (dari `/sys/class/net/<iface>/statistics`) serta dua ping dinamis: ke endpoint publik CHR dan ke gateway tunnel (`.1`). Semuanya berlaku sama untuk ketiga protokol. Bila koneksi belum tersambung, baris terakhir `journalctl` unit ditampilkan di UI (SSTP: 20 baris) beserta dugaan penyebabnya (sertifikat, port, atau kredensial). Restart backend dengan `systemctl restart billing`, bukan `node server.js` manual.
+
+#### Catatan Pengguna Proxmox LXC
+
+Di server fisik dan VPS, `/dev/ppp` dan `/dev/net/tun` biasanya sudah ada. Di kontainer LXC Proxmox keduanya tidak ada sampai diteruskan dari host. Perintah di bawah dijalankan di **host Proxmox**, kecuali verifikasi `ls` yang dijalankan di dalam kontainer. Ganti `<CTID>` dengan ID kontainer (`pct list`).
+
+| Protokol | Unprivileged | Privileged | Yang wajib di host |
+|----------|--------------|------------|--------------------|
+| WireGuard | Langsung jalan | Langsung jalan | Tidak ada device tambahan |
+| OpenVPN | Jalan | Jalan | Passthrough `/dev/net/tun` |
+| SSTP | Tidak cukup | Wajib (`unprivileged: 0`) | Modul `ppp_generic` + `ppp_async`, dan passthrough `/dev/ppp` |
+
+Tanpa kontainer Privileged, SSTP tetap gagal meskipun `/dev/ppp` sudah ada: `pppd: Couldn't set tty to PPP discipline: Operation not permitted`.
+
+**Langkah 1 — Modul PPP permanen di host**
+
+```bash
+modprobe ppp_generic
+modprobe ppp_async
+printf "ppp_generic\nppp_async\n" > /etc/modules-load.d/ppp.conf
+chmod 666 /dev/ppp
+```
+
+**Langkah 2 — Passthrough device di `/etc/pve/lxc/<CTID>.conf`**
+
+```ini
+# Untuk SSTP (/dev/ppp)
+lxc.cgroup2.devices.allow: c 108:0 rwm
+lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file
+
+# Untuk OpenVPN (/dev/net/tun)
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+```
+
+**Langkah 3 — Kontainer Privileged (khusus SSTP)**
+
+SSTP butuh kontainer **Privileged**. OpenVPN dan WireGuard tidak. Jika kontainer dibuat sebagai Unprivileged, Proxmox tidak mengizinkan mengganti tipe itu pada kontainer yang sedang berjalan. Buat ulang lewat **Backup & Restore**: backup kontainer, restore, dan hilangkan centang **Unprivileged container**. Hasilnya `unprivileged: 0` di `/etc/pve/lxc/<CTID>.conf`.
+
+**Langkah 4 — Restart dan verifikasi**
+
+Di host:
+
+```bash
+pct reboot <CTID>
+```
+
+Di dalam kontainer, setelah kontainer naik:
+
+```bash
+ls -l /dev/ppp /dev/net/tun
+```
+
+Keduanya harus tampil sebagai character device. Menu **Sistem → Koneksi VPN** menampilkan peringatan kuning dan menolak menghubungkan bila device yang dibutuhkan belum ada.
+
+`install.sh` mendeteksi kontainer (`systemd-detect-virt -c`) dan menampilkan ringkasan ini di akhir instalasi, tanpa menggagalkan instalasi.
+
 ### Winbox — MikroTik → RADIUS
 
 1. **Radius** → **+**

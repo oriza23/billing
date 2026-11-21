@@ -22,7 +22,7 @@ const EMPTY_FORMS = {
     endpoint: '', server_public_key: '', private_key: '', preshared_key: '', address: '', allowed_ips: '', keepalive: '25', mtu: '', clear_preshared_key: false,
   },
   openvpn: { ovpn_config: '', username: '', password: '' },
-  sstp: { server: '', username: '', password: '', routes: '', ignore_cert: false },
+  sstp: { server: '', username: '', password: '', routes: '', ignore_cert: true },
 }
 
 const CARD = 'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900'
@@ -67,6 +67,22 @@ function formatDuration(seconds) {
 function formatAge(seconds) {
   if (seconds === null || seconds === undefined) return 'Belum ada handshake'
   return `${formatDuration(seconds)} lalu`
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function logHtml(message, lines) {
+  const body = lines.map(escapeHtml).join('\n')
+  return `<div style="text-align:left"><p style="margin:0 0 8px">${escapeHtml(message)}</p>`
+    + `<p style="margin:0 0 4px;font-size:12px;font-weight:700">Log layanan (${lines.length} baris terakhir):</p>`
+    + `<pre style="margin:0;max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-all;background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px;font-size:11px;line-height:1.45">${body}</pre></div>`
 }
 
 function formatRate(deltaBytes, elapsedMs) {
@@ -248,6 +264,7 @@ function VpnConfig() {
   const sampleRef = useRef(null)
   const inflightRef = useRef(false)
   const [rates, setRates] = useState({ rx: null, tx: null })
+  const [connectLog, setConnectLog] = useState({ protocol: '', lines: [] })
 
   const rememberStatus = useCallback((data) => {
     setStatus(data)
@@ -454,10 +471,12 @@ function VpnConfig() {
       const response = await api.post(`${API}/action`, { protocol, action }, { timeout: 60000 })
       if (response.data.status) rememberStatus(response.data.status)
       const stillWaiting = action === 'connect' && !response.data.connected
-      await fireSuccess(
-        { title: stillWaiting ? 'Belum tersambung' : 'Berhasil', text: response.data.message, ...(stillWaiting ? { icon: 'warning' } : {}) },
-        () => loadStatus({ quiet: true }),
-      )
+      const lines = Array.isArray(response.data.log) ? response.data.log : []
+      setConnectLog(stillWaiting && lines.length ? { protocol, lines } : { protocol: '', lines: [] })
+      const popup = stillWaiting && lines.length
+        ? { title: 'Belum tersambung', html: logHtml(response.data.message, lines), icon: 'warning', width: 640 }
+        : { title: stillWaiting ? 'Belum tersambung' : 'Berhasil', text: response.data.message, ...(stillWaiting ? { icon: 'warning' } : {}) }
+      await fireSuccess(popup, () => loadStatus({ quiet: true }))
     } catch (error) {
       fireError({ title: 'Gagal', text: error.response?.data?.message || 'Aksi VPN gagal dijalankan.' })
       loadStatus({ quiet: true })
@@ -580,6 +599,16 @@ function VpnConfig() {
           </p>
         )}
 
+        {connectLog.lines.length > 0 && state !== 'connected' && (
+          <div className="mt-4">
+            <div className="flex items-center justify-between gap-2">
+              <p className="m-0 text-xs font-bold text-slate-600 dark:text-gray-400">Log {LABEL[connectLog.protocol]} ({connectLog.lines.length} baris terakhir)</p>
+              <button type="button" className="text-xs font-bold text-blue-600 hover:underline dark:text-blue-400" onClick={() => setConnectLog({ protocol: '', lines: [] })}>Tutup</button>
+            </div>
+            <pre className="mt-1 mb-0 max-h-80 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-slate-200">{connectLog.lines.join('\n')}</pre>
+          </div>
+        )}
+
         <div className="mt-5 flex flex-wrap gap-2">
           <button type="button" className={BTN_NEUTRAL} onClick={() => loadStatus()} disabled={refreshing || busy}>
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />
@@ -644,6 +673,15 @@ function VpnConfig() {
             <div>
               Paket {LABEL[tab]} belum terpasang di server ({tools.missing.join(', ')}). Pasang dengan:
               <code className="mt-1 block rounded bg-amber-100 px-2 py-1 font-mono text-xs dark:bg-amber-900/40">sudo {tools.hint}</code>
+            </div>
+          </div>
+        )}
+        {tools?.device_missing && (
+          <div className="mt-4 flex gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-200" role="alert">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <div>
+              Device <code className="font-mono text-xs">{tools.device_missing}</code> tidak ada di server, sehingga {LABEL[tab]} tidak akan bisa berjalan.
+              <span className="mt-1 block text-xs">{tools.device_hint}</span>
             </div>
           </div>
         )}
@@ -781,7 +819,7 @@ function VpnConfig() {
               <input type="checkbox" className="mt-1" checked={form.ignore_cert} onChange={(e) => setField('sstp', 'ignore_cert', e.target.checked)} />
               <span>
                 Abaikan validasi sertifikat (<code className="font-mono text-xs">--cert-warn</code>)
-                <span className="block text-xs text-slate-500 dark:text-gray-400">Centang bila CHR memakai sertifikat self-signed. Koneksi tetap terenkripsi, tetapi identitas server tidak diverifikasi.</span>
+                <span className="block text-xs text-slate-500 dark:text-gray-400">Aktif secara default karena sertifikat bawaan CHR umumnya self-signed. Koneksi tetap terenkripsi, tetapi identitas server tidak diverifikasi. Hilangkan centang bila CHR memakai sertifikat dari CA tepercaya.</span>
               </span>
             </label>
           </div>

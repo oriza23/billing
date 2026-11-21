@@ -14,4 +14,7 @@ billing ALL=(root) NOPASSWD: \
   /usr/bin/systemctl restart raniah-sstp, \
   /usr/bin/systemctl disable --now raniah-sstp, \
   /usr/bin/wg show wg-billing dump, \
+  /usr/bin/journalctl -u wg-quick@wg-billing -n 10 --no-pager, \
+  /usr/bin/journalctl -u openvpn-client@raniah-vpn -n 10 --no-pager, \
+  /usr/bin/journalctl -u raniah-sstp -n 20 --no-pager, \
   /usr/local/sbin/raniah-vpn-helper apply

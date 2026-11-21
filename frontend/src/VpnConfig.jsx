@@ -14,15 +14,17 @@ const PROTOCOLS = [
   { id: 'wireguard', label: 'WireGuard', badge: 'Disarankan', desc: 'Paling cepat dan latensi terendah (UDP, modul kernel Linux).' },
   { id: 'openvpn', label: 'OpenVPN', desc: 'Kompatibel luas, memakai file konfigurasi .ovpn.' },
   { id: 'sstp', label: 'SSTP', desc: 'Lewat TCP 443, mudah menembus firewall yang ketat.' },
+  { id: 'l2tp', label: 'L2TP', desc: 'Kompatibel luas dengan MikroTik, mendukung L2TP murni atau L2TP/IPsec.' },
 ]
-const LABEL = { wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP' }
+const LABEL = { wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP', l2tp: 'L2TP' }
 
 const EMPTY_FORMS = {
   wireguard: {
-    endpoint: '', server_public_key: '', private_key: '', preshared_key: '', address: '', allowed_ips: '', keepalive: '25', mtu: '', clear_preshared_key: false,
+    endpoint: '', server_public_key: '', private_key: '', preshared_key: '', address: '', allowed_ips: '', keepalive: '15', mtu: '', clear_preshared_key: false,
   },
   openvpn: { ovpn_config: '', username: '', password: '' },
   sstp: { server: '', username: '', password: '', routes: '', ignore_cert: true },
+  l2tp: { server: '', username: '', password: '', routes: '', ipsec_secret: '', clear_ipsec_secret: false },
 }
 
 const CARD = 'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900'
@@ -149,6 +151,7 @@ function formsFromProfiles(profiles = {}) {
   const wg = profiles.wireguard
   const ovpn = profiles.openvpn
   const sstp = profiles.sstp
+  const l2tp = profiles.l2tp
   return {
     wireguard: wg
       ? {
@@ -157,7 +160,7 @@ function formsFromProfiles(profiles = {}) {
           server_public_key: wg.server_public_key || '',
           address: wg.address || '',
           allowed_ips: wg.allowed_ips || '',
-          keepalive: String(wg.keepalive ?? 25),
+          keepalive: String(wg.keepalive ?? 15),
           mtu: wg.mtu ? String(wg.mtu) : '',
         }
       : { ...EMPTY_FORMS.wireguard },
@@ -171,6 +174,14 @@ function formsFromProfiles(profiles = {}) {
           ignore_cert: Boolean(sstp.ignore_cert),
         }
       : { ...EMPTY_FORMS.sstp },
+    l2tp: l2tp
+      ? {
+          ...EMPTY_FORMS.l2tp,
+          server: l2tp.server || '',
+          username: l2tp.username || '',
+          routes: l2tp.routes || '',
+        }
+      : { ...EMPTY_FORMS.l2tp },
   }
 }
 
@@ -593,7 +604,7 @@ function VpnConfig() {
           </dl>
         )}
 
-        {status?.failed?.length > 0 && (
+        {status?.failed?.length > 0 && state !== 'connected' && !status.connected && (
           <p className="mt-4 mb-0 text-sm font-semibold text-rose-700 dark:text-rose-400">
             Layanan gagal berjalan: {status.failed.map((item) => LABEL[item]).join(', ')}. Periksa konfigurasi lalu Hubungkan ulang.
           </p>
@@ -628,7 +639,7 @@ function VpnConfig() {
       {/* Pemilih protokol */}
       <div className={CARD}>
         <h2 className="m-0 text-lg font-bold text-slate-900 dark:text-gray-100">Protokol VPN</h2>
-        <div role="radiogroup" aria-label="Protokol VPN" className="mt-4 grid gap-3 md:grid-cols-3">
+        <div role="radiogroup" aria-label="Protokol VPN" className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {PROTOCOLS.map((item) => {
             const selected = tab === item.id
             return (
@@ -762,11 +773,11 @@ function VpnConfig() {
               </span>
             </Field>
 
-            <Field label="Persistent Keepalive (detik)" hint="Default 25. Menjaga NAT tetap terbuka dan mempercepat deteksi putus.">
+            <Field label="Persistent Keepalive (detik)" hint="Default 15. Menjaga NAT tetap terbuka dan mempercepat deteksi putus.">
               <input className={INPUT_CLASS} type="number" min="0" max="3600" value={form.keepalive} onChange={(e) => setField('wireguard', 'keepalive', e.target.value)} />
             </Field>
-            <Field label="MTU (opsional)" hint="Kosongkan untuk default (1420). Turunkan ke 1380 bila koneksi lewat PPPoE/tunnel lain.">
-              <input className={INPUT_CLASS} type="number" min="1280" max="1500" value={form.mtu} onChange={(e) => setField('wireguard', 'mtu', e.target.value)} placeholder="1420" />
+            <Field label="MTU (opsional)" hint="Kosongkan untuk default (1380, aman melewati jalur PPPoE tanpa fragmentasi). Isi manual bila perlu nilai lain.">
+              <input className={INPUT_CLASS} type="number" min="1280" max="1500" value={form.mtu} onChange={(e) => setField('wireguard', 'mtu', e.target.value)} placeholder="1380" />
             </Field>
           </div>
         )}
@@ -822,6 +833,47 @@ function VpnConfig() {
                 <span className="block text-xs text-slate-500 dark:text-gray-400">Aktif secara default karena sertifikat bawaan CHR umumnya self-signed. Koneksi tetap terenkripsi, tetapi identitas server tidak diverifikasi. Hilangkan centang bila CHR memakai sertifikat dari CA tepercaya.</span>
               </span>
             </label>
+          </div>
+        )}
+
+        {tab === 'l2tp' && (
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <Field label="Server CHR (IP/Domain:Port)" hint="Port default UDP 1701. Contoh: chr.contoh.net atau 203.0.113.10:1701">
+              <input className={INPUT_CLASS} value={form.server} onChange={(e) => setField('l2tp', 'server', e.target.value)} placeholder="chr.contoh.net" required spellCheck={false} />
+            </Field>
+            <Field label="Subnet Route NAS (opsional)" hint="Subnet yang dijangkau lewat tunnel. Contoh: 10.210.0.0/24. Jangan 0.0.0.0/0.">
+              <input className={INPUT_CLASS} value={form.routes} onChange={(e) => setField('l2tp', 'routes', e.target.value)} placeholder="10.210.0.0/24" spellCheck={false} />
+            </Field>
+            <Field label="Username" hint="PPP secret di CHR.">
+              <input className={INPUT_CLASS} value={form.username} onChange={(e) => setField('l2tp', 'username', e.target.value)} required autoComplete="off" spellCheck={false} />
+            </Field>
+            <Field label="Password" hint={profile?.password_set && !form.password ? 'Tersimpan di server. Kosongkan untuk tetap memakainya.' : undefined}>
+              <input className={INPUT_CLASS} type="password" value={form.password} onChange={(e) => setField('l2tp', 'password', e.target.value)} placeholder={profile?.password_set ? '(tersimpan)' : ''} autoComplete="new-password" />
+            </Field>
+            <Field
+              label="IPsec Pre-Shared Key (opsional)"
+              className="md:col-span-2"
+              hint={profile?.ipsec_secret_set && !form.ipsec_secret
+                ? 'Tersimpan di server (mode L2TP/IPsec). Kosongkan untuk tetap memakainya.'
+                : 'Kosongkan untuk L2TP murni tanpa IPsec. Isi sama dengan IPsec Secret di L2TP server CHR untuk L2TP/IPsec.'}
+            >
+              <input className={INPUT_CLASS + MONO} type="password" value={form.ipsec_secret} onChange={(e) => setField('l2tp', 'ipsec_secret', e.target.value)} placeholder={profile?.ipsec_secret_set ? '(tersimpan)' : ''} spellCheck={false} autoComplete="new-password" />
+              {profile?.ipsec_secret_set && (
+                <span className="mt-1 inline-flex items-center gap-2 text-xs text-slate-600 dark:text-gray-400">
+                  <input type="checkbox" checked={form.clear_ipsec_secret} onChange={(e) => setField('l2tp', 'clear_ipsec_secret', e.target.checked)} />
+                  Hapus IPsec key tersimpan (pindah ke L2TP murni)
+                </span>
+              )}
+              {tools && tools.installed && tools.ipsec_installed === false && (form.ipsec_secret || (profile?.ipsec_secret_set && !form.clear_ipsec_secret)) && (
+                <span className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>
+                    Paket IPsec (swanctl) belum terpasang di server, Hubungkan akan ditolak selama PSK terisi. Pasang dengan:
+                    <code className="mt-1 block rounded bg-amber-100 px-2 py-1 font-mono text-xs dark:bg-amber-900/40">sudo {tools.ipsec_hint}</code>
+                  </span>
+                </span>
+              )}
+            </Field>
           </div>
         )}
 

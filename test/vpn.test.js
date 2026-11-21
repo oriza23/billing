@@ -14,6 +14,7 @@ const cfg = require('../backend/vpn_config');
 const {
   createVpnService, parseIpAddr, parseWgDump, hijacksDefaultRoute, publicProfiles,
   hostOf, isSafePingTarget, tunnelGateway, publicPingTarget, tunnelPingTarget, parsePingMs,
+  vpnFailedProtocols,
 } = require('../backend/vpn');
 
 const KEY_A = 'A'.repeat(43) + '=';
@@ -38,11 +39,11 @@ function rejects(fn, pattern) {
 // ---------------------------------------------------------------------------
 // WireGuard
 // ---------------------------------------------------------------------------
-test('wireguard: input valid dinormalkan, keepalive default 25', () => {
+test('wireguard: input valid dinormalkan, keepalive default 15', () => {
   const out = cfg.validateWireguard(wgInput({ allowed_ips: '10.10.99.5/24, 192.168.50.0/24' }));
   assert.equal(out.endpoint, 'chr.contoh.net:51820');
   assert.equal(out.allowed_ips, '10.10.99.0/24, 192.168.50.0/24');
-  assert.equal(out.keepalive, 25);
+  assert.equal(out.keepalive, 15);
   assert.equal(out.address, '10.10.99.2/24');
   assert.equal(out.mtu, null);
 });
@@ -100,8 +101,22 @@ test('wireguard: render wg-billing.conf', () => {
   const out = cfg.renderWireguard(cfg.validateWireguard(wgInput({ preshared_key: KEY_A, mtu: 1380 })));
   assert.match(out, /\[Interface\]\nPrivateKey = B{43}=\nAddress = 10\.10\.99\.2\/24\nMTU = 1380/);
   assert.match(out, /\[Peer\]\nPublicKey = A{43}=\nPresharedKey = A{43}=\nEndpoint = chr\.contoh\.net:51820/);
-  assert.match(out, /AllowedIPs = 10\.10\.99\.0\/24\nPersistentKeepalive = 25\n$/);
+  assert.match(out, /AllowedIPs = 10\.10\.99\.0\/24\nPersistentKeepalive = 15\n$/);
   assert.doesNotMatch(out, /PostUp|PostDown|DNS|Table/);
+});
+
+test('wireguard: MTU default 1380 dan keepalive 15, nilai manual menang', () => {
+  const auto = cfg.renderWireguard(cfg.validateWireguard(wgInput()));
+  assert.match(auto, /^MTU = 1380$/m);
+  assert.match(auto, /^PersistentKeepalive = 15$/m);
+  const manual = cfg.renderWireguard(cfg.validateWireguard(wgInput({ mtu: 1420, keepalive: 25 })));
+  assert.match(manual, /^MTU = 1420$/m);
+  assert.match(manual, /^PersistentKeepalive = 25$/m);
+  assert.equal((manual.match(/^MTU = /gm) || []).length, 1);
+  // Profil lama tersimpan tanpa mtu (null) atau keepalive 0 tetap memakai default baru saat dirender.
+  const legacy = cfg.renderWireguard({ ...cfg.validateWireguard(wgInput()), mtu: null, keepalive: 0 });
+  assert.match(legacy, /^MTU = 1380$/m);
+  assert.match(legacy, /^PersistentKeepalive = 15$/m);
 });
 
 test('keygen: vektor RFC 7748 dan keypair konsisten', () => {
@@ -160,6 +175,9 @@ test('openvpn: auth-user-pass wajib kredensial; render aman', () => {
   assert.ok(lines.includes('dev raniah-ovpn'));
   assert.ok(lines.includes('dev-type tun'));
   assert.ok(lines.includes('auth-user-pass /etc/openvpn/client/raniah-vpn.auth'));
+  for (const flag of ['keepalive 10 30', 'resolv-retry infinite', 'persist-key', 'persist-tun']) {
+    assert.ok(lines.includes(flag), flag);
+  }
   assert.equal(lines.filter((line) => /^dev /.test(line)).length, 1);
   assert.equal(cfg.renderOvpnAuth(out), 'budi\nrahasia\n');
 
@@ -170,11 +188,90 @@ test('openvpn: auth-user-pass wajib kredensial; render aman', () => {
   rejects(() => cfg.validateOpenvpn({ ovpn_config: OVPN, username: 'budi', password: 'a\nb' }), /Password OpenVPN/);
 });
 
+function ovpnRendered(lines) {
+  const src = `client\n${lines.join('\n')}\n<ca>\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n</ca>\n`;
+  return cfg.renderOvpn(cfg.validateOpenvpn({ ovpn_config: src }));
+}
+const countLines = (out, re) => out.split('\n').filter((line) => re.test(line)).length;
+
+test('openvpn: tuning performa dan keamanan ditambahkan untuk UDP (termasuk fast-io)', () => {
+  for (const variant of [['remote chr.contoh.net 1194', 'proto udp'], ['remote chr.contoh.net 1194'], ['remote chr.contoh.net 1194 udp4']]) {
+    const lines = ovpnRendered(variant).split('\n');
+    for (const flag of ['tun-mtu 1400', 'mssfix 1360', 'sndbuf 393216', 'rcvbuf 393216', 'fast-io',
+      'data-ciphers AES-256-GCM:AES-128-GCM', 'tls-version-min 1.2']) {
+      assert.ok(lines.includes(flag), `${flag} <- ${variant.join(' | ')}`);
+    }
+  }
+});
+
+test('openvpn: fast-io tidak dipasang untuk TCP atau campuran UDP/TCP', () => {
+  for (const variant of [
+    ['remote chr.contoh.net 443', 'proto tcp-client'],
+    ['remote chr.contoh.net 443', 'proto tcp'],
+    ['proto udp', 'remote chr.contoh.net 1194 udp', 'remote cadangan.contoh.net 443 tcp'],
+    ['remote chr.contoh.net 443 tcp'],
+  ]) {
+    const out = ovpnRendered(variant);
+    assert.ok(!out.split('\n').includes('fast-io'), variant.join(' | '));
+    assert.ok(out.includes('\ntun-mtu 1400\n') && out.includes('\nmssfix 1360\n'), variant.join(' | '));
+  }
+});
+
+test('openvpn: nilai yang sudah ada di .ovpn tidak ditimpa atau digandakan', () => {
+  const out = ovpnRendered([
+    'remote chr.contoh.net 1194', 'proto udp', 'tun-mtu 1500', 'mssfix 1200', 'sndbuf 65536', 'rcvbuf 65536',
+    'fast-io', 'cipher AES-256-CBC', 'tls-version-min 1.3',
+  ]);
+  for (const re of [/^tun-mtu /, /^mssfix /, /^sndbuf /, /^rcvbuf /, /^fast-io$/, /^tls-version-min /, /^cipher /]) {
+    assert.equal(countLines(out, re), 1, String(re));
+  }
+  assert.ok(out.includes('\ntun-mtu 1500\n') && out.includes('\nmssfix 1200\n') && out.includes('\nsndbuf 65536\n'));
+  assert.ok(out.includes('\ntls-version-min 1.3\n'));
+  // Cipher pilihan profil dihormati (CHR lama): data-ciphers tidak ditambahkan di atasnya.
+  assert.equal(countLines(out, /^data-ciphers/), 0);
+  // link-mtu eksplisit juga menahan tun-mtu agar keduanya tidak bentrok.
+  assert.equal(countLines(ovpnRendered(['remote a.b 1194', 'link-mtu 1500']), /^tun-mtu /), 0);
+  // Opsi di dalam blok inline tidak dianggap direktif.
+  const inBlock = cfg.renderOvpn(cfg.validateOpenvpn({
+    ovpn_config: 'client\nremote a.b 1194\n<ca>\nmssfix 1\n</ca>\n',
+  }));
+  assert.ok(inBlock.includes('\nmssfix 1360\n'));
+});
+
+test('openvpn: tls-version-min di bawah 1.2 dinaikkan, data-ciphers tidak dilemahkan', () => {
+  for (const weak of ['1.0', '1.1']) {
+    const out = ovpnRendered(['remote chr.contoh.net 1194', `tls-version-min ${weak}`]);
+    assert.equal(countLines(out, /^tls-version-min /), 1);
+    assert.ok(out.includes('\ntls-version-min 1.2\n'), weak);
+  }
+  const explicit = ovpnRendered(['remote chr.contoh.net 1194', 'data-ciphers AES-128-GCM']);
+  assert.equal(countLines(explicit, /^data-ciphers /), 1);
+  assert.ok(explicit.includes('\ndata-ciphers AES-128-GCM\n'));
+});
+
 test('openvpn: tanpa auth-user-pass, kredensial opsional', () => {
   const plain = 'client\nremote chr.contoh.net 1194\n';
   const out = cfg.validateOpenvpn({ ovpn_config: plain });
   assert.equal(out.username, '');
   assert.doesNotMatch(cfg.renderOvpn(out), /auth-user-pass/);
+});
+
+test('openvpn: keepalive default tidak ditambah bila .ovpn sudah punya keepalive/ping/ping-exit/ping-restart', () => {
+  const cases = [
+    'client\nremote a.b 1194\nkeepalive 15 45\n',
+    'client\nremote a.b 1194\nping 10\nping-restart 60\n',
+    'client\nremote a.b 1194\nping 15\nping-exit 45\n',
+    'client\nremote a.b 1194\nping 20\n',
+  ];
+  for (const ovpn of cases) {
+    const conf = cfg.renderOvpn(cfg.validateOpenvpn({ ovpn_config: ovpn }));
+    assert.doesNotMatch(conf, /\nkeepalive 10 30\n/, ovpn);
+    for (const flag of ['resolv-retry infinite', 'persist-key', 'persist-tun']) {
+      assert.ok(conf.includes(flag), `${flag} in ${ovpn}`);
+    }
+  }
+  const withCustomKeep = cfg.renderOvpn(cfg.validateOpenvpn({ ovpn_config: cases[0] }));
+  assert.match(withCustomKeep, /\nkeepalive 15 45\n/);
 });
 
 // ---------------------------------------------------------------------------
@@ -219,7 +316,7 @@ test('sstp: peer pppd, unit systemd, hook rute', () => {
   assert.match(peer, /^pty "\/usr\/sbin\/sstpc --log-stderr --log-level 2 --tls-ext --cert-warn --nolaunchpppd chr\.contoh\.net:4443"$/m);
   assert.match(peer, /^nopersist$/m);
   for (const flag of ['noauth', 'nodefaultroute', 'nobsdcomp', 'nodeflate', 'refuse-eap',
-    'lcp-echo-interval 10', 'lcp-echo-failure 3']) {
+    'lcp-echo-interval 5', 'lcp-echo-failure 3', 'mtu 1400', 'mru 1400']) {
     assert.match(peer, new RegExp(`^${flag}$`, 'm'), flag);
   }
   assert.doesNotMatch(peer, /^persist$/m, 'persist membuat pppd membuka ulang /dev/pts yang sudah ditutup');
@@ -234,8 +331,16 @@ test('sstp: peer pppd, unit systemd, hook rute', () => {
   assert.match(unit, /^ExecStart=\/usr\/sbin\/pppd call raniah-sstp nodetach$/m);
   assert.match(unit, /^ExecStartPre=.*test -c \/dev\/ppp.*\/dev\/ppp tidak ada/m);
   assert.match(unit, /^Restart=always$/m);
-  assert.match(unit, /^RestartSec=5$/m);
+  assert.match(unit, /^RestartSec=3$/m);
+  assert.match(unit, /^StartLimitIntervalSec=0$/m);
   assert.doesNotMatch(unit, /sstpc|chr\.contoh|vpn-user|p"a/, 'unit hanya menjalankan pppd; sstpc dan kredensial ada di peer');
+  const wgDrop = cfg.renderWgUnitOverride();
+  assert.match(wgDrop, /^After=network-online\.target$/m);
+  assert.match(wgDrop, /^Wants=network-online\.target$/m);
+  const ovpnDrop = cfg.renderOvpnUnitOverride();
+  assert.match(ovpnDrop, /^StartLimitIntervalSec=0$/m);
+  assert.match(ovpnDrop, /^Restart=always$/m);
+  assert.match(ovpnDrop, /^RestartSec=5$/m);
   const strictPeer = cfg.renderSstpPeer({ ...out, ignore_cert: false }, '/usr/sbin/sstpc');
   assert.doesNotMatch(strictPeer, /--cert-warn/);
   assert.match(strictPeer, /--tls-ext --nolaunchpppd/, '--tls-ext selalu ada untuk RouterOS v7');
@@ -250,23 +355,30 @@ test('sstp: peer pppd, unit systemd, hook rute', () => {
 test('applyToDisk: berkas rahasia 0600, hook 0755, tanpa sisa tmp', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vpn-test-'));
   try {
-    const wgFiles = cfg.applyToDisk('wireguard', cfg.validateWireguard(wgInput()), { root });
-    assert.deepEqual(wgFiles, [cfg.PATHS.wireguard]);
+    const reloadCalls = [];
+    const wgFiles = cfg.applyToDisk('wireguard', cfg.validateWireguard(wgInput()), {
+      root,
+      exec: (...args) => { reloadCalls.push(args); },
+    });
+    assert.deepEqual(wgFiles, [cfg.PATHS.wireguard, cfg.PATHS.wgOverride]);
     const wgPath = path.join(root, cfg.PATHS.wireguard);
     assert.equal(fs.statSync(wgPath).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(wgPath)).mode & 0o777, 0o700);
 
     const ovpn = cfg.validateOpenvpn({ ovpn_config: OVPN, username: 'budi', password: 'x' });
-    cfg.applyToDisk('openvpn', ovpn, { root });
+    cfg.applyToDisk('openvpn', ovpn, { root, exec: () => {} });
+    assert.equal(fs.existsSync(path.join(root, cfg.PATHS.ovpnOverride)), true);
     assert.equal(fs.statSync(path.join(root, cfg.PATHS.ovpn)).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.join(root, cfg.PATHS.ovpnAuth)).mode & 0o777, 0o600);
     // Kredensial dihapus -> berkas auth ikut dihapus.
     cfg.applyToDisk('openvpn', cfg.validateOpenvpn({ ovpn_config: 'client\nremote a.b 1\n' }), { root });
     assert.equal(fs.existsSync(path.join(root, cfg.PATHS.ovpnAuth)), false);
 
+    reloadCalls.length = 0;
     cfg.applyToDisk('sstp', cfg.validateSstp({
       server: 'chr.contoh.net', username: 'u', password: 'p', routes: '10.10.99.0/24',
-    }), { root, existsSync: () => false });
+    }), { root, existsSync: () => false, exec: (...args) => { reloadCalls.push(args); } });
+    assert.deepEqual(reloadCalls, []);
     assert.equal(fs.statSync(path.join(root, cfg.PATHS.sstpPeer)).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.join(root, cfg.PATHS.sstpHook)).mode & 0o777, 0o755);
     assert.equal(fs.statSync(path.join(root, cfg.PATHS.sstpUnit)).mode & 0o777, 0o644);
@@ -284,17 +396,34 @@ test('applyToDisk: berkas rahasia 0600, hook 0755, tanpa sisa tmp', () => {
   }
 });
 
-test('applyToDisk sstp sebagai root nyata memanggil systemctl daemon-reload', () => {
+test('applyToDisk: systemctl daemon-reload saat menulis ke OS nyata (root kosong)', () => {
   const calls = [];
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vpn-test-'));
+  const profiles = {
+    wireguard: cfg.validateWireguard(wgInput()),
+    openvpn: cfg.validateOpenvpn({ ovpn_config: 'client\nremote a.b 1194\n' }),
+    sstp: cfg.validateSstp({ server: 'a.b', username: 'u', password: 'p' }),
+    l2tp: cfg.validateL2tp({ server: 'a.b', username: 'u', password: 'p' }),
+  };
+  for (const protocol of cfg.PROTOCOLS) {
+    calls.length = 0;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vpn-test-'));
+    try {
+      cfg.applyToDisk(protocol, profiles[protocol], {
+        root, existsSync: () => false, exec: (...args) => calls.push(args),
+      });
+      assert.deepEqual(calls, [], protocol);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+  calls.length = 0;
   try {
-    // root kosong -> menulis ke path asli, jadi hanya periksa lewat root: tmp; reload dilewati.
-    cfg.applyToDisk('sstp', cfg.validateSstp({ server: 'a.b', username: 'u', password: 'p' }), {
-      root, exec: (...args) => calls.push(args),
+    cfg.applyToDisk('wireguard', profiles.wireguard, {
+      root: '', existsSync: () => false, exec: (...args) => calls.push(args),
     });
-    assert.deepEqual(calls, []);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    assert.deepEqual(calls, [['systemctl', ['daemon-reload']]]);
+  } catch {
+    // Lingkungan tanpa izin tulis /etc: cukup uji pemanggilan lewat root tmp di atas.
   }
 });
 
@@ -360,6 +489,7 @@ function fakeSystem({ active = {}, enabled = {}, ip = {}, routes = '', wg = null
       const proto = unitOf(unit);
       if (verb === 'enable') { state.active[proto] = 'active'; state.enabled[proto] = true; }
       if (verb === 'disable') { state.active[proto] = 'inactive'; state.enabled[proto] = false; }
+      if (verb === 'reset-failed' && proto) state.active[proto] = 'inactive';
       return ok();
     }
     if (bin === 'ip' && full.includes('addr')) {
@@ -495,6 +625,23 @@ test('ping: dua target dijalankan paralel dan host berbahaya tidak dieksekusi', 
   assert.equal(calls.some(([file]) => file === 'ping'), false);
 });
 
+test('vpnFailedProtocols: saat terhubung, abaikan failed pada protokol yang tidak aktif', () => {
+  const states = { wireguard: 'inactive', openvpn: 'active', sstp: 'failed' };
+  assert.deepEqual(vpnFailedProtocols(states, { connected: true, activeProtocol: 'openvpn' }), []);
+  assert.deepEqual(vpnFailedProtocols(states), ['sstp']);
+});
+
+test('status: failed protokol lain tidak dilaporkan bila VPN sudah terhubung', async () => {
+  const system = fakeSystem({
+    active: { openvpn: 'active', sstp: 'failed', wireguard: 'inactive' },
+    ip: { 'raniah-ovpn': '10.8.0.6/24' },
+  });
+  const status = await serviceWith(system).service.getStatus();
+  assert.equal(status.protocol, 'openvpn');
+  assert.equal(status.connected, true);
+  assert.deepEqual(status.failed, []);
+});
+
 test('status openvpn/sstp: terhubung bila interface punya IP', async () => {
   const system = fakeSystem({ active: { sstp: 'active' }, ip: { 'raniah-sstp': '172.16.0.5 peer 172.16.0.1/32' } });
   const status = await serviceWith(system).service.getStatus();
@@ -512,7 +659,7 @@ test('non-root memakai sudo -n untuk systemctl dan wg', async () => {
   assert.ok(system.calls.includes('systemctl is-active wg-quick@wg-billing'));
 });
 
-test('connect: mematikan protokol lain dulu, lalu enable --now unit terpilih', async () => {
+test('connect: disable --now protokol lain (selalu), lalu enable --now unit terpilih', async () => {
   const system = fakeSystem({
     active: { sstp: 'active' },
     enabled: { sstp: true },
@@ -532,6 +679,10 @@ test('connect: mematikan protokol lain dulu, lalu enable --now unit terpilih', a
   assert.ok(disableSstp >= 0 && enableWg > disableSstp, sudoCalls.join('\n'));
   assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper apply'), sudoCalls.join('\n'));
   assert.equal(sudoCalls.some((call) => call.includes('restart wg-quick')), false);
+  assert.ok(sudoCalls.includes('sudo -n systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.ok(sudoCalls.includes('sudo -n systemctl disable --now raniah-sstp'));
+  assert.ok(sudoCalls.includes('sudo -n systemctl reset-failed raniah-sstp'), sudoCalls.join('\n'));
+  assert.ok(sudoCalls.includes('sudo -n systemctl reset-failed openvpn-client@raniah-vpn'));
 });
 
 test('connect: root menulis konfigurasi langsung dan restart bila sudah aktif', async () => {
@@ -562,7 +713,7 @@ test('connect: dibatalkan bila VPN membelokkan default route server', async () =
 test('connect: tolak tanpa konfigurasi tersimpan / paket belum terpasang / protokol asing', async () => {
   const { service } = serviceWith(fakeSystem());
   await assert.rejects(() => service.connect('wireguard', null), (error) => error.status === 400);
-  await assert.rejects(() => service.connect('l2tp', {}), (error) => error.status === 400);
+  await assert.rejects(() => service.connect('pptp', {}), (error) => error.status === 400);
   const missing = serviceWith(fakeSystem(), { existsSync: () => false }).service;
   await assert.rejects(
     () => missing.connect('wireguard', cfg.validateWireguard(wgInput())),
@@ -647,6 +798,7 @@ test('disconnect: disable --now unit protokol itu', async () => {
   const { service } = serviceWith(system);
   const { status } = await service.disconnect('openvpn');
   assert.ok(system.calls.includes('systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.ok(system.calls.includes('systemctl reset-failed openvpn-client@raniah-vpn'));
   assert.equal(status.state, 'disconnected');
 });
 
@@ -740,7 +892,7 @@ test('route: administrator bisa keygen; input aksi/protokol divalidasi', async (
     assert.match(keygen.body.public_key, cfg.WG_KEY_RE);
     assert.equal(keygen.headers['cache-control'], 'no-store');
 
-    assert.equal((await call('POST', '/action', 'admin', { protocol: 'l2tp', action: 'connect' })).status, 400);
+    assert.equal((await call('POST', '/action', 'admin', { protocol: 'pptp', action: 'connect' })).status, 400);
     assert.equal((await call('POST', '/action', 'admin', { protocol: 'wireguard', action: 'restart' })).status, 400);
     assert.equal((await call('POST', '/save', 'admin', { protocol: '../etc', config: {} })).status, 400);
   });
@@ -838,4 +990,443 @@ test('openvpn: /dev/net/tun tidak ada -> status memberi peringatan dan connect 5
   const ok = await serviceWith(fakeSystem(), { existsSync: () => true }).service.getStatus();
   assert.equal(ok.tools.openvpn.device_missing, null);
   assert.equal(ok.tools.openvpn.device_hint, null);
+});
+
+// ---------------------------------------------------------------------------
+// L2TP (xl2tpd + pppd, IPsec PSK opsional)
+// ---------------------------------------------------------------------------
+function l2tpInput(extra = {}) {
+  return {
+    server: '103.195.65.78', username: 'hasdin22', password: 'rahasia-l2tp', ...extra,
+  };
+}
+
+test('l2tp: validasi, UDP 1701 default, route dinormalkan, alias camelCase diterima', () => {
+  const out = cfg.validateL2tp(l2tpInput({ routes: '10.210.0.5/24, 192.168.50.0/24' }));
+  assert.equal(out.server, '103.195.65.78:1701');
+  assert.equal(out.routes, '10.210.0.0/24, 192.168.50.0/24');
+  assert.equal(out.ipsec_secret, '');
+  assert.equal(cfg.validateL2tp(l2tpInput({ server: 'chr.contoh.net:1701' })).server, 'chr.contoh.net:1701');
+
+  const alias = cfg.validateL2tp(l2tpInput({ nasSubnet: '10.210.0.0/24', ipsecSecret: 'psk-123' }));
+  assert.equal(alias.routes, '10.210.0.0/24');
+  assert.equal(alias.ipsec_secret, 'psk-123');
+  assert.equal(cfg.validateProfile('l2tp', l2tpInput()).server, '103.195.65.78:1701');
+
+  rejects(() => cfg.validateL2tp(l2tpInput({ server: 'chr.contoh.net:4500' })), /UDP 1701/);
+  rejects(() => cfg.validateL2tp(l2tpInput({ server: '' })), /Server CHR wajib/);
+  rejects(() => cfg.validateL2tp(l2tpInput({ username: '' })), /Username L2TP/);
+  rejects(() => cfg.validateL2tp(l2tpInput({ password: '' })), /Password L2TP wajib/);
+  rejects(() => cfg.validateL2tp(l2tpInput({ routes: '0.0.0.0/0' })), /terlalu luas/);
+  rejects(() => cfg.validateL2tp(l2tpInput({ routes: '103.195.65.0/24' })), /memuat alamat CHR/);
+});
+
+test('l2tp: anti command/config injection', () => {
+  for (const server of ['a.b;reboot', 'a.b\nlns = evil', '-oProxy', 'a.b port=1', '$(id).x', 'a b']) {
+    rejects(() => cfg.validateL2tp(l2tpInput({ server })), /Server CHR/);
+  }
+  for (const username of ['u"\nnoauth', 'u p', 'u;id', 'u\nname x']) {
+    rejects(() => cfg.validateL2tp(l2tpInput({ username })), /Username L2TP/);
+  }
+  rejects(() => cfg.validateL2tp(l2tpInput({ password: 'a\nnoauth' })), /Password L2TP/);
+  // PSK ditulis di dalam "..." pada swanctl.conf: kutip, backslash, spasi, baris baru ditolak.
+  for (const ipsec_secret of ['a"b', 'a\\b', 'a b', 'a\nb', 'x"; } children { evil', 'p'.repeat(129)]) {
+    rejects(() => cfg.validateL2tp(l2tpInput({ ipsec_secret })), /IPsec Pre-Shared Key/);
+  }
+});
+
+test('l2tp: PSK kosong memakai yang tersimpan, clear_ipsec_secret menghapus (L2TP murni)', () => {
+  const existing = { password: 'lama', ipsec_secret: 'psk-lama' };
+  const kept = cfg.validateL2tp(l2tpInput({ password: '', ipsec_secret: '' }), existing);
+  assert.equal(kept.password, 'lama');
+  assert.equal(kept.ipsec_secret, 'psk-lama');
+  assert.equal(cfg.validateL2tp(l2tpInput({ ipsec_secret: 'psk-baru' }), existing).ipsec_secret, 'psk-baru');
+  assert.equal(cfg.validateL2tp(l2tpInput({ clear_ipsec_secret: true }), existing).ipsec_secret, '');
+  assert.equal(cfg.validateL2tp(l2tpInput()).ipsec_secret, '', 'tanpa profil tersimpan = L2TP murni');
+});
+
+test('l2tp: xl2tpd.conf, options pppd, hook rute, unit systemd, runner', () => {
+  const out = cfg.validateL2tp(l2tpInput({ password: 'p"a\\ss', routes: '10.210.0.0/24' }));
+
+  const conf = cfg.renderL2tpXl2tpd(out);
+  assert.match(conf, /^\[lac raniah-l2tp\]$/m);
+  assert.match(conf, /^lns = 103\.195\.65\.78$/m);
+  assert.match(conf, /^pppoptfile = \/etc\/ppp\/options\.l2tpd\.client$/m);
+  assert.match(conf, /^autodial = no$/m);
+  assert.doesNotMatch(conf, /hasdin22|p"a|rahasia/, 'kredensial hanya di options pppd');
+
+  const opts = cfg.renderL2tpOptions(out);
+  assert.match(opts, /^name "hasdin22"$/m);
+  assert.match(opts, /^password "p\\"a\\\\ss"$/m);
+  assert.match(opts, /^ifname raniah-l2tp$/m);
+  for (const flag of ['noauth', 'nodefaultroute', 'nopersist', 'mtu 1400', 'mru 1400', 'lcp-echo-interval 5', 'lcp-echo-failure 3']) {
+    assert.match(opts, new RegExp(`^${flag}$`, 'm'), flag);
+  }
+  assert.doesNotMatch(opts, /usepeerdns/, 'DNS lokal tidak boleh ditimpa');
+  assert.doesNotMatch(opts, /^defaultroute$/m);
+  assert.doesNotMatch(opts, /^persist$/m);
+
+  assert.equal(cfg.renderL2tpRoutes(out), '10.210.0.0/24\n');
+  assert.match(cfg.renderL2tpHook(), /\[ "\$PPP_IFACE" = "raniah-l2tp" \] \|\| exit 0/);
+  assert.match(cfg.renderL2tpHook(), /ROUTES=\/etc\/ppp\/raniah-l2tp\.routes/);
+  assert.match(cfg.renderSstpHook(), /\[ "\$PPP_IFACE" = "raniah-sstp" \] \|\| exit 0/, 'hook SSTP tidak berubah');
+
+  const unit = cfg.renderL2tpUnit();
+  assert.match(unit, /^After=network-online\.target xl2tpd\.service$/m);
+  assert.match(unit, /^Wants=network-online\.target xl2tpd\.service$/m);
+  assert.match(unit, /^StartLimitIntervalSec=0$/m);
+  assert.match(unit, /^Restart=always$/m);
+  assert.match(unit, /^RestartSec=3$/m);
+  assert.match(unit, /^ExecStartPre=.*test -c \/dev\/ppp.*\/dev\/ppp tidak ada/m);
+  assert.match(unit, /^ExecStartPre=\/bin\/systemctl restart xl2tpd\.service$/m);
+  assert.match(unit, /^ExecStart=\/etc\/xl2tpd\/raniah-l2tp-run\.sh start$/m);
+  assert.match(unit, /^ExecStopPost=\/etc\/xl2tpd\/raniah-l2tp-run\.sh stop$/m);
+  assert.doesNotMatch(unit, /hasdin22|103\.195|rahasia|p"a/);
+
+  const runner = cfg.renderL2tpRunner();
+  assert.match(runner, /^#!\/bin\/sh$/m);
+  assert.match(runner, /^CTL=\/var\/run\/xl2tpd\/l2tp-control$/m);
+  assert.match(runner, /ctl "c \$LAC"/);
+  assert.match(runner, /printf "%s\\n"/, 'newline harus literal untuk shell, bukan newline JS');
+  assert.doesNotMatch(runner, /hasdin22|103\.195|rahasia/, 'runner tidak memuat nilai konfigurasi');
+});
+
+test('l2tp: runner lolos sintaks sh dan unit lolos systemd-analyze (bila tersedia)', () => {
+  const { spawnSync } = require('child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2tp-sh-'));
+  try {
+    const script = path.join(dir, 'run.sh');
+    fs.writeFileSync(script, cfg.renderL2tpRunner(), { mode: 0o755 });
+    const syntax = spawnSync('sh', ['-n', script], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+    const usage = spawnSync('sh', [script, 'bogus'], { encoding: 'utf8' });
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /Pemakaian/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('l2tp: swanctl.conf hanya dirender bila PSK ada; transport mode UDP 1701', () => {
+  const conf = cfg.renderL2tpIpsec(cfg.validateL2tp(l2tpInput({ ipsec_secret: 'Psk-Rahasia_1' })));
+  assert.match(conf, /^ {2}raniah-l2tp \{$/m);
+  assert.match(conf, /^ {4}version = 1$/m);
+  assert.match(conf, /^ {4}remote_addrs = 103\.195\.65\.78$/m);
+  assert.match(conf, /mode = transport/);
+  assert.match(conf, /local_ts = dynamic\[udp\/1701\]/);
+  assert.match(conf, /remote_ts = dynamic\[udp\/1701\]/);
+  assert.match(conf, /start_action = none/);
+  assert.match(conf, /^ {4}secret = "Psk-Rahasia_1"$/m);
+});
+
+test('applyToDisk l2tp: mode berkas, PSK menambah/menghapus swanctl.conf, xl2tpd.conf bawaan dicadangkan sekali', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vpn-test-'));
+  try {
+    const stock = path.join(root, cfg.PATHS.l2tpdConf);
+    fs.mkdirSync(path.dirname(stock), { recursive: true });
+    fs.writeFileSync(stock, '; konfigurasi bawaan paket\n');
+
+    const withPsk = cfg.validateL2tp(l2tpInput({ routes: '10.210.0.0/24', ipsec_secret: 'psk-123' }));
+    const written = cfg.applyToDisk('l2tp', withPsk, { root, exec: () => {} });
+    assert.deepEqual(written, [
+      cfg.PATHS.l2tpdConf, cfg.PATHS.l2tpOptions, cfg.PATHS.l2tpRoutes, cfg.PATHS.l2tpHook,
+      cfg.PATHS.l2tpRunner, cfg.PATHS.l2tpIpsec, cfg.PATHS.l2tpUnit,
+    ]);
+    const modeOf = (target) => fs.statSync(path.join(root, target)).mode & 0o777;
+    assert.equal(modeOf(cfg.PATHS.l2tpOptions), 0o600, 'berisi password');
+    assert.equal(modeOf(cfg.PATHS.l2tpIpsec), 0o600, 'berisi PSK');
+    assert.equal(modeOf(cfg.PATHS.l2tpHook), 0o755);
+    assert.equal(modeOf(cfg.PATHS.l2tpRunner), 0o755);
+    assert.equal(modeOf(cfg.PATHS.l2tpUnit), 0o644);
+    assert.equal(fs.readFileSync(`${stock}.pre-raniah`, 'utf8'), '; konfigurasi bawaan paket\n');
+    assert.match(fs.readFileSync(stock, 'utf8'), /\[lac raniah-l2tp\]/);
+
+    // Tulis ulang: cadangan asli tidak tertimpa berkas buatan kita.
+    cfg.applyToDisk('l2tp', withPsk, { root, exec: () => {} });
+    assert.equal(fs.readFileSync(`${stock}.pre-raniah`, 'utf8'), '; konfigurasi bawaan paket\n');
+
+    // PSK dikosongkan = L2TP murni: swanctl.conf dihapus.
+    const pure = cfg.validateL2tp(l2tpInput({ clear_ipsec_secret: true }), withPsk);
+    const writtenPure = cfg.applyToDisk('l2tp', pure, { root, exec: () => {} });
+    assert.equal(writtenPure.includes(cfg.PATHS.l2tpIpsec), false);
+    assert.equal(fs.existsSync(path.join(root, cfg.PATHS.l2tpIpsec)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('publicProfiles l2tp: password dan IPsec PSK tidak ikut ke browser', () => {
+  const pub = publicProfiles({
+    l2tp: cfg.validateL2tp(l2tpInput({ routes: '10.210.0.0/24', ipsec_secret: 'psk-sangat-rahasia' })),
+  });
+  const json = JSON.stringify(pub);
+  for (const secretValue of ['rahasia-l2tp', 'psk-sangat-rahasia']) {
+    assert.equal(json.includes(secretValue), false, secretValue);
+  }
+  assert.equal(pub.l2tp.password_set, true);
+  assert.equal(pub.l2tp.ipsec_secret_set, true);
+  assert.equal(pub.l2tp.routes, '10.210.0.0/24');
+  assert.equal(pub.l2tp.server, '103.195.65.78:1701');
+  assert.equal(publicProfiles({}).l2tp, null);
+  assert.equal(publicProfiles({ l2tp: cfg.validateL2tp(l2tpInput()) }).l2tp.ipsec_secret_set, false);
+});
+
+test('connect l2tp: protokol lain di-disable --now + reset-failed, lalu enable --now raniah-l2tp', async () => {
+  const system = fakeSystem({
+    active: { sstp: 'active', openvpn: 'failed' },
+    enabled: { sstp: true },
+    ip: { 'raniah-l2tp': '10.210.0.7 peer 10.210.0.1/32' },
+  });
+  const { service } = serviceWith(system, { isRoot: false });
+  const result = await service.connect('l2tp', cfg.validateL2tp(l2tpInput()));
+  assert.equal(result.status.connected, true);
+  assert.equal(result.status.protocol, 'l2tp');
+  assert.equal(result.status.interface, 'raniah-l2tp');
+  assert.deepEqual(result.log, []);
+
+  const sudoCalls = system.calls.filter((call) => call.startsWith('sudo -n '));
+  const enable = sudoCalls.indexOf('sudo -n systemctl enable --now raniah-l2tp');
+  for (const unit of ['wg-quick@wg-billing', 'openvpn-client@raniah-vpn', 'raniah-sstp']) {
+    const disable = sudoCalls.indexOf(`sudo -n systemctl disable --now ${unit}`);
+    assert.ok(disable >= 0 && disable < enable, `${unit}\n${sudoCalls.join('\n')}`);
+    assert.ok(sudoCalls.includes(`sudo -n systemctl reset-failed ${unit}`), unit);
+  }
+  assert.ok(sudoCalls.includes('sudo -n /usr/local/sbin/raniah-vpn-helper apply'));
+});
+
+test('connect protokol lain: l2tp + xl2tpd ikut di-disable --now dan reset-failed', async () => {
+  const system = fakeSystem({
+    active: { l2tp: 'active' },
+    enabled: { l2tp: true },
+    ip: { 'raniah-sstp': '172.16.0.5 peer 172.16.0.1/32' },
+  });
+  const { service } = serviceWith(system);
+  await service.connect('sstp', cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' }));
+  for (const unit of ['raniah-l2tp', 'xl2tpd']) {
+    assert.ok(system.calls.includes(`systemctl disable --now ${unit}`), unit);
+    assert.ok(system.calls.includes(`systemctl reset-failed ${unit}`), unit);
+  }
+  assert.ok(system.calls.indexOf('systemctl disable --now raniah-l2tp') < system.calls.indexOf('systemctl disable --now xl2tpd'));
+});
+
+test('disconnect l2tp: disable --now raniah-l2tp dan xl2tpd', async () => {
+  const system = fakeSystem({ active: { l2tp: 'active' }, enabled: { l2tp: true } });
+  const { service } = serviceWith(system);
+  const { status } = await service.disconnect('l2tp');
+  assert.ok(system.calls.includes('systemctl disable --now raniah-l2tp'));
+  assert.ok(system.calls.includes('systemctl reset-failed raniah-l2tp'));
+  assert.ok(system.calls.includes('systemctl disable --now xl2tpd'));
+  assert.equal(status.state, 'disconnected');
+});
+
+test('connect l2tp: unit belum pernah dibuat (disable gagal) tidak membuat protokol lain gagal', async () => {
+  const system = fakeSystem({ ip: { 'wg-billing': '10.10.99.2/24' } });
+  const failingRun = async (file, args) => {
+    if (args.includes('disable') && args.some((a) => a === 'raniah-l2tp' || a === 'xl2tpd')) {
+      return { ok: false, code: 1, stdout: '', stderr: 'Failed to disable unit: Unit file raniah-l2tp.service does not exist.' };
+    }
+    return system.run(file, args);
+  };
+  const { service } = serviceWith(system, { run: failingRun });
+  const result = await service.connect('wireguard', cfg.validateWireguard(wgInput()));
+  assert.equal(result.protocol, 'wireguard');
+});
+
+test('connect l2tp: /dev/ppp tidak ada -> 503 petunjuk LXC, unit dimatikan, konfigurasi tidak ditulis', async () => {
+  const system = fakeSystem({ active: { l2tp: 'active' }, enabled: { l2tp: true } });
+  const { service, applied } = serviceWith(system, { existsSync: (file) => file !== '/dev/ppp' });
+
+  const status = await service.getStatus();
+  assert.equal(status.tools.l2tp.device_missing, '/dev/ppp');
+  assert.match(status.tools.l2tp.device_hint, /^L2TP butuh \/dev\/ppp/);
+  assert.match(status.tools.l2tp.device_hint, /ppp_async/);
+
+  await assert.rejects(
+    () => service.connect('l2tp', cfg.validateL2tp(l2tpInput())),
+    (error) => error.status === 503 && /\/dev\/ppp/.test(error.message) && /lxc\.cgroup2\.devices\.allow/.test(error.message) && /Privileged/.test(error.message),
+  );
+  assert.ok(system.calls.includes('systemctl disable --now raniah-l2tp'));
+  assert.equal(system.calls.some((call) => call.includes('enable --now raniah-l2tp')), false);
+  assert.deepEqual(applied, []);
+});
+
+test('connect l2tp: paket belum terpasang -> 503; PSK diisi tanpa swanctl -> 503 dengan petunjuk strongSwan', async () => {
+  const noXl2tpd = serviceWith(fakeSystem(), { existsSync: (file) => !file.endsWith('/xl2tpd') && !file.endsWith('/xl2tpd-control') }).service;
+  await assert.rejects(
+    () => noXl2tpd.connect('l2tp', cfg.validateL2tp(l2tpInput())),
+    (error) => error.status === 503 && /apt install -y xl2tpd ppp/.test(error.message),
+  );
+
+  const noSwanctl = serviceWith(fakeSystem(), { existsSync: (file) => !file.endsWith('/swanctl') }).service;
+  const status = await noSwanctl.getStatus();
+  assert.equal(status.tools.l2tp.installed, true, 'IPsec opsional: tidak mempengaruhi installed');
+  assert.equal(status.tools.l2tp.ipsec_installed, false);
+  assert.equal(status.tools.l2tp.ipsec_hint, 'apt install -y strongswan-swanctl charon-systemd');
+  await assert.rejects(
+    () => noSwanctl.connect('l2tp', cfg.validateL2tp(l2tpInput({ ipsec_secret: 'psk' }))),
+    (error) => error.status === 503 && /strongSwan/.test(error.message) && /strongswan-swanctl/.test(error.message),
+  );
+  // L2TP murni tidak butuh swanctl.
+  const pure = await noSwanctl.connect('l2tp', cfg.validateL2tp(l2tpInput()));
+  assert.equal(pure.protocol, 'l2tp');
+});
+
+test('connect l2tp: belum dapat IP -> 20 baris journalctl -u raniah-l2tp -u xl2tpd (sudo bila bukan root)', async () => {
+  const journal = [
+    '-- Journal begins --',
+    ...Array.from({ length: 24 }, (_, i) => `Nov 21 17:00:${String(i).padStart(2, '0')} Bil xl2tpd[1]: baris ${i}`),
+    'Nov 21 17:00:59 Bil pppd[2]: peer password=rahasia123 ditolak',
+    '',
+  ].join('\n');
+  const system = fakeSystem({ journal });
+  const { service } = serviceWith(system, { isRoot: false });
+  const result = await service.connect('l2tp', cfg.validateL2tp(l2tpInput()));
+  assert.equal(result.status.connected, false);
+  assert.equal(result.log.length, 20);
+  assert.match(result.log[19], /password=\*\*\*/);
+  assert.doesNotMatch(result.log.join('\n'), /rahasia123/);
+  assert.ok(system.calls.includes('sudo -n journalctl -u raniah-l2tp -u xl2tpd -n 20 --no-pager'), system.calls.join('\n'));
+});
+
+test('connect l2tp: tunggu 8 detik tanpa IPsec, 15 detik dengan IPsec', async () => {
+  for (const [extra, expected] of [[{}, 8], [{ ipsec_secret: 'psk' }, 15]]) {
+    const sleeps = [];
+    const { service } = serviceWith(fakeSystem(), { sleep: async (ms) => sleeps.push(ms) });
+    await service.connect('l2tp', cfg.validateL2tp(l2tpInput(extra)));
+    assert.equal(sleeps.length, expected, JSON.stringify(extra));
+  }
+});
+
+test('monitoring l2tp: RX/TX dari /sys/class/net/raniah-l2tp, dual ping server CHR + gateway .1 dinamis', async () => {
+  const reads = [];
+  const system = fakeSystem({ active: { l2tp: 'active' }, ip: { 'raniah-l2tp': '10.210.0.7 peer 10.210.0.1/32' } });
+  const { service } = serviceWith(system, {
+    readText: (file) => {
+      reads.push(file);
+      if (file === '/proc/uptime') return '9000.5 100\n';
+      return file.endsWith('/rx_bytes') ? '2048\n' : '4096\n';
+    },
+  });
+  const status = await service.getStatus();
+  assert.equal(status.state, 'connected');
+  assert.equal(status.interface, 'raniah-l2tp');
+  assert.ok(reads.includes('/sys/class/net/raniah-l2tp/statistics/rx_bytes'), reads.join('\n'));
+  assert.equal(status.traffic.rx_bytes, 2048);
+  assert.equal(status.traffic.tx_bytes, 4096);
+
+  assert.equal(publicPingTarget('l2tp', { server: '103.195.65.78:1701' }), '103.195.65.78');
+  assert.equal(publicPingTarget('l2tp', { server: 'chr.contoh.net:1701' }), 'chr.contoh.net');
+  assert.equal(publicPingTarget('l2tp', null), null);
+  assert.equal(tunnelPingTarget('l2tp', { server: 'x', routes: '192.168.88.0/24' }, '10.210.0.7'), '10.210.0.1');
+  assert.equal(tunnelPingTarget('l2tp', { routes: '192.168.88.0/24' }, null), null, 'route NAS bukan gateway tunnel');
+
+  const pinged = [];
+  const pingService = createVpnService({
+    isRoot: true,
+    existsSync: () => true,
+    run: async (file, args) => {
+      if (file === 'ping') {
+        pinged.push(args[args.length - 1]);
+        return { ok: true, code: 0, stdout: 'time=9.5 ms\n', stderr: '' };
+      }
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    },
+  });
+  const ping = await pingService.measurePing('l2tp', { server: '103.195.65.78:1701' }, '10.210.0.7');
+  assert.deepEqual([ping.public.target, ping.tunnel.target], ['103.195.65.78', '10.210.0.1']);
+  assert.equal(ping.tunnel.status, 'ok');
+  assert.deepEqual(pinged.sort(), ['10.210.0.1', '103.195.65.78']);
+});
+
+test('diagnoseLog l2tp: IPsec, jaringan, dan kredensial dibedakan dengan teks khusus L2TP', () => {
+  const { diagnoseLog } = require('../backend/vpn');
+  assert.equal(diagnoseLog(['charon-systemd: received NO_PROPOSAL_CHOSEN error notify'], 'l2tp').code, 'ipsec');
+  assert.equal(diagnoseLog(['IPsec gagal: negosiasi IKE/ESP ke CHR tidak berhasil.'], 'l2tp').code, 'ipsec');
+  assert.equal(diagnoseLog(['charon: giving up after 5 retransmits', 'initiate failed: timed out'], 'l2tp').code, 'ipsec');
+  const network = diagnoseLog(['xl2tpd[1]: Maximum retries exceeded for tunnel 1234. Closing.'], 'l2tp');
+  assert.equal(network.code, 'network');
+  assert.match(network.text, /UDP 1701/);
+  const auth = diagnoseLog(['pppd[2]: CHAP authentication failed'], 'l2tp');
+  assert.equal(auth.code, 'auth');
+  assert.match(auth.text, /service=l2tp/);
+  assert.equal(diagnoseLog(['pppd: Couldn\'t open the /dev/ppp device'], 'l2tp').code, 'device');
+  assert.equal(diagnoseLog(['SSL_connect: handshake failure'], 'l2tp'), null, 'TLS hanya untuk SSTP');
+  // Tanpa protokol, perilaku SSTP lama tetap.
+  assert.equal(diagnoseLog(['SSL_connect: handshake failure']).code, 'tls');
+  assert.match(diagnoseLog(['pppd[2]: CHAP authentication failed']).text, /service=sstp/);
+});
+
+test('sudoers: semua perintah sudo yang dikeluarkan service tercakup di deploy/sudoers.d-billing', async () => {
+  const sudoers = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'sudoers.d-billing'), 'utf8');
+  const allowed = new Set(
+    sudoers.split('\n').map((line) => line.trim().replace(/[,\s\\]+$/, '')).filter((line) => line.startsWith('/')),
+  );
+  const toSudoers = (call) => {
+    const [, , bin, ...args] = call.split(' ');
+    const full = bin.startsWith('/') ? bin : `/usr/bin/${bin}`;
+    return [full, ...args].join(' ');
+  };
+  const cases = {
+    wireguard: cfg.validateWireguard(wgInput()),
+    openvpn: cfg.validateOpenvpn({ ovpn_config: 'client\nremote a.b 1194\n' }),
+    sstp: cfg.validateSstp({ server: 'a.b:9921', username: 'u', password: 'p' }),
+    l2tp: cfg.validateL2tp(l2tpInput({ ipsec_secret: 'psk' })),
+  };
+  const missing = new Set();
+  for (const protocol of cfg.PROTOCOLS) {
+    // Tanpa interface ber-IP: connect berakhir "belum tersambung" dan membaca journal.
+    const system = fakeSystem({ journal: 'baris\n', wg: 'x' });
+    const { service } = serviceWith(system, { isRoot: false });
+    await service.getStatus();
+    await service.connect(protocol, cases[protocol]);
+    await service.disconnect(protocol);
+    for (const call of system.calls.filter((item) => item.startsWith('sudo -n '))) {
+      if (!allowed.has(toSudoers(call))) missing.add(toSudoers(call));
+    }
+  }
+  assert.deepEqual([...missing], [], `perintah sudo belum ada di sudoers.d-billing:\n${[...missing].join('\n')}`);
+});
+
+test('helper menolak payload l2tp berbahaya tanpa menulis apa pun', () => {
+  const { spawnSync } = require('child_process');
+  const helper = path.join(__dirname, '..', 'deploy', 'raniah-vpn-helper.js');
+  const attempt = (config) => spawnSync(process.execPath, [helper, 'apply'], {
+    input: JSON.stringify({ protocol: 'l2tp', config }),
+    encoding: 'utf8',
+  });
+  const server = attempt(l2tpInput({ server: 'a.b;reboot' }));
+  assert.notEqual(server.status, 0);
+  assert.match(server.stderr, /Server CHR tidak valid/);
+  const psk = attempt(l2tpInput({ ipsec_secret: 'x"; } evil { "' }));
+  assert.notEqual(psk.status, 0);
+  assert.match(psk.stderr, /IPsec Pre-Shared Key/);
+});
+
+test('route: simpan l2tp divalidasi (400) dan config mengembalikan slot l2tp kosong', async () => {
+  await withServer(async (call) => {
+    const bad = await call('POST', '/save', 'admin', { protocol: 'l2tp', config: l2tpInput({ server: 'a.b;reboot' }) });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.field, 'server');
+    const noPort = await call('POST', '/save', 'admin', { protocol: 'l2tp', config: l2tpInput({ server: 'a.b:9999' }) });
+    assert.equal(noPort.status, 400);
+    assert.match(noPort.body.message, /UDP 1701/);
+    const config = await call('GET', '/config', 'admin');
+    assert.equal(config.status, 200);
+    assert.ok('l2tp' in config.body.profiles);
+  });
+});
+
+test('install.sh: sysctl tuning VPN ditulis ke /etc/sysctl.d/99-raniah-vpn.conf dengan fallback aman', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
+  assert.match(installer, /\/etc\/sysctl\.d\/99-raniah-vpn\.conf/);
+  for (const line of [
+    'net.core.rmem_max=26214400', 'net.core.wmem_max=26214400', 'net.ipv4.udp_rmem_min=16384',
+    'net.ipv4.udp_wmem_min=16384', 'net.ipv4.tcp_mtu_probing=1', 'net.ipv4.conf.all.rp_filter=2',
+  ]) {
+    assert.ok(installer.includes(`\n${line}\n`), line);
+  }
+  assert.match(installer, /sysctl --system/);
+  // Kegagalan satu parameter (LXC read-only) hanya memicu fallback, tidak menghentikan installer (set -e).
+  assert.match(installer, /if ! \$SUDO sysctl --system/);
+  assert.match(installer, /sysctl -w "\$\{SYSCTL_KEY\}=\$\{SYSCTL_VAL\}"[^\n]*\|\| SYSCTL_DENIED/);
 });

@@ -40,6 +40,7 @@ Saat development, backend dapat dijalankan langsung dengan Node.js di port **500
 - [Deployment server](#deployment-server)
 - [Input install.sh](#input-yang-diminta-installsh)
 - [Kebutuhan sistem & pasca-instalasi](#kebutuhan-sistem--pasca-instalasi)
+- [Panduan MikroTik NAS via VPN CHR](#panduan-konfigurasi-mikrotik-nas-router-klien)
 - [Dokumentasi lanjutan](#dokumentasi-lanjutan)
 
 ---
@@ -176,13 +177,14 @@ graph TD
   E --> F["Konfigurasi SQL + clients.conf"]
   F --> G["Node.js 22 + npm\nbackend + migrasi"]
   G --> H["Build React frontend"]
-  H --> I["Jalankan Node langsung\nPM2/Nginx opsional"]
+  H --> V["Paket VPN client + helper + sudoers\nWireGuard · OpenVPN · SSTP · L2TP"]
+  V --> I["Jalankan Node langsung\nPM2/Nginx opsional"]
   I --> J([Selesai])
 
   classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
   classDef raniahExt fill:#f3f4f6,stroke:#374151,color:#111827,stroke-width:2px
 
-  class B,C,D,E,F,G,H,I raniahApp
+  class B,C,D,E,F,G,H,V,I raniahApp
   class A,J raniahExt
 ```
 
@@ -213,7 +215,7 @@ chmod +x install.sh scripts/setup-admin.js
 
 ### Instalasi server (default Node langsung)
 
-Secara default installer menyiapkan PostgreSQL, FreeRADIUS, Node.js 22.x, npm 12.x, dependensi backend/frontend, dan build React. PM2 dan Nginx tidak dipasang; setelah instalasi selesai, jalankan backend secara manual:
+Secara default installer menyiapkan PostgreSQL, FreeRADIUS, Node.js 22.x, npm 12.x, dependensi backend/frontend, build React, serta paket VPN client untuk menu Koneksi VPN (`wireguard-tools`, `openvpn`, `sstp-client`, `xl2tpd`, `ppp`, dan `strongswan-swanctl` + `charon-systemd` untuk L2TP/IPsec) beserta helper root dan sudoers-nya. PM2 dan Nginx tidak dipasang; setelah instalasi selesai, jalankan backend secara manual:
 
 ```bash
 sudo ./install.sh
@@ -241,7 +243,7 @@ Backend bisa dijalankan sebagai pengguna sistem `billing` lewat unit systemd, se
 sudo deploy/install-service.sh
 ```
 
-Skrip memasang `billing.service` (`User=billing`, `Restart=always`, `ProtectSystem=strict`, hanya `uploads/` dan `/etc` yang writable) dan `/etc/sudoers.d/billing` yang hanya mengizinkan restart PostgreSQL/FreeRADIUS serta perubahan zona waktu via `sudo -n`. Bila `FREERADIUS_RESTART_ON_SYNC=1` dipakai, `FREERADIUS_SERVICE` harus tetap `freeradius` agar cocok dengan sudoers.
+Skrip memasang `billing.service` (`User=billing`, `Restart=always`, `ProtectSystem=strict`, hanya `uploads/` dan `/etc` yang writable) dan `/etc/sudoers.d/billing` yang hanya mengizinkan restart PostgreSQL/FreeRADIUS, perubahan zona waktu, serta pengelolaan unit VPN tetap (`wg-quick@wg-billing`, `openvpn-client@raniah-vpn`, `raniah-sstp`, `raniah-l2tp`, dan `xl2tpd`) via `sudo -n`, tanpa wildcard. Bila `FREERADIUS_RESTART_ON_SYNC=1` dipakai, `FREERADIUS_SERVICE` harus tetap `freeradius` agar cocok dengan sudoers.
 
 Catatan keamanan tambahan:
 
@@ -317,15 +319,62 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 
 ### Koneksi VPN ke MikroTik CHR (Sistem → Koneksi VPN)
 
-Server billing dapat menjadi VPN client ke MikroTik CHR (ROS v7) lewat **WireGuard**, **OpenVPN**, atau **SSTP**. Satu protokol aktif pada satu waktu. Installer memasang `wireguard-tools`, `openvpn`, `sstp-client`, dan `ppp`.
+Server billing dapat menjadi VPN client ke MikroTik CHR (ROS v7) lewat **WireGuard**, **OpenVPN**, **SSTP**, atau **L2TP** (murni atau L2TP/IPsec). Satu protokol aktif pada satu waktu. Installer memasang `wireguard-tools`, `openvpn`, `sstp-client`, `xl2tpd`, dan `ppp`, serta `strongswan-swanctl` + `charon-systemd` (opsional, hanya dipakai bila IPsec Pre-Shared Key diisi). `xl2tpd` dan strongSwan dimatikan setelah dipasang dan baru dinyalakan oleh `raniah-l2tp.service` saat L2TP dihubungkan, sehingga port UDP 1701/500/4500 tidak terbuka selama L2TP tidak dipakai. Pada server yang sudah terpasang, pasang paket manual dengan `sudo apt install -y xl2tpd ppp strongswan-swanctl charon-systemd`, lalu jalankan `sudo ./install.sh` atau `sudo deploy/install-service.sh` untuk memperbarui sudoers dan helper.
 
 | Protokol | Interface | Kebutuhan OS |
 |----------|-----------|--------------|
 | WireGuard | `wg-billing` | Modul kernel `wireguard` (tidak butuh device tambahan) |
 | OpenVPN | `raniah-ovpn` | `/dev/net/tun` |
 | SSTP | `raniah-sstp` | `/dev/ppp` (di LXC: modul `ppp_async` dan kontainer Privileged) |
+| L2TP | `raniah-l2tp` | `/dev/ppp` (di LXC: sama dengan SSTP). L2TP/IPsec: paket `strongswan-swanctl` + `charon-systemd` |
 
-Kartu **Status Koneksi** menampilkan RX/TX real-time (dari `/sys/class/net/<iface>/statistics`) serta dua ping dinamis: ke endpoint publik CHR dan ke gateway tunnel (`.1`). Semuanya berlaku sama untuk ketiga protokol. Bila koneksi belum tersambung, baris terakhir `journalctl` unit ditampilkan di UI (SSTP: 20 baris) beserta dugaan penyebabnya (sertifikat, port, atau kredensial). Restart backend dengan `systemctl restart billing`, bukan `node server.js` manual.
+Kartu **Status Koneksi** menampilkan RX/TX real-time (dari `/sys/class/net/<iface>/statistics`) serta dua ping dinamis: ke endpoint publik CHR dan ke gateway tunnel (`.1`). Semuanya berlaku sama untuk keempat protokol. Bila koneksi belum tersambung, baris terakhir `journalctl` unit ditampilkan di UI (SSTP dan L2TP: 20 baris; L2TP menggabungkan log `raniah-l2tp` dan `xl2tpd`) beserta dugaan penyebabnya (sertifikat, port, atau kredensial). Restart backend dengan `systemctl restart billing`, bukan `node server.js` manual.
+
+#### Tuning performa dan stabilitas VPN
+
+Generator konfigurasi memakai nilai bawaan yang meminimalkan latensi dan fragmentasi untuk trafik RADIUS lewat jalur PPPoE. Konfigurasi dibuat ulang setiap kali **Hubungkan**, jadi profil yang sudah tersimpan ikut memakai nilai ini pada koneksi berikutnya.
+
+| Protokol | Nilai bawaan | Keterangan |
+|----------|--------------|------------|
+| WireGuard | `MTU = 1380`, `PersistentKeepalive = 15` | Isi MTU/Keepalive manual di form untuk menimpa. Profil yang menyimpan keepalive `25` tetap memakai `25` sampai diubah. |
+| OpenVPN | `tun-mtu 1400`, `mssfix 1360`, `sndbuf 393216`, `rcvbuf 393216`, `fast-io` (hanya bila semua remote UDP), `data-ciphers AES-256-GCM:AES-128-GCM`, `tls-version-min 1.2` | Hanya ditambahkan bila belum ada di `.ovpn` (nilai di `.ovpn` tidak ditimpa). Bila `.ovpn` sudah memilih `cipher`/`data-ciphers`, pilihan itu dihormati agar profil CHR lama tidak putus. `tls-version-min` di bawah 1.2 selalu dinaikkan ke 1.2. |
+| SSTP dan L2TP | `mtu 1400`, `mru 1400`, `lcp-echo-interval 5`, `lcp-echo-failure 3`, `RestartSec=3` | Link mati terdeteksi dalam 15 detik, lalu systemd menyambung ulang 3 detik kemudian. |
+
+`install.sh` menulis `/etc/sysctl.d/99-raniah-vpn.conf` lalu menjalankan `sysctl --system`:
+
+```ini
+net.core.rmem_max=26214400
+net.core.wmem_max=26214400
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.conf.all.rp_filter=2
+```
+
+Buffer `rmem_max`/`wmem_max` harus lebih besar dari `sndbuf`/`rcvbuf` OpenVPN agar kernel tidak memotongnya diam-diam. Di kontainer LXC sebagian parameter `net.core.*` read-only. Installer tidak gagal; ia menerapkan parameter satu per satu dan menampilkan peringatan untuk yang ditolak. Berkasnya tetap tersimpan, dan parameter itu bisa diset di **host Proxmox** (`/etc/sysctl.d/` di host). Untuk server yang sudah terpasang, jalankan ulang `sudo ./install.sh`, atau salin berkas di atas ke `/etc/sysctl.d/99-raniah-vpn.conf` lalu `sudo sysctl --system`.
+
+#### Konfigurasi L2TP
+
+Form L2TP berisi **Server CHR** (default UDP 1701), **Username** dan **Password** (PPP secret di CHR), **Subnet Route NAS** (opsional), dan **IPsec Pre-Shared Key** (opsional).
+
+- **IPsec Pre-Shared Key kosong:** L2TP murni, tanpa enkripsi IPsec.
+- **IPsec Pre-Shared Key terisi:** L2TP/IPsec (IKEv1, transport mode UDP 1701) lewat strongSwan `swanctl`. Konfigurasi ditulis ke `/etc/swanctl/conf.d/raniah-l2tp.conf`. Bila paket `strongswan-swanctl` belum terpasang, **Hubungkan** ditolak dengan pesan perintah `apt install`.
+- **Subnet Route NAS:** rute statis lewat hook `/etc/ppp/ip-up.d/raniah-l2tp` ke interface `raniah-l2tp`. Default gateway server tidak diubah dan DNS lokal tidak ditimpa (`usepeerdns` tidak dipakai).
+
+File yang ditulis helper root: `/etc/xl2tpd/xl2tpd.conf` (section `[lac raniah-l2tp]`; konfigurasi bawaan dicadangkan ke `xl2tpd.conf.pre-raniah`), `/etc/ppp/options.l2tpd.client`, `/etc/xl2tpd/raniah-l2tp-run.sh`, dan `/etc/systemd/system/raniah-l2tp.service`. Unit memakai `Restart=always` dan `RestartSec=3`, sehingga tersambung ulang otomatis saat putus maupun setelah reboot. Saat L2TP dihubungkan, unit protokol lain dimatikan (`disable --now` + `reset-failed`), dan sebaliknya `raniah-l2tp` serta `xl2tpd` dimatikan saat protokol lain dipilih.
+
+Di CHR (ROS v7), aktifkan L2TP server dan buat PPP secret:
+
+```routeros
+/ppp profile add name=raniah-l2tp local-address=10.210.0.1 remote-address=<pool-vpn> use-encryption=yes
+/ppp secret add name=billing password=<password> service=l2tp profile=raniah-l2tp remote-address=10.210.0.2
+# L2TP murni:
+/interface l2tp-server server set enabled=yes default-profile=raniah-l2tp use-ipsec=no
+# L2TP/IPsec (isi ipsec-secret sama dengan IPsec Pre-Shared Key di form; "required" menolak koneksi tanpa IPsec):
+/interface l2tp-server server set enabled=yes default-profile=raniah-l2tp use-ipsec=required ipsec-secret=<psk>
+```
+
+Buka di firewall input CHR: `udp/1701` (L2TP), serta `udp/500`, `udp/4500`, dan protokol `ipsec-esp` bila memakai IPsec.
 
 #### Catatan Pengguna Proxmox LXC
 
@@ -336,8 +385,9 @@ Di server fisik dan VPS, `/dev/ppp` dan `/dev/net/tun` biasanya sudah ada. Di ko
 | WireGuard | Langsung jalan | Langsung jalan | Tidak ada device tambahan |
 | OpenVPN | Jalan | Jalan | Passthrough `/dev/net/tun` |
 | SSTP | Tidak cukup | Wajib (`unprivileged: 0`) | Modul `ppp_generic` + `ppp_async`, dan passthrough `/dev/ppp` |
+| L2TP | Tidak cukup | Wajib (`unprivileged: 0`) | Sama dengan SSTP: modul `ppp_generic` + `ppp_async`, dan passthrough `/dev/ppp` |
 
-Tanpa kontainer Privileged, SSTP tetap gagal meskipun `/dev/ppp` sudah ada: `pppd: Couldn't set tty to PPP discipline: Operation not permitted`.
+Tanpa kontainer Privileged, SSTP dan L2TP tetap gagal meskipun `/dev/ppp` sudah ada: `pppd: Couldn't set tty to PPP discipline: Operation not permitted`.
 
 **Langkah 1 — Modul PPP permanen di host**
 
@@ -351,7 +401,7 @@ chmod 666 /dev/ppp
 **Langkah 2 — Passthrough device di `/etc/pve/lxc/<CTID>.conf`**
 
 ```ini
-# Untuk SSTP (/dev/ppp)
+# Untuk SSTP dan L2TP (/dev/ppp)
 lxc.cgroup2.devices.allow: c 108:0 rwm
 lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file
 
@@ -360,9 +410,9 @@ lxc.cgroup2.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
-**Langkah 3 — Kontainer Privileged (khusus SSTP)**
+**Langkah 3 — Kontainer Privileged (khusus SSTP dan L2TP)**
 
-SSTP butuh kontainer **Privileged**. OpenVPN dan WireGuard tidak. Jika kontainer dibuat sebagai Unprivileged, Proxmox tidak mengizinkan mengganti tipe itu pada kontainer yang sedang berjalan. Buat ulang lewat **Backup & Restore**: backup kontainer, restore, dan hilangkan centang **Unprivileged container**. Hasilnya `unprivileged: 0` di `/etc/pve/lxc/<CTID>.conf`.
+SSTP dan L2TP butuh kontainer **Privileged** karena keduanya memakai `pppd`. OpenVPN dan WireGuard tidak. Jika kontainer dibuat sebagai Unprivileged, Proxmox tidak mengizinkan mengganti tipe itu pada kontainer yang sedang berjalan. Buat ulang lewat **Backup & Restore**: backup kontainer, restore, dan hilangkan centang **Unprivileged container**. Hasilnya `unprivileged: 0` di `/etc/pve/lxc/<CTID>.conf`.
 
 **Langkah 4 — Restart dan verifikasi**
 
@@ -382,17 +432,106 @@ Keduanya harus tampil sebagai character device. Menu **Sistem → Koneksi VPN** 
 
 `install.sh` mendeteksi kontainer (`systemd-detect-virt -c`) dan menampilkan ringkasan ini di akhir instalasi, tanpa menggagalkan instalasi.
 
-### Winbox — MikroTik → RADIUS
+### Panduan Konfigurasi MikroTik NAS (Router Klien)
+
+Panduan ini mengasumsikan topologi **hub-and-spoke**: **MikroTik CHR** sebagai VPN hub, **server billing** sebagai client VPN ke CHR, dan setiap **MikroTik NAS** (router di lapangan) juga sebagai client VPN ke CHR yang sama. Lalu NAS mengirim autentikasi RADIUS ke billing lewat **IP VPN** (bukan IP publik WAN). Contoh subnet tunnel di bawah memakai `10.210.0.0/24`; sesuaikan dengan pool CHR Anda.
+
+| Peran | Contoh fungsi |
+|-------|----------------|
+| CHR (hub) | SSTP/L2TP/WireGuard server, routing antar peer VPN |
+| Server billing | Client VPN + FreeRADIUS (menu **Sistem → Koneksi VPN**) |
+| MikroTik NAS | Client VPN + PPPoE/Hotspot; RADIUS client ke billing |
+
+#### 1. Pengaturan di MikroTik CHR (VPN hub)
+
+**Kunci IP statis (penting)** — Agar entri `nas` di FreeRADIUS tidak berubah setiap reconnect, tetapkan alamat VPN **statis** untuk server billing dan tiap NAS:
+
+- **SSTP/L2TP:** di **PPP → Secrets**, set **Remote Address** ke IP tetap dalam pool (mis. billing `10.210.0.2`, NAS-1 `10.210.0.11`, NAS-2 `10.210.0.12`). Jangan mengandalkan dynamic pool saja bila Anda ingin IP RADIUS stabil.
+- **WireGuard:** pada **peer** masing-masing client, isi **Allowed Address** dengan **`/32` tunggal** untuk IP client itu (mis. `10.210.0.2/32` untuk billing, `10.210.0.11/32` untuk NAS-1). CHR memerlukan rute host ke tiap peer; subnet penuh biasanya diisi di sisi **NAS** (lihat bagian 2).
+
+**Izinkan trafik antar-VPN (hub-to-spoke)** — Tanpa aturan ini, CHR bisa mem-forward tetapi filter memblokir lalu lintas antar client (NAS tidak bisa ping ke IP VPN billing):
+
+```routeros
+/ip firewall filter add chain=forward src-address=10.210.0.0/24 dst-address=10.210.0.0/24 action=accept place-before=0 comment="Allow VPN Hub-to-Spoke"
+```
+
+Pastikan juga tidak ada rule `drop` di `forward` yang menangkap trafik antar subnet VPN sebelum rule di atas. Sesuaikan `src-address`/`dst-address` bila pool Anda berbeda.
+
+#### 2. Routing VPN di MikroTik NAS (router klien)
+
+NAS harus bisa mencapai **IP VPN server billing** sebelum RADIUS berfungsi.
+
+**Jika NAS memakai SSTP client** — Tambahkan rute statis ke subnet VPN agar trafik ke billing tidak keluar lewat default gateway WAN (gejala umum: `net unreachable` saat ping/RADIUS):
+
+```routeros
+/ip route add dst-address=10.210.0.0/24 gateway=sstp-out1 comment="Route ke VPN Billing"
+```
+
+Ganti `sstp-out1` dengan nama interface SSTP client Anda (`/interface sstp-client print`). Opsional: rute host saja ke billing, mis. `dst-address=10.210.0.2 gateway=sstp-out1`.
+
+**Jika NAS memakai WireGuard client** — Pada **peer** menuju CHR, isi **Allowed Address** dengan **subnet penuh** tunnel (mis. `10.210.0.0/24`), bukan hanya `/32` lokal NAS. Dengan begitu kernel NAS memasang rute ke seluruh peer di VPN, termasuk IP billing.
+
+**Verifikasi** — Dari terminal NAS:
+
+```routeros
+/ping 10.210.0.2 count=5
+```
+
+Ganti `10.210.0.2` dengan `<IP_VPN_BILLING>`. Harus ada reply. Jika timeout, perbaiki VPN, firewall CHR, dan rute di langkah 1–2 sebelum melanjutkan ke RADIUS.
+
+#### 3. Konfigurasi RADIUS client di MikroTik NAS (RouterOS v7)
+
+Ganti placeholder berikut:
+
+| Placeholder | Arti |
+|-------------|------|
+| `<IP_VPN_BILLING>` | IP VPN server billing (contoh `10.210.0.2`) |
+| `<IP_VPN_NAS>` | IP VPN NAS ini (contoh `10.210.0.11`); dipakai sebagai **src-address** agar RADIUS keluar dari tunnel |
+| `<RADIUS_SECRET>` | Secret sama dengan di web billing / `RADIUS_SECRET` install |
+
+**Tambahkan server RADIUS:**
+
+```routeros
+/radius add service=ppp,hotspot address=<IP_VPN_BILLING> secret=<RADIUS_SECRET> src-address=<IP_VPN_NAS> timeout=3s comment="RANIAH.NET Billing"
+```
+
+**Aktifkan RADIUS Incoming (CoA / Disconnect)** — Diperlukan agar isolir, buka isolir, dan putus sesi dari web billing berfungsi:
+
+```routeros
+/radius incoming set accept=yes port=3799
+```
+
+Buka **UDP 3799** pada firewall NAS bila ada filter yang memblokir dari arah server billing.
+
+**Autentikasi RADIUS untuk PPPoE dan Hotspot:**
+
+```routeros
+/ppp aaa set use-radius=yes accounting=yes
+/ip hotspot profile set [find default=no] use-radius=yes
+```
+
+Profil Hotspot yang dipakai pelanggan harus memakai profil dengan `use-radius=yes`. Untuk PPPoE, pastikan **PPP → Secrets** / profil mengandalkan RADIUS (bukan local only).
+
+#### 4. Daftarkan router di web billing
+
+1. Login panel → menu **Router** (Manajemen Router).
+2. **Tambah Server** dengan **IP** = `<IP_VPN_NAS>` (bukan IP WAN publik).
+3. **RADIUS Secret** = `<RADIUS_SECRET>` yang sama persis dengan baris `/radius` di NAS.
+4. Pilih jenis **Hotspot** dan/atau **PPPoE** sesuai layanan di NAS; pastikan **Nama Server** (mis. nama server PPPoE/Hotspot di Winbox) cocok dengan yang dipakai voucher/langganan di billing.
+
+Setelah disimpan, aplikasi menyinkronkan router ke tabel `nas` FreeRADIUS. Bila perlu, restart FreeRADIUS: `sudo systemctl restart freeradius`. Detail banyak NAS: [`docs/MULTI_NAS.md`](docs/MULTI_NAS.md). Detail isolir/CoA: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
+
+### Winbox — MikroTik → RADIUS (ringkas, tanpa VPN)
+
+Bila billing dan NAS satu jaringan LAN (tanpa CHR), konfigurasi Winbox setara dengan langkah 3 di atas:
 
 1. **Radius** → **+**
-2. **Address:** IP server billing  
-3. **Secret:** sama dengan **RADIUS_SECRET** saat `install.sh`  
-4. **Auth:** `1812` · **Acct:** `1813` · centang **ppp** / **hotspot**  
+2. **Address:** IP server billing (LAN)
+3. **Secret:** sama dengan **RADIUS_SECRET** saat `install.sh`
+4. **Auth:** `1812` · **Acct:** `1813` · centang **ppp** / **hotspot**
 5. Aktifkan **accounting** untuk pelaporan sesi.
 
-Detail isolir: [`docs/PPPOE_ISOLIR.md`](docs/PPPOE_ISOLIR.md).
-
-Banyak router/NAS dalam satu billing (sinkron otomatis ke tabel `nas` FreeRADIUS): [`docs/MULTI_NAS.md`](docs/MULTI_NAS.md).
+Untuk topologi VPN hub-and-spoke, ikuti [Panduan Konfigurasi MikroTik NAS (Router Klien)](#panduan-konfigurasi-mikrotik-nas-router-klien) di atas.
 
 ---
 

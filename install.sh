@@ -158,11 +158,59 @@ $SUDO apt-get install -y \
   postgresql postgresql-contrib \
   build-essential
 
-# Paket VPN client untuk menu Sistem > Koneksi VPN (WireGuard / OpenVPN / SSTP ke MikroTik CHR).
+# Paket VPN client untuk menu Sistem > Koneksi VPN (WireGuard / OpenVPN / SSTP / L2TP ke MikroTik CHR).
 # Dipasang terpisah: bila satu paket tidak tersedia di repo, instalasi billing tetap lanjut.
-info "=== Paket VPN client: wireguard-tools, openvpn, sstp-client, ppp ==="
-$SUDO apt-get install -y wireguard-tools openvpn sstp-client ppp \
-  || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client ppp"
+info "=== Paket VPN client: wireguard-tools, openvpn, sstp-client, xl2tpd, ppp ==="
+$SUDO apt-get install -y wireguard-tools openvpn sstp-client xl2tpd ppp \
+  || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client xl2tpd ppp"
+# strongSwan (swanctl) hanya dipakai L2TP/IPsec saat IPsec Pre-Shared Key diisi. Terpisah dari
+# xl2tpd supaya L2TP murni tetap berjalan walau paket ini tidak tersedia.
+info "=== Paket IPsec opsional untuk L2TP/IPsec: strongswan-swanctl, charon-systemd ==="
+$SUDO apt-get install -y strongswan-swanctl charon-systemd \
+  || warn "Paket strongSwan gagal dipasang. L2TP murni tetap bisa dipakai; untuk L2TP/IPsec pasang manual: apt install strongswan-swanctl charon-systemd"
+# Paket Debian/Ubuntu langsung menyalakan xl2tpd (UDP 1701) dan strongSwan (UDP 500/4500) dengan
+# konfigurasi bawaan. Keduanya hanya dibutuhkan saat L2TP dihubungkan (raniah-l2tp.service yang
+# menyalakannya), jadi dimatikan agar port tidak terbuka percuma. Dilewati bila L2TP sedang aktif
+# (instalasi ulang) supaya tunnel yang berjalan tidak terputus.
+if ! systemctl is-active --quiet raniah-l2tp 2>/dev/null; then
+  for L2TP_SVC in xl2tpd strongswan strongswan-starter strongswan-swanctl; do
+    if systemctl cat "${L2TP_SVC}.service" >/dev/null 2>&1; then
+      $SUDO systemctl disable --now "${L2TP_SVC}.service" >/dev/null 2>&1 || true
+    fi
+  done
+fi
+
+# Tuning jaringan untuk tunnel VPN (RADIUS sensitif terhadap latensi/RTO). Buffer UDP lebih besar
+# untuk WireGuard/OpenVPN (sndbuf/rcvbuf 384 KiB di .ovpn butuh rmem_max/wmem_max >= nilainya),
+# MTU probing untuk TCP (SSTP) di jalur PPPoE, dan rp_filter loose (2) agar balasan yang masuk
+# lewat interface tunnel tidak dibuang. Idempoten: berkas ditimpa dengan isi yang sama.
+info "=== Tuning sysctl VPN: /etc/sysctl.d/99-raniah-vpn.conf ==="
+SYSCTL_VPN_FILE=/etc/sysctl.d/99-raniah-vpn.conf
+SYSCTL_VPN_TMP=$(mktemp)
+cat > "$SYSCTL_VPN_TMP" <<'EOF'
+# RANIAH billing: tuning jaringan untuk koneksi VPN (WireGuard/OpenVPN/SSTP/L2TP) ke MikroTik CHR.
+net.core.rmem_max=26214400
+net.core.wmem_max=26214400
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.conf.all.rp_filter=2
+EOF
+$SUDO install -m 0644 "$SYSCTL_VPN_TMP" "$SYSCTL_VPN_FILE"
+rm -f "$SYSCTL_VPN_TMP"
+# Di LXC/kontainer sebagian parameter read-only (hanya host yang boleh mengubahnya). Itu tidak
+# boleh menggagalkan instalasi: coba sysctl --system, bila ada yang gagal terapkan per parameter
+# dan laporkan mana yang ditolak.
+if ! $SUDO sysctl --system >/dev/null 2>&1; then
+  SYSCTL_DENIED=()
+  while IFS='=' read -r SYSCTL_KEY SYSCTL_VAL; do
+    [[ "$SYSCTL_KEY" =~ ^net\.[a-z0-9_.]+$ ]] || continue
+    $SUDO sysctl -w "${SYSCTL_KEY}=${SYSCTL_VAL}" >/dev/null 2>&1 || SYSCTL_DENIED+=("$SYSCTL_KEY")
+  done < "$SYSCTL_VPN_FILE"
+  if (( ${#SYSCTL_DENIED[@]} > 0 )); then
+    warn "Parameter sysctl ditolak (read-only di kontainer/host): ${SYSCTL_DENIED[*]}. Berkas tetap tersimpan; set di host Proxmox bila perlu."
+  fi
+fi
 
 if [[ "$USE_NGINX" == "1" ]]; then
   info "=== Nginx reverse proxy ==="
@@ -395,7 +443,7 @@ $SUDO systemctl restart freeradius
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
 # Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)
-# dan mengelola 3 unit VPN tetap (menu Koneksi VPN), semuanya tanpa wildcard.
+# dan mengelola 4 unit VPN tetap + xl2tpd (menu Koneksi VPN), semuanya tanpa wildcard.
 if [[ "$APP_USER" == "root" ]]; then
   info "Node berjalan sebagai root, /etc/sudoers.d/raniah-services tidak diperlukan."
 elif [[ ! "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
@@ -405,7 +453,7 @@ else
   $SUDO bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
 
   info "=== sudoers layanan & VPN untuk ${APP_USER} ==="
-  VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp)
+  VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp raniah-l2tp)
   SUDO_CMDS=()
   for SYSTEMCTL_BIN in /bin/systemctl /usr/bin/systemctl; do
     SUDO_CMDS+=("${SYSTEMCTL_BIN} restart postgresql" "${SYSTEMCTL_BIN} restart freeradius")
@@ -414,16 +462,22 @@ else
         "${SYSTEMCTL_BIN} enable --now ${VPN_UNIT}"
         "${SYSTEMCTL_BIN} restart ${VPN_UNIT}"
         "${SYSTEMCTL_BIN} disable --now ${VPN_UNIT}"
+        "${SYSTEMCTL_BIN} reset-failed ${VPN_UNIT}"
       )
     done
+    # xl2tpd (daemon L2TP) ikut dimatikan saat L2TP dilepas, tanpa hak restart/enable-nya.
+    SUDO_CMDS+=("${SYSTEMCTL_BIN} disable --now xl2tpd" "${SYSTEMCTL_BIN} reset-failed xl2tpd")
   done
   SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
-  # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP 20 baris
-  # supaya pesan TLS/sertifikat/auth sstpc tidak terpotong baris Exit pppd.
+  # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP/L2TP 20 baris
+  # supaya pesan TLS/sertifikat/auth tidak terpotong baris Exit pppd. Log L2TP menggabungkan
+  # xl2tpd karena pppd dan xl2tpd berjalan di bawah xl2tpd.service.
   for VPN_UNIT in "${VPN_UNITS[@]}"; do
-    LOG_N=10
-    [[ "$VPN_UNIT" == "raniah-sstp" ]] && LOG_N=20
-    SUDO_CMDS+=("/usr/bin/journalctl -u ${VPN_UNIT} -n ${LOG_N} --no-pager")
+    case "$VPN_UNIT" in
+      raniah-sstp) SUDO_CMDS+=("/usr/bin/journalctl -u raniah-sstp -n 20 --no-pager") ;;
+      raniah-l2tp) SUDO_CMDS+=("/usr/bin/journalctl -u raniah-l2tp -u xl2tpd -n 20 --no-pager") ;;
+      *) SUDO_CMDS+=("/usr/bin/journalctl -u ${VPN_UNIT} -n 10 --no-pager") ;;
+    esac
   done
   printf -v SUDO_LIST '%s, ' "${SUDO_CMDS[@]}"
   SUDO_LIST="${SUDO_LIST%, }"
@@ -468,7 +522,7 @@ echo -e "${GREEN}RADIUS   : secret = (input Anda) · set sama di MikroTik${NC}"
 echo
 
 # Catatan Koneksi VPN di kontainer (LXC/Proxmox). Hanya informasi, tidak menggagalkan instalasi.
-# WireGuard langsung jalan. OpenVPN butuh /dev/net/tun. SSTP butuh /dev/ppp, modul
+# WireGuard langsung jalan. OpenVPN butuh /dev/net/tun. SSTP dan L2TP butuh /dev/ppp, modul
 # ppp_generic + ppp_async, dan kontainer Privileged. `|| true` karena
 # systemd-detect-virt keluar 1 di server fisik/VPS.
 CONTAINER_TYPE="$(systemd-detect-virt -c 2>/dev/null || true)"
@@ -476,14 +530,14 @@ if [[ -n "$CONTAINER_TYPE" && "$CONTAINER_TYPE" != "none" ]]; then
   echo -e "${CYAN}Catatan: terdeteksi kontainer (${CONTAINER_TYPE}). Menu Sistem > Koneksi VPN:${NC}"
   echo "  WireGuard : langsung jalan di Unprivileged maupun Privileged, tanpa device tambahan."
   echo "  OpenVPN   : Unprivileged maupun Privileged, wajib passthrough /dev/net/tun."
-  echo "  SSTP      : wajib modul ppp_generic + ppp_async, passthrough /dev/ppp, dan kontainer Privileged"
+  echo "  SSTP/L2TP : wajib modul ppp_generic + ppp_async, passthrough /dev/ppp, dan kontainer Privileged"
   echo "              (unprivileged: 0). Tanpa itu pppd gagal: Couldn't set tty to PPP discipline: Operation not permitted."
   echo "              Kontainer Unprivileged yang sudah ada: Backup & Restore, hilangkan centang Unprivileged container."
   echo "  Di host Proxmox:"
   echo "    modprobe ppp_generic && modprobe ppp_async"
   echo "    printf 'ppp_generic\\nppp_async\\n' > /etc/modules-load.d/ppp.conf && chmod 666 /dev/ppp"
   VPN_DEV_NOTES=()
-  [[ -c /dev/ppp ]] || VPN_DEV_NOTES+=("  SSTP    : /dev/ppp belum ada. Tambahkan ke /etc/pve/lxc/<CTID>.conf:
+  [[ -c /dev/ppp ]] || VPN_DEV_NOTES+=("  SSTP/L2TP: /dev/ppp belum ada. Tambahkan ke /etc/pve/lxc/<CTID>.conf:
               lxc.cgroup2.devices.allow: c 108:0 rwm
               lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file")
   [[ -c /dev/net/tun ]] || VPN_DEV_NOTES+=("  OpenVPN : /dev/net/tun belum ada. Tambahkan ke /etc/pve/lxc/<CTID>.conf:

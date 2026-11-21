@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Koneksi VPN client server billing -> MikroTik CHR (WireGuard / OpenVPN / SSTP).
+ * Koneksi VPN client server billing -> MikroTik CHR (WireGuard / OpenVPN / SSTP / L2TP).
  *
  * - Status  : systemctl is-active, ip -4 addr, wg show (dump), sysfs counter.
  * - Aksi    : connect/disconnect lewat systemctl, protokol lain dimatikan lebih dulu.
@@ -17,7 +17,7 @@ const { IS_ROOT } = require('./privileged');
 const vpnConfig = require('./vpn_config');
 
 const {
-  PROTOCOLS, UNITS, INTERFACES,
+  PROTOCOLS, UNITS, COMPANION_UNITS, INTERFACES,
 } = vpnConfig;
 
 const HELPER_PATH = '/usr/local/sbin/raniah-vpn-helper';
@@ -28,25 +28,43 @@ const REQUIRED_TOOLS = {
   wireguard: ['wg', 'wg-quick'],
   openvpn: ['openvpn'],
   sstp: ['sstpc', 'pppd'],
+  l2tp: ['xl2tpd', 'xl2tpd-control', 'pppd'],
 };
 const PACKAGES = {
   wireguard: 'wireguard-tools',
   openvpn: 'openvpn',
   sstp: 'sstp-client ppp',
+  l2tp: 'xl2tpd ppp',
 };
-const LABELS = { wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP' };
+// L2TP/IPsec (PSK diisi) butuh strongSwan versi swanctl. Tanpa PSK paket ini tidak diperlukan.
+const IPSEC_TOOL = 'swanctl';
+const IPSEC_PACKAGES = 'strongswan-swanctl charon-systemd';
+const LABELS = {
+  wireguard: 'WireGuard', openvpn: 'OpenVPN', sstp: 'SSTP', l2tp: 'L2TP',
+};
 // Detik menunggu interface mendapat IP sebelum log unit diambil dan dikirim ke UI.
-const CONNECT_WAIT_SECONDS = { wireguard: 8, sstp: 8, openvpn: 15 };
-// SSTP butuh lebih banyak baris: pesan TLS/sertifikat/auth sstpc ada di atas
-// baris "Exit" pppd, jadi 10 baris sering memotong penyebab aslinya.
-const LOG_LINES = { wireguard: 10, openvpn: 10, sstp: 20 };
+const CONNECT_WAIT_SECONDS = {
+  wireguard: 8, sstp: 8, l2tp: 8, openvpn: 15,
+};
+// L2TP/IPsec menegosiasikan IKE + ESP dulu sebelum L2TP didial, jadi diberi waktu lebih panjang.
+const CONNECT_WAIT_SECONDS_IPSEC = 15;
+// SSTP/L2TP butuh lebih banyak baris: pesan TLS/sertifikat/auth ada di atas baris "Exit" pppd,
+// jadi 10 baris sering memotong penyebab aslinya.
+const LOG_LINES = {
+  wireguard: 10, openvpn: 10, sstp: 20, l2tp: 20,
+};
+// Unit journal yang digabung untuk log diagnosa. pppd milik L2TP berjalan di bawah xl2tpd.service.
+const LOG_UNITS = {
+  l2tp: [UNITS.l2tp, 'xl2tpd'],
+};
 const LOG_LINE_MAX = 300;
+function pppDeviceHint(label) {
+  return `${label} butuh /dev/ppp. Di host Proxmox jalankan "modprobe ppp_generic", "modprobe ppp_async", dan "chmod 666 /dev/ppp", lalu tambahkan ke /etc/pve/lxc/<CTID>.conf: "lxc.cgroup2.devices.allow: c 108:0 rwm" dan "lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file". Kontainer harus Privileged (unprivileged: 0). Jika masih Unprivileged, Backup & Restore tanpa centang Unprivileged container, lalu "pct reboot <CTID>".`;
+}
 // Device yang harus ada di OS. Di kontainer LXC/Proxmox keduanya harus diteruskan dari host.
 const REQUIRED_DEVICES = {
-  sstp: {
-    path: '/dev/ppp',
-    hint: 'SSTP butuh /dev/ppp. Di host Proxmox jalankan "modprobe ppp_generic", "modprobe ppp_async", dan "chmod 666 /dev/ppp", lalu tambahkan ke /etc/pve/lxc/<CTID>.conf: "lxc.cgroup2.devices.allow: c 108:0 rwm" dan "lxc.mount.entry: /dev/ppp dev/ppp none bind,create=file". Kontainer harus Privileged (unprivileged: 0). Jika masih Unprivileged, Backup & Restore tanpa centang Unprivileged container, lalu "pct reboot <CTID>".',
-  },
+  sstp: { path: '/dev/ppp', hint: pppDeviceHint('SSTP') },
+  l2tp: { path: '/dev/ppp', hint: pppDeviceHint('L2TP') },
   openvpn: {
     path: '/dev/net/tun',
     hint: 'OpenVPN butuh /dev/net/tun, tetapi device ini tidak ada di server (umum pada kontainer LXC/Proxmox). Di host Proxmox tambahkan ke /etc/pve/lxc/<CTID>.conf: "lxc.cgroup2.devices.allow: c 10:200 rwm" dan "lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file", lalu restart kontainer.',
@@ -125,6 +143,15 @@ function emptyPing() {
   };
 }
 
+// Unit yang disabled tapi masih berstatus failed di systemd tidak perlu membanjiri UI.
+function vpnFailedProtocols(states, { connected = false, activeProtocol = null } = {}) {
+  const failed = PROTOCOLS.filter((protocol) => states[protocol] === 'failed');
+  if (connected && activeProtocol) {
+    return failed.filter((protocol) => protocol === activeProtocol);
+  }
+  return failed;
+}
+
 // Host saja: buang :port. Menerima IPv4 dan domain. Bukan string yang lolos = null.
 function hostOf(value) {
   const raw = String(value || '').trim();
@@ -174,7 +201,7 @@ function publicPingTarget(protocol, profile) {
   if (protocol === 'wireguard') {
     return hostOf(profile.endpoint);
   }
-  if (protocol === 'sstp') {
+  if (protocol === 'sstp' || protocol === 'l2tp') {
     return hostOf(profile.server);
   }
   if (protocol === 'openvpn') {
@@ -190,6 +217,11 @@ function tunnelPingTarget(protocol, profile, activeIp) {
   }
   if (protocol === 'openvpn' || protocol === 'sstp') {
     return tunnelGateway(activeIp) || tunnelGateway(profile?.address);
+  }
+  if (protocol === 'l2tp') {
+    // Dari IP interface ppp yang diberi CHR. Subnet route NAS sengaja tidak dipakai sebagai
+    // cadangan: itu jaringan di belakang NAS, bukan gateway tunnel, dan hasil ping-nya menyesatkan.
+    return tunnelGateway(activeIp);
   }
   return null;
 }
@@ -252,8 +284,9 @@ function sanitizeLog(output, max = 20) {
 
 // Tebak penyebab dari log unit: device, port/jaringan, handshake TLS, sertifikat, atau kredensial.
 // Urutan penting: pesan "certificate ... ignoring" (mode --cert-warn) bukan kegagalan.
-function diagnoseLog(lines) {
+function diagnoseLog(lines, protocol = null) {
   const text = (Array.isArray(lines) ? lines : []).join('\n');
+  const isL2tp = protocol === 'l2tp';
   if (!text) {
     return null;
   }
@@ -266,11 +299,30 @@ function diagnoseLog(lines) {
       text: 'Kernel menolak line discipline PPP (Couldn\'t set tty to PPP discipline: Operation not permitted). Di host muat modul ppp_generic dan ppp_async. Kontainer LXC harus Privileged (unprivileged: 0); yang masih Unprivileged diubah lewat Backup & Restore di Proxmox (hilangkan centang Unprivileged container), lalu pct reboot <CTID>.',
     };
   }
-  if (/connection refused|timed out|timeout|could not connect|unable to connect|no route to host|network is unreachable|could not resolve|name or service not known|getaddrinfo|temporary failure in name resolution/i.test(text)) {
-    return { code: 'network', text: 'Server CHR tidak terjangkau. Periksa IP/domain, port (SSTP bawaan 443), service SSTP server aktif di CHR, dan firewall.' };
+  // IPsec dicek sebelum "network": kegagalan IKE sering berbentuk timeout/retransmit.
+  if (isL2tp && /no proposal chosen|NO_PROPOSAL_CHOSEN|INVALID_HASH_INFORMATION|AUTHENTICATION_FAILED|giving up after \d+ retransmits|establishing IKE_SA failed|initiate failed|IPsec gagal/i.test(text)) {
+    return {
+      code: 'ipsec',
+      text: 'Negosiasi IPsec ke CHR gagal. Periksa IPsec Pre-Shared Key (harus sama dengan ipsec-secret di CHR), UDP 500/4500 tidak diblokir, use-ipsec=yes di L2TP server CHR, dan paket strongswan-swanctl terpasang. Untuk L2TP tanpa IPsec, kosongkan IPsec Pre-Shared Key.',
+    };
+  }
+  if (/connection refused|timed out|timeout|could not connect|unable to connect|no route to host|network is unreachable|could not resolve|name or service not known|getaddrinfo|temporary failure in name resolution|maximum retries exceeded/i.test(text)) {
+    return {
+      code: 'network',
+      text: isL2tp
+        ? 'Server CHR tidak terjangkau. Periksa IP/domain, UDP 1701 (dan UDP 500/4500 bila memakai IPsec), L2TP server aktif di CHR, dan firewall.'
+        : 'Server CHR tidak terjangkau. Periksa IP/domain, port (SSTP bawaan 443), service SSTP server aktif di CHR, dan firewall.',
+    };
   }
   if (/authentication failed|authentication failure|peer refused to authenticate|chap authentication failed|mschap.*(fail|error)|auth.*(rejected|denied)|access-reject/i.test(text)) {
-    return { code: 'auth', text: 'Username/password ditolak CHR. Periksa /ppp secret (service=sstp atau any) dan profilnya.' };
+    return {
+      code: 'auth',
+      text: `Username/password ditolak CHR. Periksa /ppp secret (service=${isL2tp ? 'l2tp' : 'sstp'} atau any) dan profilnya.`,
+    };
+  }
+  // TLS/sertifikat hanya relevan untuk SSTP.
+  if (isL2tp) {
+    return null;
   }
   if (/ssl_connect|handshake|ssl error|unsupported protocol|wrong version number|alert (handshake|protocol)/i.test(text)) {
     return { code: 'tls', text: 'Handshake TLS gagal. Pastikan port itu memang SSTP server CHR dan versi TLS di CHR didukung.' };
@@ -313,6 +365,30 @@ function createVpnService(overrides = {}) {
     return result.stdout.trim();
   }
 
+  // Matikan unit protokol + hapus dari boot, lalu bersihkan status failed lama di systemd.
+  // Unit pendamping (xl2tpd untuk L2TP) dimatikan sesudahnya dan tidak pernah menggagalkan
+  // pelepasan unit utama (paketnya bisa saja belum terpasang).
+  async function disableUnit(protocol) {
+    const unit = UNITS[protocol];
+    try {
+      await systemctlPriv(['disable', '--now', unit]);
+    } finally {
+      await runPriv('systemctl', ['reset-failed', unit], { timeout: 8000 }).catch(() => {});
+    }
+    for (const companion of COMPANION_UNITS[protocol] || []) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await systemctlPriv(['disable', '--now', companion]);
+      } catch (error) {
+        if (error.status === 503) {
+          throw error;
+        }
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await runPriv('systemctl', ['reset-failed', companion], { timeout: 8000 }).catch(() => {});
+    }
+  }
+
   function findBinary(name) {
     return BIN_DIRS.some((dir) => existsSync(`${dir}/${name}`));
   }
@@ -327,11 +403,15 @@ function createVpnService(overrides = {}) {
         missing,
         package: PACKAGES[protocol],
         hint: missing.length ? `apt install -y ${PACKAGES[protocol]}` : null,
-        // Device OS yang wajib ada (mis. /dev/ppp untuk SSTP); kosong = aman.
+        // Device OS yang wajib ada (mis. /dev/ppp untuk SSTP/L2TP); kosong = aman.
         device_missing: device && !existsSync(device.path) ? device.path : null,
         device_hint: device && !existsSync(device.path) ? device.hint : null,
       };
     }
+    // IPsec bersifat opsional (hanya bila IPsec Pre-Shared Key diisi): dilaporkan terpisah dari `installed`.
+    const ipsecInstalled = findBinary(IPSEC_TOOL);
+    tools.l2tp.ipsec_installed = ipsecInstalled;
+    tools.l2tp.ipsec_hint = ipsecInstalled ? null : `apt install -y ${IPSEC_PACKAGES}`;
     return tools;
   }
 
@@ -428,13 +508,14 @@ function createVpnService(overrides = {}) {
       traffic: null,
       wireguard: null,
       units: states,
-      failed: PROTOCOLS.filter((protocol) => states[protocol] === 'failed'),
+      failed: [],
       tools: toolsInfo(),
       is_root: isRoot,
       helper_installed: isRoot || existsSync(helperPath),
       checked_at: new Date(now()).toISOString(),
     };
     if (!activeProtocol) {
+      status.failed = vpnFailedProtocols(states);
       status.ping = emptyPing();
       return status;
     }
@@ -467,6 +548,10 @@ function createVpnService(overrides = {}) {
       status.state = status.ip && states[activeProtocol] === 'active' ? 'connected' : 'connecting';
     }
     status.connected = status.state === 'connected';
+    status.failed = vpnFailedProtocols(states, {
+      connected: status.connected,
+      activeProtocol,
+    });
     status.traffic = presentTraffic(status.traffic);
     status.ping = emptyPing();
     return status;
@@ -525,10 +610,14 @@ function createVpnService(overrides = {}) {
     }
   }
 
-  function ensureTools(protocol) {
+  function ensureTools(protocol, cfg = null) {
     const info = toolsInfo()[protocol];
     if (!info.installed) {
       throw httpError(503, `Paket ${LABELS[protocol]} belum terpasang di server (${info.missing.join(', ')}). Jalankan: ${info.hint}`);
+    }
+    // L2TP + IPsec PSK: tanpa swanctl runner gagal di tahap IPsec, jadi tolak lebih awal dengan petunjuk.
+    if (protocol === 'l2tp' && cfg?.ipsec_secret && !info.ipsec_installed) {
+      throw httpError(503, `IPsec Pre-Shared Key diisi, tetapi paket strongSwan belum terpasang (${IPSEC_TOOL}). Jalankan: ${info.ipsec_hint}. Atau kosongkan IPsec Pre-Shared Key untuk L2TP murni.`);
     }
   }
 
@@ -539,14 +628,15 @@ function createVpnService(overrides = {}) {
     if (!need || existsSync(need.path)) {
       return;
     }
-    await systemctlPriv(['disable', '--now', UNITS[protocol]]).catch(() => {});
+    await disableUnit(protocol).catch(() => {});
     throw httpError(503, need.hint);
   }
 
   // Baris terakhir journal unit, untuk ditampilkan di UI saat koneksi belum tersambung.
   async function readUnitLog(protocol, lines = logLineCount(protocol)) {
     try {
-      const result = await runPriv('journalctl', ['-u', UNITS[protocol], '-n', String(lines), '--no-pager'], { timeout: 8000 });
+      const units = (LOG_UNITS[protocol] || [UNITS[protocol]]).flatMap((unit) => ['-u', unit]);
+      const result = await runPriv('journalctl', [...units, '-n', String(lines), '--no-pager'], { timeout: 8000 });
       if (!result || !result.ok) {
         return [];
       }
@@ -569,23 +659,17 @@ function createVpnService(overrides = {}) {
     }
   }
 
+  // Matikan & copot dari boot semua protokol lain agar tidak bentrok saat LXC/OS restart.
   async function stopOthers(protocol) {
     for (const other of PROTOCOLS.filter((item) => item !== protocol)) {
-      // eslint-disable-next-line no-await-in-loop
-      const [state, enabled] = await Promise.all([
-        unitState(other),
-        run('systemctl', ['is-enabled', UNITS[other]], { timeout: 8000 }).then((result) => result.stdout.trim()),
-      ]);
-      if (state !== 'inactive' || enabled === 'enabled') {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await systemctlPriv(['disable', '--now', UNITS[other]]);
-        } catch (error) {
-          if (error.status === 503) {
-            throw error;
-          }
-          // Unit belum pernah dibuat: tidak ada yang perlu dimatikan.
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await disableUnit(other);
+      } catch (error) {
+        if (error.status === 503) {
+          throw error;
         }
+        // Unit belum pernah dibuat: abaikan.
       }
     }
   }
@@ -602,7 +686,7 @@ function createVpnService(overrides = {}) {
     if (!cfg) {
       throw httpError(400, `Konfigurasi ${LABELS[protocol]} belum disimpan. Simpan konfigurasi dulu.`);
     }
-    ensureTools(protocol);
+    ensureTools(protocol, cfg);
     return exclusive(async () => {
       await ensureDevices(protocol);
       await applyConfig(protocol, cfg);
@@ -614,7 +698,9 @@ function createVpnService(overrides = {}) {
         await systemctlPriv(['restart', unit]);
       }
 
-      const attempts = CONNECT_WAIT_SECONDS[protocol] || 8;
+      const attempts = protocol === 'l2tp' && cfg.ipsec_secret
+        ? CONNECT_WAIT_SECONDS_IPSEC
+        : CONNECT_WAIT_SECONDS[protocol] || 8;
       let status = null;
       for (let i = 0; i < attempts; i += 1) {
         // eslint-disable-next-line no-await-in-loop
@@ -622,7 +708,7 @@ function createVpnService(overrides = {}) {
         // eslint-disable-next-line no-await-in-loop
         if (await routeHijack(protocol)) {
           // eslint-disable-next-line no-await-in-loop
-          await systemctlPriv(['disable', '--now', unit]).catch(() => {});
+          await disableUnit(protocol).catch(() => {});
           throw httpError(409, `${LABELS[protocol]} dibatalkan: CHR mencoba mengalihkan default route server sehingga akses VPS bisa terputus. Periksa konfigurasi di CHR.`);
         }
         // eslint-disable-next-line no-await-in-loop
@@ -646,7 +732,7 @@ function createVpnService(overrides = {}) {
       throw httpError(400, 'Protokol tidak dikenal.');
     }
     return exclusive(async () => {
-      await systemctlPriv(['disable', '--now', UNITS[protocol]]);
+      await disableUnit(protocol);
       return { status: await getStatus(), protocol };
     });
   }
@@ -720,7 +806,9 @@ async function markSelected(pool, protocol) {
 // Bentuk aman untuk browser: rahasia diganti penanda *_set, tidak pernah ikut dikirim.
 function publicProfiles(profiles, deps = {}) {
   const derive = deps.derivePublicKey || vpnConfig.derivePublicKey;
-  const out = { wireguard: null, openvpn: null, sstp: null };
+  const out = {
+    wireguard: null, openvpn: null, sstp: null, l2tp: null,
+  };
   const wg = profiles.wireguard;
   if (wg) {
     let publicKey = '';
@@ -762,6 +850,17 @@ function publicProfiles(profiles, deps = {}) {
       ignore_cert: Boolean(sstp.ignore_cert),
     };
   }
+  const l2tp = profiles.l2tp;
+  if (l2tp) {
+    out.l2tp = {
+      server: l2tp.server,
+      username: l2tp.username,
+      password_set: Boolean(l2tp.password),
+      routes: l2tp.routes || '',
+      // Nilai PSK tidak pernah dikirim ke browser, hanya penanda sudah diisi atau belum.
+      ipsec_secret_set: Boolean(l2tp.ipsec_secret),
+    };
+  }
   return out;
 }
 
@@ -780,6 +879,7 @@ module.exports = {
   parsePingMs,
   presentTraffic,
   emptyPing,
+  vpnFailedProtocols,
   logLineCount,
   sanitizeLog,
   diagnoseLog,

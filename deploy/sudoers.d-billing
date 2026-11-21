@@ -13,8 +13,18 @@ billing ALL=(root) NOPASSWD: \
   /usr/bin/systemctl enable --now raniah-sstp, \
   /usr/bin/systemctl restart raniah-sstp, \
   /usr/bin/systemctl disable --now raniah-sstp, \
+  /usr/bin/systemctl enable --now raniah-l2tp, \
+  /usr/bin/systemctl restart raniah-l2tp, \
+  /usr/bin/systemctl disable --now raniah-l2tp, \
+  /usr/bin/systemctl disable --now xl2tpd, \
+  /usr/bin/systemctl reset-failed wg-quick@wg-billing, \
+  /usr/bin/systemctl reset-failed openvpn-client@raniah-vpn, \
+  /usr/bin/systemctl reset-failed raniah-sstp, \
+  /usr/bin/systemctl reset-failed raniah-l2tp, \
+  /usr/bin/systemctl reset-failed xl2tpd, \
   /usr/bin/wg show wg-billing dump, \
   /usr/bin/journalctl -u wg-quick@wg-billing -n 10 --no-pager, \
   /usr/bin/journalctl -u openvpn-client@raniah-vpn -n 10 --no-pager, \
   /usr/bin/journalctl -u raniah-sstp -n 20 --no-pager, \
+  /usr/bin/journalctl -u raniah-l2tp -u xl2tpd -n 20 --no-pager, \
   /usr/local/sbin/raniah-vpn-helper apply

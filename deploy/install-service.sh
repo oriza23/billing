@@ -6,7 +6,7 @@
 # Hasil:
 #  - user sistem `billing` (tanpa login) pemilik /var/www/billing
 #  - billing.service (User=billing, Restart=always, ProtectSystem=strict)
-#  - /etc/sudoers.d/billing: restart PostgreSQL/FreeRADIUS, ubah zona waktu, dan kelola 3 unit VPN
+#  - /etc/sudoers.d/billing: restart PostgreSQL/FreeRADIUS, ubah zona waktu, dan kelola 4 unit VPN (WireGuard, OpenVPN, SSTP, L2TP) beserta xl2tpd
 #  - /usr/local/sbin/raniah-vpn-helper (root-owned) untuk menulis konfigurasi VPN
 set -euo pipefail
 

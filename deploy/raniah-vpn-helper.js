@@ -5,7 +5,7 @@
  * /usr/local/sbin/raniah-vpn-helper (lihat deploy/install-vpn-helper.sh) dan hanya boleh
  * dipanggil lewat sudoers: `sudo -n /usr/local/sbin/raniah-vpn-helper apply`.
  *
- * Input (stdin, JSON): { "protocol": "wireguard|openvpn|sstp", "config": { ... } }
+ * Input (stdin, JSON): { "protocol": "wireguard|openvpn|sstp|l2tp", "config": { ... } }
  *
  * Helper TIDAK menulis isi mentah dari proses aplikasi. Konfigurasi divalidasi ulang dengan
  * vpn_config.js (salinan root-owned) lalu semua berkas dirender dari template di sini, sehingga

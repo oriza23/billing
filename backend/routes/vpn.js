@@ -29,7 +29,9 @@ function sendError(res, error, fallback) {
   });
 }
 
-const EMPTY_PROFILES = { wireguard: null, openvpn: null, sstp: null };
+const EMPTY_PROFILES = {
+  wireguard: null, openvpn: null, sstp: null, l2tp: null,
+};
 
 // GET /api/sistem/vpn/status
 // Selalu 200. Paket belum terpasang atau interface belum ada bukan error halaman.
@@ -99,7 +101,7 @@ router.post('/wg/keygen', (req, res) => {
 router.post('/save', async (req, res) => {
   const protocol = protocolOf(req.body?.protocol);
   if (!protocol) {
-    return res.status(400).json({ success: false, message: 'Protokol tidak dikenal. Pilih wireguard, openvpn, atau sstp.' });
+    return res.status(400).json({ success: false, message: 'Protokol tidak dikenal. Pilih wireguard, openvpn, sstp, atau l2tp.' });
   }
   try {
     const { profiles } = await vpn.loadProfiles(pool);
@@ -128,7 +130,7 @@ router.post('/action', async (req, res) => {
   const protocol = protocolOf(req.body?.protocol);
   const action = typeof req.body?.action === 'string' ? req.body.action.trim().toLowerCase() : '';
   if (!protocol) {
-    return res.status(400).json({ success: false, message: 'Protokol tidak dikenal. Pilih wireguard, openvpn, atau sstp.' });
+    return res.status(400).json({ success: false, message: 'Protokol tidak dikenal. Pilih wireguard, openvpn, sstp, atau l2tp.' });
   }
   if (action !== 'connect' && action !== 'disconnect') {
     return res.status(400).json({ success: false, message: 'Aksi harus connect atau disconnect.' });
@@ -146,14 +148,14 @@ router.post('/action', async (req, res) => {
     const { status, log } = await vpn.service.connect(protocol, profiles[protocol] || null);
     await vpn.markSelected(pool, protocol);
     const connected = Boolean(status?.connected && status.protocol === protocol);
-    const diagnosis = connected ? null : vpn.diagnoseLog(log);
+    const diagnosis = connected ? null : vpn.diagnoseLog(log, protocol);
     let message;
     if (connected) {
       message = `VPN ${label} terhubung${status.ip ? ` (IP ${status.ip})` : ''}.`;
     } else if (diagnosis) {
       message = `VPN ${label} belum tersambung. Dugaan penyebab: ${diagnosis.text}`;
     } else if (status?.units?.[protocol] === 'failed') {
-      message = `Layanan VPN ${label} gagal berjalan. Periksa konfigurasi dan log: journalctl -u ${vpnConfig.UNITS[protocol]} -n 30.`;
+      message = `Layanan VPN ${label} gagal berjalan. Periksa konfigurasi dan log: journalctl -u ${vpnConfig.UNITS[protocol]}${protocol === 'l2tp' ? ' -u xl2tpd' : ''} -n 30.`;
     } else {
       message = protocol === 'wireguard'
         ? 'WireGuard dijalankan, tetapi belum ada handshake dari CHR. Periksa endpoint, public key (kedua sisi), allowed address di peer CHR, dan firewall UDP.'
@@ -168,7 +170,7 @@ router.post('/action', async (req, res) => {
       status,
       message,
       diagnosis: diagnosis ? diagnosis.code : null,
-      // Baris terakhir journal unit (SSTP: 20); kosong bila sudah tersambung.
+      // Baris terakhir journal unit (SSTP/L2TP: 20); kosong bila sudah tersambung.
       log: connected ? [] : (Array.isArray(log) ? log : []),
     });
   } catch (error) {

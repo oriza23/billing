@@ -5,6 +5,8 @@ import {
 import Swal from 'sweetalert2'
 import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
+import VpnServer from './VpnServer.jsx'
+import VpnChrNas from './VpnChrNas.jsx'
 
 const API = '/sistem/vpn'
 const LIVE_POLL_MS = 2000
@@ -277,6 +279,7 @@ function VpnConfig() {
   const inflightRef = useRef(false)
   const [rates, setRates] = useState({ rx: null, tx: null })
   const [connectLog, setConnectLog] = useState({ protocol: '', lines: [] })
+  const [mode, setMode] = useState(() => (sessionStorage.getItem('vpn-mode') === 'server' ? 'server' : 'client'))
 
   const rememberStatus = useCallback((data) => {
     setStatus(data)
@@ -551,6 +554,17 @@ function VpnConfig() {
       })
       return
     }
+    if (status?.server_active) {
+      const confirmServer = await Swal.fire({
+        title: 'Matikan VPN Server?',
+        text: 'WireGuard Server atau OpenVPN Server sedang aktif. Menghubungkan VPN Client akan mematikan keduanya supaya tidak bentrok.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Ya, matikan server',
+        cancelButtonText: 'Batal',
+      })
+      if (!confirmServer.isConfirmed) return
+    }
     if (status?.protocol && status.protocol !== tab) {
       const confirm = await Swal.fire({
         title: `Ganti ke ${LABEL[tab]}?`,
@@ -656,10 +670,35 @@ function VpnConfig() {
         <p className="m-0 text-xs font-bold tracking-widest text-cyan-700 uppercase dark:text-cyan-400">Sistem</p>
         <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 dark:text-gray-100">Koneksi VPN</h1>
         <p className="mt-1 mb-0 text-sm text-slate-500 dark:text-gray-400">
-          Hubungkan server billing sebagai VPN client ke MikroTik CHR agar RADIUS dan API router dijangkau lewat tunnel.
+          {mode === 'server'
+            ? 'Jadikan server billing sebagai VPN hub bagi router MikroTik NAS: WireGuard untuk ROS v7, OpenVPN untuk ROS v6.'
+            : 'Hubungkan server billing sebagai VPN client ke MikroTik CHR agar RADIUS dan API router dijangkau lewat tunnel.'}
         </p>
       </header>
 
+      <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-slate-700 dark:bg-slate-800" role="tablist" aria-label="Mode VPN">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'client'}
+          className={`h-10 rounded-lg text-sm font-bold transition-colors ${mode === 'client' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-gray-100' : 'text-slate-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-gray-100'}`}
+          onClick={() => { setMode('client'); sessionStorage.setItem('vpn-mode', 'client') }}
+        >
+          VPN Client (Hub CHR)
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'server'}
+          className={`h-10 rounded-lg text-sm font-bold transition-colors ${mode === 'server' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-gray-100' : 'text-slate-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-gray-100'}`}
+          onClick={() => { setMode('server'); sessionStorage.setItem('vpn-mode', 'server') }}
+        >
+          VPN Server (Mandiri)
+        </button>
+      </div>
+
+      {mode === 'server' ? <VpnServer /> : (
+      <>
       {/* Kartu status */}
       <div className={CARD} aria-live="polite">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -996,6 +1035,9 @@ function VpnConfig() {
           {dirty && <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">Ada perubahan yang belum disimpan</span>}
         </div>
       </form>
+      <VpnChrNas radiusAddress={state === 'connected' && status?.ip ? status.ip : '10.210.0.2'} />
+      </>
+      )}
     </section>
   )
 }

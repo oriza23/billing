@@ -1,6 +1,7 @@
 billing ALL=(root) NOPASSWD: \
   /usr/bin/systemctl restart postgresql, \
   /usr/bin/systemctl restart freeradius, \
+  /usr/bin/systemctl reload freeradius, \
   /usr/bin/timedatectl set-timezone *, \
   /usr/bin/ln -sfn /usr/share/zoneinfo/* /etc/localtime, \
   /usr/bin/install -m 0644 * /etc/timezone, \
@@ -43,4 +44,27 @@ billing ALL=(root) NOPASSWD: \
   /usr/local/sbin/raniah-vpn-helper cycle l2tp stop, \
   /usr/local/sbin/raniah-vpn-helper cycle l2tp start, \
   /usr/local/sbin/raniah-vpn-helper cycle l2tp restart, \
-  /usr/local/sbin/raniah-vpn-helper cycle l2tp disable
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp disable, \
+  /usr/bin/systemctl enable --now wg-quick@wg-server, \
+  /usr/bin/systemctl restart wg-quick@wg-server, \
+  /usr/bin/systemctl disable --now wg-quick@wg-server, \
+  /usr/bin/systemctl reset-failed wg-quick@wg-server, \
+  /usr/bin/wg show wg-server dump, \
+  /usr/bin/journalctl -u wg-quick@wg-server -n 20 --no-pager, \
+  /usr/local/sbin/raniah-vpn-helper apply-server, \
+  /usr/local/sbin/raniah-vpn-helper cycle server stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle server start, \
+  /usr/local/sbin/raniah-vpn-helper cycle server restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle server disable, \
+  /usr/bin/systemctl enable --now openvpn-server@raniah-server, \
+  /usr/bin/systemctl restart openvpn-server@raniah-server, \
+  /usr/bin/systemctl disable --now openvpn-server@raniah-server, \
+  /usr/bin/systemctl reset-failed openvpn-server@raniah-server, \
+  /usr/bin/journalctl -u openvpn-server@raniah-server -n 20 --no-pager, \
+  /usr/bin/cat /etc/openvpn/server/raniah-pki/ca.crt, \
+  /usr/bin/cat /run/openvpn-server/status-raniah.log, \
+  /usr/local/sbin/raniah-vpn-helper apply-ovpn-server, \
+  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server start, \
+  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server disable

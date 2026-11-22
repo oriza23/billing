@@ -12,9 +12,11 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const { execFile } = require('child_process');
 const { IS_ROOT } = require('./privileged');
 const vpnConfig = require('./vpn_config');
+const radiusNas = require('./radius_nas');
 
 const {
   PROTOCOLS, UNITS, INTERFACES,
@@ -131,6 +133,50 @@ function parseWgDump(output) {
     rx_bytes: Number(cols[5]) || 0,
     tx_bytes: Number(cols[6]) || 0,
   };
+}
+
+// Banyak peer. Baris pertama interface dibuang (berisi private key server).
+function parseWgServerDump(output) {
+  const lines = String(output || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const peers = [];
+  for (const line of lines.slice(1)) {
+    const cols = line.split('\t');
+    if (!cols[0]) {
+      continue;
+    }
+    const handshake = Number(cols[4]) || 0;
+    peers.push({
+      public_key: cols[0],
+      endpoint: cols[2] && cols[2] !== '(none)' ? cols[2] : null,
+      allowed_ips: cols[3] || '',
+      latest_handshake: handshake > 0 ? handshake : null,
+      rx_bytes: Number(cols[5]) || 0,
+      tx_bytes: Number(cols[6]) || 0,
+    });
+  }
+  return { peers };
+}
+
+// status-version 2: CLIENT_LIST,CN,real,virt,virt6,rx,tx,since,since_t,username,...
+function parseOvpnStatus(output) {
+  const peers = [];
+  for (const line of String(output || '').split('\n')) {
+    if (!line.startsWith('CLIENT_LIST,')) {
+      continue;
+    }
+    const cols = line.split(',');
+    const username = (cols[9] || cols[1] || '').trim();
+    if (!username || username === 'UNDEF') {
+      continue;
+    }
+    peers.push({
+      username,
+      virtual_ip: cols[3] || '',
+      rx_bytes: Number(cols[5]) || 0,
+      tx_bytes: Number(cols[6]) || 0,
+    });
+  }
+  return peers;
 }
 
 // Rute yang membelokkan seluruh trafik server lewat VPN (default / 0.0.0.0/1 / 128.0.0.0/1).
@@ -350,6 +396,10 @@ function createVpnService(overrides = {}) {
     }
   });
   const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const writeText = overrides.writeText || ((file, content) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, content, { mode: 0o600 });
+  });
   const now = overrides.now || (() => Date.now());
   const applyDisk = overrides.applyToDisk || vpnConfig.applyToDisk;
   const helperPath = overrides.helperPath || HELPER_PATH;
@@ -374,7 +424,7 @@ function createVpnService(overrides = {}) {
   // yang menjalankan urutan yang sama (pkill/ip tidak pernah masuk sudoers sebagai perintah bebas).
   async function cleanCycle(protocol, action) {
     if (isRoot) {
-      await vpnConfig.cycleVpn(protocol, action, { exec: run, sleep });
+      await vpnConfig.cycleVpn(protocol, action, { exec: run, sleep, readText, writeText });
       return;
     }
     const result = await run('sudo', ['-n', helperPath, 'cycle', protocol, action], { timeout: 60000 });
@@ -515,7 +565,10 @@ function createVpnService(overrides = {}) {
       is_root: isRoot,
       helper_installed: isRoot || existsSync(helperPath),
       checked_at: new Date(now()).toISOString(),
+      server_active: false,
     };
+    const hubLife = async (protocol) => ['active', 'activating', 'reloading'].includes(await unitState(protocol));
+    status.server_active = (await hubLife('server')) || (await hubLife('ovpn-server'));
     if (!activeProtocol) {
       status.failed = vpnFailedProtocols(states);
       status.ping = emptyPing();
@@ -690,6 +743,9 @@ function createVpnService(overrides = {}) {
     }
     ensureTools(protocol, cfg);
     return exclusive(async () => {
+      // Client tidak boleh bersamaan dengan hub. Matikan WireGuard Server dan OpenVPN Server.
+      await cleanCycle('server', 'disable');
+      await cleanCycle('ovpn-server', 'disable');
       await ensureDevices(protocol);
       await applyConfig(protocol, cfg);
       await stopOthers(protocol);
@@ -787,8 +843,209 @@ function createVpnService(overrides = {}) {
     });
   }
 
+  async function applyServer(server, peers) {
+    if (isRoot) {
+      try {
+        vpnConfig.applyServerToDisk(server, peers);
+      } catch (error) {
+        if (error.status) {
+          throw error;
+        }
+        throw httpError(500, `Gagal menulis konfigurasi VPN Server: ${String(error.message).slice(0, 240)}`);
+      }
+      return;
+    }
+    if (!existsSync(helperPath)) {
+      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
+    }
+    const result = await run('sudo', ['-n', helperPath, 'apply-server'], {
+      input: JSON.stringify({ server, peers }),
+      timeout: 30000,
+    });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi VPN Server: ${detail.slice(0, 240)}`);
+    }
+  }
+
+  async function getServerStatus() {
+    const life = await unitState('server');
+    const active = ['active', 'activating', 'reloading'].includes(life);
+    const status = {
+      state: life === 'failed' ? 'failed' : (active ? 'starting' : 'inactive'),
+      unit: life,
+      interface: INTERFACES.server,
+      ip: null,
+      rx_bytes: 0,
+      tx_bytes: 0,
+      peers: [],
+    };
+    if (!active) {
+      return status;
+    }
+    const addr = await interfaceInfo('server');
+    status.ip = addr?.ip || null;
+    if (status.ip) {
+      status.state = 'active';
+    }
+    const dump = await runPriv('wg', ['show', INTERFACES.server, 'dump'], { timeout: 8000 });
+    if (dump.ok) {
+      const parsed = parseWgServerDump(dump.stdout);
+      status.peers = parsed.peers;
+      for (const peer of parsed.peers) {
+        status.rx_bytes += peer.rx_bytes;
+        status.tx_bytes += peer.tx_bytes;
+      }
+    }
+    return status;
+  }
+
+  async function syncServer(server, peers) {
+    return exclusive(async () => {
+      await applyServer(server, peers);
+      const life = await unitState('server');
+      if (['active', 'activating', 'reloading'].includes(life)) {
+        await cleanCycle('server', 'restart');
+      }
+      return getServerStatus();
+    });
+  }
+
+  async function controlServer(action, server, peers) {
+    if (!['enable', 'disable', 'restart'].includes(action)) {
+      throw httpError(400, 'Aksi server harus enable, disable, atau restart.');
+    }
+    return exclusive(async () => {
+      if (action !== 'disable') {
+        if (!server?.public_endpoint) {
+          throw httpError(400, 'Isi Endpoint Publik (IP atau domain server ini) sebelum mengaktifkan VPN Server.');
+        }
+        const tools = toolsInfo();
+        if (!tools.wireguard.installed) {
+          throw httpError(503, `Paket WireGuard belum terpasang. Jalankan: ${tools.wireguard.hint}`);
+        }
+        await applyServer(server, peers);
+      }
+      const cycleAction = action === 'enable' ? 'start' : action;
+      await cleanCycle('server', cycleAction);
+      return getServerStatus();
+    });
+  }
+
+  async function readRootFile(file) {
+    const allowed = new Set([vpnConfig.PATHS.ovpnServerStatus, vpnConfig.PATHS.ovpnServerCa]);
+    if (!allowed.has(file)) {
+      throw httpError(400, 'Berkas tidak diizinkan.');
+    }
+    if (isRoot) {
+      try {
+        return readText(file);
+      } catch {
+        return '';
+      }
+    }
+    const result = await run('sudo', ['-n', '/usr/bin/cat', file], { timeout: 8000 });
+    return result.ok ? result.stdout : '';
+  }
+
+  async function applyOvpnServer(server, peers) {
+    if (isRoot) {
+      try {
+        vpnConfig.applyOvpnServerToDisk(server, peers);
+      } catch (error) {
+        if (error.status) {
+          throw error;
+        }
+        throw httpError(500, `Gagal menulis konfigurasi OpenVPN Server: ${String(error.message).slice(0, 240)}`);
+      }
+      return;
+    }
+    if (!existsSync(helperPath)) {
+      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
+    }
+    const result = await run('sudo', ['-n', helperPath, 'apply-ovpn-server'], {
+      input: JSON.stringify({ server, peers }),
+      timeout: 120000,
+    });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi OpenVPN Server: ${detail.slice(0, 240)}`);
+    }
+  }
+
+  async function getOvpnServerStatus() {
+    const life = await unitState('ovpn-server');
+    const active = ['active', 'activating', 'reloading'].includes(life);
+    const status = {
+      state: life === 'failed' ? 'failed' : (active ? 'starting' : 'inactive'),
+      unit: life,
+      interface: INTERFACES['ovpn-server'],
+      ip: null,
+      rx_bytes: 0,
+      tx_bytes: 0,
+      peers: [],
+    };
+    if (!active) {
+      return status;
+    }
+    const addr = await interfaceInfo('ovpn-server');
+    status.ip = addr?.ip || null;
+    if (status.ip) {
+      status.state = 'active';
+    }
+    const text = await readRootFile(vpnConfig.PATHS.ovpnServerStatus);
+    status.peers = parseOvpnStatus(text);
+    for (const peer of status.peers) {
+      status.rx_bytes += peer.rx_bytes;
+      status.tx_bytes += peer.tx_bytes;
+    }
+    return status;
+  }
+
+  async function syncOvpnServer(server, peers) {
+    return exclusive(async () => {
+      await applyOvpnServer(server, peers);
+      const life = await unitState('ovpn-server');
+      if (['active', 'activating', 'reloading'].includes(life)) {
+        await cleanCycle('ovpn-server', 'restart');
+      }
+      return getOvpnServerStatus();
+    });
+  }
+
+  async function controlOvpnServer(action, server, peers) {
+    if (!['enable', 'disable', 'restart'].includes(action)) {
+      throw httpError(400, 'Aksi server harus enable, disable, atau restart.');
+    }
+    return exclusive(async () => {
+      if (action !== 'disable') {
+        if (!server?.public_endpoint) {
+          throw httpError(400, 'Isi Endpoint Publik sebelum mengaktifkan OpenVPN Server.');
+        }
+        const tools = toolsInfo();
+        if (!tools.openvpn.installed) {
+          throw httpError(503, `Paket OpenVPN belum terpasang. Jalankan: ${tools.openvpn.hint}`);
+        }
+        await applyOvpnServer(server, peers);
+      }
+      const cycleAction = action === 'enable' ? 'start' : action;
+      await cleanCycle('ovpn-server', cycleAction);
+      return getOvpnServerStatus();
+    });
+  }
+
+  async function readOvpnCa() {
+    const pem = await readRootFile(vpnConfig.PATHS.ovpnServerCa);
+    if (!pem.includes('BEGIN CERTIFICATE')) {
+      throw httpError(404, 'CA belum dibuat. Simpan pengaturan OpenVPN Server dulu.');
+    }
+    return pem;
+  }
+
   return {
-    getStatus, connect, disconnect, restart, applyConfig, toolsInfo, measurePing, isRoot,
+    getStatus, connect, disconnect, restart, applyConfig, applyServer, syncServer, controlServer, getServerStatus,
+    applyOvpnServer, syncOvpnServer, controlOvpnServer, getOvpnServerStatus, readOvpnCa,
+    toolsInfo, measurePing, isRoot,
   };
 }
 
@@ -914,12 +1171,601 @@ function publicProfiles(profiles, deps = {}) {
   return out;
 }
 
+const HANDSHAKE_ONLINE_SECONDS = 180;
+
+async function ensureServerTables(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_server (
+      id INT PRIMARY KEY,
+      public_endpoint VARCHAR(255) NOT NULL DEFAULT '',
+      listen_port INT NOT NULL DEFAULT 51820,
+      address VARCHAR(32) NOT NULL DEFAULT '10.220.0.1/24',
+      private_key TEXT NOT NULL,
+      public_key VARCHAR(64) NOT NULL,
+      mtu INT NOT NULL DEFAULT 1380,
+      updated_by VARCHAR(50) DEFAULT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_server_peers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(64) NOT NULL,
+      address VARCHAR(32) NOT NULL UNIQUE,
+      public_key VARCHAR(64) NOT NULL UNIQUE,
+      private_key TEXT DEFAULT NULL,
+      preshared_key VARCHAR(64) DEFAULT NULL,
+      enabled SMALLINT NOT NULL DEFAULT 1,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query('ALTER TABLE vpn_server_peers ADD COLUMN IF NOT EXISTS radius_secret VARCHAR(64) NULL');
+}
+
+function peerRow(row) {
+  return {
+    id: Number(row.id),
+    name: row.name,
+    address: row.address,
+    public_key: row.public_key,
+    private_key: row.private_key || '',
+    preshared_key: row.preshared_key || '',
+    radius_secret: row.radius_secret || '',
+    enabled: Number(row.enabled) !== 0,
+  };
+}
+
+async function fillRadiusSecrets(pool, table, peers) {
+  let changed = false;
+  for (const peer of peers) {
+    if (/^[A-Za-z0-9]{20,32}$/.test(peer.radius_secret || '')) {
+      continue;
+    }
+    peer.radius_secret = vpnConfig.generateRadiusSecret();
+    await pool.execute(`UPDATE ${table} SET radius_secret = ? WHERE id = ?`, [peer.radius_secret, peer.id]);
+    changed = true;
+  }
+  return changed;
+}
+
+async function loadServer(pool) {
+  await ensureServerTables(pool);
+  const [servers] = await pool.query('SELECT id, public_endpoint, listen_port, address, private_key, public_key, mtu FROM vpn_server WHERE id = 1');
+  let server = servers[0];
+  if (!server) {
+    const pair = vpnConfig.generateKeypair();
+    await pool.execute(
+      'INSERT INTO vpn_server (id, public_endpoint, listen_port, address, private_key, public_key, mtu) VALUES (1, ?, ?, ?, ?, ?, ?)',
+      ['', vpnConfig.SERVER_DEFAULT_PORT, vpnConfig.SERVER_DEFAULT_ADDRESS, pair.private_key, pair.public_key, 1380],
+    );
+    server = {
+      id: 1,
+      public_endpoint: '',
+      listen_port: vpnConfig.SERVER_DEFAULT_PORT,
+      address: vpnConfig.SERVER_DEFAULT_ADDRESS,
+      private_key: pair.private_key,
+      public_key: pair.public_key,
+      mtu: 1380,
+    };
+  }
+  const [peerRows] = await pool.query(
+    'SELECT id, name, address, public_key, private_key, preshared_key, radius_secret, enabled FROM vpn_server_peers ORDER BY id',
+  );
+  const peers = (peerRows || []).map(peerRow);
+  const filled = await fillRadiusSecrets(pool, 'vpn_server_peers', peers);
+  if (filled) {
+    for (const peer of peers) {
+      await radiusNas.syncVpnPeer(pool, { kind: 'wg', peer });
+    }
+  }
+  return {
+    server: {
+      public_endpoint: server.public_endpoint || '',
+      listen_port: Number(server.listen_port),
+      address: server.address,
+      private_key: server.private_key,
+      public_key: server.public_key,
+      mtu: Number(server.mtu) || 1380,
+    },
+    peers,
+  };
+}
+
+function presentServer(bundle, live, nowMs = Date.now()) {
+  const nowSec = Math.floor(nowMs / 1000);
+  const byKey = new Map((live?.peers || []).map((peer) => [peer.public_key, peer]));
+  const peers = bundle.peers.map((peer) => {
+    const row = byKey.get(peer.public_key);
+    const handshake = row?.latest_handshake || null;
+    const age = handshake ? Math.max(0, nowSec - handshake) : null;
+    return {
+      id: peer.id,
+      name: peer.name,
+      address: peer.address,
+      public_key: peer.public_key,
+      enabled: peer.enabled,
+      preshared_key_set: Boolean(peer.preshared_key),
+      has_private_key: Boolean(peer.private_key),
+      radius_secret: peer.radius_secret || '',
+      online: Boolean(peer.enabled && handshake && age !== null && age <= HANDSHAKE_ONLINE_SECONDS),
+      handshake_age_seconds: age,
+      rx_bytes: row?.rx_bytes || 0,
+      tx_bytes: row?.tx_bytes || 0,
+    };
+  });
+  return {
+    server: {
+      public_endpoint: bundle.server.public_endpoint,
+      listen_port: bundle.server.listen_port,
+      address: bundle.server.address,
+      public_key: bundle.server.public_key,
+      mtu: bundle.server.mtu,
+      private_key_set: Boolean(bundle.server.private_key),
+    },
+    peers,
+    online: peers.filter((peer) => peer.online).length,
+    total: peers.length,
+  };
+}
+
+async function saveServerSettings(pool, input, username) {
+  const current = await loadServer(pool);
+  const server = vpnConfig.validateServer({ ...input, private_key: current.server.private_key }, current.server);
+  vpnConfig.validateServerBundle({ server, peers: current.peers });
+  await pool.execute(
+    'UPDATE vpn_server SET public_endpoint = ?, listen_port = ?, address = ?, public_key = ?, mtu = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1',
+    [server.public_endpoint, server.listen_port, server.address, server.public_key, server.mtu, username || null],
+  );
+  return loadServer(pool);
+}
+
+async function addServerPeer(pool, input) {
+  const current = await loadServer(pool);
+  const peer = vpnConfig.validatePeer(input, null);
+  if (current.peers.some((item) => item.public_key === peer.public_key)) {
+    const error = new Error('Public key peer ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'public_key';
+    throw error;
+  }
+  const address = vpnConfig.allocatePeerAddress(current.server.address, current.peers.map((item) => item.address));
+  const radiusSecret = vpnConfig.generateRadiusSecret();
+  const [header] = await pool.execute(
+    'INSERT INTO vpn_server_peers (name, address, public_key, private_key, preshared_key, radius_secret, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [peer.name, address, peer.public_key, peer.private_key || null, peer.preshared_key || null, radiusSecret, peer.enabled ? 1 : 0],
+  );
+  const bundle = await loadServer(pool);
+  const created = bundle.peers.find((item) => item.id === Number(header.insertId));
+  if (created) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'wg', peer: created });
+  }
+  return { id: Number(header.insertId), bundle };
+}
+
+async function updateServerPeer(pool, id, input) {
+  const current = await loadServer(pool);
+  const existing = current.peers.find((item) => item.id === id);
+  if (!existing) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  const peer = vpnConfig.validatePeer(input, existing);
+  if (current.peers.some((item) => item.id !== id && item.public_key === peer.public_key)) {
+    const error = new Error('Public key peer ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'public_key';
+    throw error;
+  }
+  const radiusSecret = /^[A-Za-z0-9]{20,32}$/.test(existing.radius_secret || '')
+    ? existing.radius_secret
+    : vpnConfig.generateRadiusSecret();
+  await pool.execute(
+    'UPDATE vpn_server_peers SET name = ?, public_key = ?, private_key = ?, preshared_key = ?, radius_secret = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [peer.name, peer.public_key, peer.private_key || null, peer.preshared_key || null, radiusSecret, peer.enabled ? 1 : 0, id],
+  );
+  const bundle = await loadServer(pool);
+  const saved = bundle.peers.find((item) => item.id === id);
+  if (saved) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'wg', peer: saved });
+  }
+  return bundle;
+}
+
+async function deleteServerPeer(pool, id) {
+  const current = await loadServer(pool);
+  if (!current.peers.some((item) => item.id === id)) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  await pool.execute('DELETE FROM vpn_server_peers WHERE id = ?', [id]);
+  await radiusNas.forgetVpnPeer(pool, { kind: 'wg', peerId: id });
+  return loadServer(pool);
+}
+
+function serverScript(bundle, id) {
+  const peer = bundle.peers.find((item) => item.id === id);
+  if (!peer) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  if (!bundle.server.public_endpoint) {
+    const error = new Error('Isi Endpoint Publik server sebelum menyalin script MikroTik.');
+    error.status = 400;
+    error.field = 'public_endpoint';
+    throw error;
+  }
+  return vpnConfig.renderMikrotikScript(bundle.server, peer);
+}
+
+function ovpnPeerRow(row) {
+  return {
+    id: Number(row.id),
+    name: row.name,
+    username: row.username,
+    password: row.password || '',
+    address: row.address,
+    radius_secret: row.radius_secret || '',
+    enabled: Number(row.enabled) !== 0,
+  };
+}
+
+async function ensureOvpnServerTables(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_ovpn_server (
+      id INT PRIMARY KEY,
+      public_endpoint VARCHAR(255) NOT NULL DEFAULT '',
+      listen_port INT NOT NULL DEFAULT 1194,
+      network VARCHAR(32) NOT NULL DEFAULT '10.221.0.0/24',
+      updated_by VARCHAR(50) DEFAULT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_ovpn_peers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(64) NOT NULL,
+      username VARCHAR(32) NOT NULL UNIQUE,
+      password TEXT NOT NULL,
+      address VARCHAR(32) NOT NULL UNIQUE,
+      enabled SMALLINT NOT NULL DEFAULT 1,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query('ALTER TABLE vpn_ovpn_peers ADD COLUMN IF NOT EXISTS radius_secret VARCHAR(64) NULL');
+}
+
+async function loadOvpnServer(pool) {
+  await ensureOvpnServerTables(pool);
+  const [servers] = await pool.query('SELECT id, public_endpoint, listen_port, network FROM vpn_ovpn_server WHERE id = 1');
+  let server = servers[0];
+  if (!server) {
+    await pool.execute(
+      'INSERT INTO vpn_ovpn_server (id, public_endpoint, listen_port, network) VALUES (1, ?, ?, ?)',
+      ['', vpnConfig.OVPN_SERVER_DEFAULT_PORT, vpnConfig.OVPN_SERVER_DEFAULT_NETWORK],
+    );
+    server = {
+      public_endpoint: '',
+      listen_port: vpnConfig.OVPN_SERVER_DEFAULT_PORT,
+      network: vpnConfig.OVPN_SERVER_DEFAULT_NETWORK,
+    };
+  }
+  const [peerRows] = await pool.query(
+    'SELECT id, name, username, password, address, radius_secret, enabled FROM vpn_ovpn_peers ORDER BY id',
+  );
+  const peers = (peerRows || []).map(ovpnPeerRow);
+  const filled = await fillRadiusSecrets(pool, 'vpn_ovpn_peers', peers);
+  if (filled) {
+    for (const peer of peers) {
+      await radiusNas.syncVpnPeer(pool, { kind: 'ovpn', peer });
+    }
+  }
+  return {
+    server: {
+      public_endpoint: server.public_endpoint || '',
+      listen_port: Number(server.listen_port) || vpnConfig.OVPN_SERVER_DEFAULT_PORT,
+      network: server.network || vpnConfig.OVPN_SERVER_DEFAULT_NETWORK,
+    },
+    peers,
+  };
+}
+
+function presentOvpnServer(bundle, live) {
+  const byUser = new Map((live?.peers || []).map((peer) => [peer.username, peer]));
+  const peers = bundle.peers.map((peer) => {
+    const livePeer = byUser.get(peer.username);
+    const online = Boolean(peer.enabled && livePeer);
+    return {
+      id: peer.id,
+      name: peer.name,
+      username: peer.username,
+      address: peer.address,
+      enabled: peer.enabled,
+      password_set: Boolean(peer.password),
+      radius_secret: peer.radius_secret || '',
+      online,
+      virtual_ip: online ? livePeer.virtual_ip : null,
+      rx_bytes: online ? livePeer.rx_bytes : 0,
+      tx_bytes: online ? livePeer.tx_bytes : 0,
+    };
+  });
+  return {
+    server: {
+      public_endpoint: bundle.server.public_endpoint,
+      listen_port: bundle.server.listen_port,
+      network: bundle.server.network,
+      server_ip: vpnConfig.validateOvpnServer(bundle.server).server_ip,
+    },
+    peers,
+    online: peers.filter((peer) => peer.online).length,
+    total: peers.length,
+  };
+}
+
+function assertOvpnPeersFit(server, peers) {
+  const net = vpnConfig.parseCidr(server.network, { minPrefix: 16 });
+  for (const peer of peers) {
+    const ip = vpnConfig.parseIPv4(String(peer.address || '').split('/')[0]);
+    if (!net || ip === null || ip <= net.network + 1 || ip >= net.network + net.size - 1) {
+      const error = new Error('Subnet baru tidak menampung peer yang sudah ada.');
+      error.status = 400;
+      error.field = 'network';
+      throw error;
+    }
+  }
+}
+
+async function saveOvpnServerSettings(pool, input, username) {
+  const current = await loadOvpnServer(pool);
+  const wg = await loadServer(pool);
+  const server = vpnConfig.validateOvpnServer(
+    { ...current.server, ...input },
+    { avoidCidr: wg.server.address },
+  );
+  assertOvpnPeersFit(server, current.peers);
+  await pool.execute(
+    'UPDATE vpn_ovpn_server SET public_endpoint = ?, listen_port = ?, network = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1',
+    [server.public_endpoint, server.listen_port, server.network, username || null],
+  );
+  return loadOvpnServer(pool);
+}
+
+async function addOvpnPeer(pool, input) {
+  const current = await loadOvpnServer(pool);
+  const peer = vpnConfig.validateOvpnPeer(input, null);
+  if (current.peers.some((item) => item.username === peer.username)) {
+    const error = new Error('Username ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'username';
+    throw error;
+  }
+  const address = vpnConfig.allocateOvpnAddress(current.server.network, current.peers.map((item) => item.address));
+  const radiusSecret = vpnConfig.generateRadiusSecret();
+  const [header] = await pool.execute(
+    'INSERT INTO vpn_ovpn_peers (name, username, password, address, radius_secret, enabled) VALUES (?, ?, ?, ?, ?, ?)',
+    [peer.name, peer.username, peer.password, address, radiusSecret, peer.enabled ? 1 : 0],
+  );
+  const bundle = await loadOvpnServer(pool);
+  const created = bundle.peers.find((item) => item.id === Number(header.insertId));
+  if (created) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'ovpn', peer: created });
+  }
+  return { id: Number(header.insertId), bundle };
+}
+
+async function updateOvpnPeer(pool, id, input) {
+  const current = await loadOvpnServer(pool);
+  const existing = current.peers.find((item) => item.id === id);
+  if (!existing) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  const peer = vpnConfig.validateOvpnPeer({ ...existing, ...input, password: input.password }, existing);
+  if (current.peers.some((item) => item.id !== id && item.username === peer.username)) {
+    const error = new Error('Username ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'username';
+    throw error;
+  }
+  const radiusSecret = /^[A-Za-z0-9]{20,32}$/.test(existing.radius_secret || '')
+    ? existing.radius_secret
+    : vpnConfig.generateRadiusSecret();
+  await pool.execute(
+    'UPDATE vpn_ovpn_peers SET name = ?, username = ?, password = ?, radius_secret = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [peer.name, peer.username, peer.password, radiusSecret, peer.enabled ? 1 : 0, id],
+  );
+  const bundle = await loadOvpnServer(pool);
+  const saved = bundle.peers.find((item) => item.id === id);
+  if (saved) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'ovpn', peer: saved });
+  }
+  return bundle;
+}
+
+async function deleteOvpnPeer(pool, id) {
+  const current = await loadOvpnServer(pool);
+  if (!current.peers.some((item) => item.id === id)) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  await pool.execute('DELETE FROM vpn_ovpn_peers WHERE id = ?', [id]);
+  await radiusNas.forgetVpnPeer(pool, { kind: 'ovpn', peerId: id });
+  return loadOvpnServer(pool);
+}
+
+async function ensureChrNasTable(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_chr_nas (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nama_router VARCHAR(64) NOT NULL,
+      ip_vpn_nas VARCHAR(32) NULL,
+      radius_secret VARCHAR(64) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+}
+
+function chrNasRow(row) {
+  return {
+    id: Number(row.id),
+    nama_router: row.nama_router,
+    ip_vpn_nas: row.ip_vpn_nas || '',
+    radius_secret: row.radius_secret || '',
+  };
+}
+
+async function chrRadiusAddress() {
+  try {
+    const status = await service.getStatus();
+    const ip = String(status?.ip || '').split('/')[0].trim();
+    if (status?.state === 'connected' && vpnConfig.parseIPv4(ip) !== null) {
+      return ip;
+    }
+  } catch {
+    // Tunnel belum terbaca: pakai alamat default di CHR.
+  }
+  return vpnConfig.CHR_RADIUS_ADDRESS;
+}
+
+async function listChrNas(pool) {
+  await ensureChrNasTable(pool);
+  const [rows] = await pool.query(
+    'SELECT id, nama_router, ip_vpn_nas, radius_secret FROM vpn_chr_nas ORDER BY id',
+  );
+  return {
+    radius_address: await chrRadiusAddress(),
+    items: (rows || []).map(chrNasRow),
+  };
+}
+
+async function assertChrNasFree(pool, row, exceptId = 0) {
+  const [names] = await pool.execute(
+    'SELECT id FROM vpn_chr_nas WHERE nama_router = ? AND id <> ? LIMIT 1',
+    [row.nama_router, exceptId],
+  );
+  if (names.length) {
+    const error = new Error('Nama router ini sudah ada di daftar NAS CHR.');
+    error.status = 409;
+    error.field = 'nama_router';
+    throw error;
+  }
+  if (!row.ip_vpn_nas) {
+    return;
+  }
+  const [ips] = await pool.execute(
+    'SELECT id FROM vpn_chr_nas WHERE ip_vpn_nas = ? AND id <> ? LIMIT 1',
+    [row.ip_vpn_nas, exceptId],
+  );
+  if (ips.length) {
+    const error = new Error('IP VPN NAS ini sudah dipakai.');
+    error.status = 409;
+    error.field = 'ip_vpn_nas';
+    throw error;
+  }
+}
+
+async function addChrNas(pool, input) {
+  const row = vpnConfig.validateChrNas(input);
+  await ensureChrNasTable(pool);
+  await assertChrNasFree(pool, row);
+  const secret = vpnConfig.generateRadiusSecret();
+  const [header] = await pool.execute(
+    'INSERT INTO vpn_chr_nas (nama_router, ip_vpn_nas, radius_secret) VALUES (?, ?, ?)',
+    [row.nama_router, row.ip_vpn_nas || null, secret],
+  );
+  const saved = { id: Number(header.insertId), ...row, radius_secret: secret };
+  await radiusNas.syncChrClient(pool, { id: saved.id, name: saved.nama_router, ip: saved.ip_vpn_nas, radius_secret: secret });
+  return saved;
+}
+
+async function updateChrNas(pool, id, input) {
+  await ensureChrNasTable(pool);
+  const [rows] = await pool.execute(
+    'SELECT id, nama_router, ip_vpn_nas, radius_secret FROM vpn_chr_nas WHERE id = ? LIMIT 1',
+    [id],
+  );
+  const existing = rows[0];
+  if (!existing) {
+    const error = new Error('NAS tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  const row = vpnConfig.validateChrNas({ ...chrNasRow(existing), ...input });
+  await assertChrNasFree(pool, row, id);
+  const secret = /^[A-Za-z0-9]{20,32}$/.test(existing.radius_secret || '')
+    ? existing.radius_secret
+    : vpnConfig.generateRadiusSecret();
+  await pool.execute(
+    'UPDATE vpn_chr_nas SET nama_router = ?, ip_vpn_nas = ?, radius_secret = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [row.nama_router, row.ip_vpn_nas || null, secret, id],
+  );
+  await radiusNas.syncChrClient(pool, { id, name: row.nama_router, ip: row.ip_vpn_nas, radius_secret: secret });
+  return { id, ...row, radius_secret: secret };
+}
+
+async function deleteChrNas(pool, id) {
+  await ensureChrNasTable(pool);
+  const [rows] = await pool.execute('SELECT id FROM vpn_chr_nas WHERE id = ? LIMIT 1', [id]);
+  if (!rows.length) {
+    const error = new Error('NAS tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  await pool.execute('DELETE FROM vpn_chr_nas WHERE id = ?', [id]);
+  await radiusNas.forgetVpnPeer(pool, { kind: 'chr', peerId: id });
+}
+
+async function chrNasScript(pool, id) {
+  await ensureChrNasTable(pool);
+  const [rows] = await pool.execute(
+    'SELECT id, nama_router, ip_vpn_nas, radius_secret FROM vpn_chr_nas WHERE id = ? LIMIT 1',
+    [id],
+  );
+  const row = rows[0] ? chrNasRow(rows[0]) : null;
+  if (!row) {
+    const error = new Error('NAS tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  const radiusAddress = await chrRadiusAddress();
+  return {
+    radius_address: radiusAddress,
+    script: vpnConfig.renderChrMikrotikScript({
+      name: row.nama_router,
+      radiusAddress,
+      secret: row.radius_secret,
+      nasIp: row.ip_vpn_nas,
+    }),
+  };
+}
+
+function ovpnServerScript(bundle, id) {
+  const peer = bundle.peers.find((item) => item.id === id);
+  if (!peer) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  return vpnConfig.renderOvpnMikrotikScript(bundle.server, peer);
+}
+
+const service = createVpnService();
+
 module.exports = {
   HELPER_PATH,
   LABELS,
   createVpnService,
   parseIpAddr,
   parseWgDump,
+  parseWgServerDump,
+  parseOvpnStatus,
   hijacksDefaultRoute,
   hostOf,
   isSafePingTarget,
@@ -934,9 +1780,31 @@ module.exports = {
   sanitizeLog,
   diagnoseLog,
   ensureTable,
+  ensureServerTables,
+  loadServer,
+  presentServer,
+  saveServerSettings,
+  addServerPeer,
+  updateServerPeer,
+  deleteServerPeer,
+  serverScript,
+  ensureOvpnServerTables,
+  loadOvpnServer,
+  presentOvpnServer,
+  saveOvpnServerSettings,
+  addOvpnPeer,
+  updateOvpnPeer,
+  deleteOvpnPeer,
+  ovpnServerScript,
+  listChrNas,
+  addChrNas,
+  updateChrNas,
+  deleteChrNas,
+  chrNasScript,
+  chrRadiusAddress,
   loadProfiles,
   saveProfile,
   markSelected,
   publicProfiles,
-  service: createVpnService(),
+  service,
 };

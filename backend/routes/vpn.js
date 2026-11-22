@@ -231,4 +231,299 @@ router.post('/restart', async (req, res) => {
   }
 });
 
+function peerId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
+}
+
+async function serverPayload(live) {
+  const bundle = await vpn.loadServer(pool);
+  const view = vpn.presentServer(bundle, live || { peers: [] });
+  return { bundle, view };
+}
+
+// GET /api/sistem/vpn/server
+router.get('/server', async (req, res) => {
+  try {
+    const live = await vpn.service.getServerStatus();
+    const { view } = await serverPayload(live);
+    res.json({ success: true, ...view, status: live });
+  } catch (error) {
+    console.error('[vpn] server:', error);
+    res.status(500).json({ success: false, message: 'Gagal membaca VPN Server.' });
+  }
+});
+
+// POST /api/sistem/vpn/server/save
+router.post('/server/save', async (req, res) => {
+  try {
+    const bundle = await vpn.saveServerSettings(pool, req.body || {}, req.user?.username);
+    const status = await vpn.service.syncServer(bundle.server, bundle.peers);
+    const view = vpn.presentServer(bundle, status);
+    res.json({
+      success: true,
+      message: status.state === 'active' ? 'Pengaturan server disimpan dan diterapkan ulang.' : 'Pengaturan server disimpan.',
+      ...view,
+      status,
+    });
+  } catch (error) {
+    sendError(res, error, 'Gagal menyimpan VPN Server.');
+  }
+});
+
+// POST /api/sistem/vpn/server/action  { action: enable|disable|restart }
+router.post('/server/action', async (req, res) => {
+  const action = typeof req.body?.action === 'string' ? req.body.action.trim().toLowerCase() : '';
+  if (!['enable', 'disable', 'restart'].includes(action)) {
+    return res.status(400).json({ success: false, message: 'Aksi harus enable, disable, atau restart.' });
+  }
+  try {
+    const bundle = await vpn.loadServer(pool);
+    const status = await vpn.service.controlServer(action, bundle.server, bundle.peers);
+    const view = vpn.presentServer(await vpn.loadServer(pool), status);
+    const message = action === 'disable'
+      ? 'VPN Server dimatikan. Port UDP dan subnet-nya ditutup di UFW.'
+      : action === 'restart'
+        ? 'VPN Server di-restart. VPN Client ikut dimatikan bila masih jalan.'
+        : 'VPN Server aktif. Keempat VPN Client dimatikan supaya tidak bentrok.';
+    return res.json({ success: true, message, ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal mengubah VPN Server.');
+  }
+});
+
+// POST /api/sistem/vpn/server/peers
+router.post('/server/peers', async (req, res) => {
+  try {
+    const { bundle } = await vpn.addServerPeer(pool, req.body || {});
+    const status = await vpn.service.syncServer(bundle.server, bundle.peers);
+    const view = vpn.presentServer(bundle, status);
+    res.json({ success: true, message: 'Peer ditambahkan. IP VPN diberikan otomatis.', ...view, status });
+  } catch (error) {
+    sendError(res, error, 'Gagal menambah peer.');
+  }
+});
+
+router.patch('/server/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.updateServerPeer(pool, id, req.body || {});
+    const status = await vpn.service.syncServer(bundle.server, bundle.peers);
+    const view = vpn.presentServer(bundle, status);
+    return res.json({ success: true, message: 'Peer diperbarui.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal memperbarui peer.');
+  }
+});
+
+router.delete('/server/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.deleteServerPeer(pool, id);
+    const status = await vpn.service.syncServer(bundle.server, bundle.peers);
+    const view = vpn.presentServer(bundle, status);
+    return res.json({ success: true, message: 'Peer dihapus.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal menghapus peer.');
+  }
+});
+
+async function ovpnPayload(live) {
+  const bundle = await vpn.loadOvpnServer(pool);
+  const view = vpn.presentOvpnServer(bundle, live || { peers: [] });
+  return { bundle, view };
+}
+
+router.get('/server/ovpn', async (req, res) => {
+  try {
+    const live = await vpn.service.getOvpnServerStatus();
+    const { view } = await ovpnPayload(live);
+    res.json({ success: true, ...view, status: live });
+  } catch (error) {
+    console.error('[vpn] ovpn server:', error);
+    res.status(500).json({ success: false, message: 'Gagal membaca OpenVPN Server.' });
+  }
+});
+
+router.post('/server/ovpn/save', async (req, res) => {
+  try {
+    const bundle = await vpn.saveOvpnServerSettings(pool, req.body || {}, req.user?.username);
+    const status = await vpn.service.syncOvpnServer(bundle.server, bundle.peers);
+    const view = vpn.presentOvpnServer(bundle, status);
+    res.json({
+      success: true,
+      message: status.state === 'active' ? 'Pengaturan OpenVPN disimpan dan diterapkan ulang.' : 'Pengaturan OpenVPN disimpan.',
+      ...view,
+      status,
+    });
+  } catch (error) {
+    sendError(res, error, 'Gagal menyimpan OpenVPN Server.');
+  }
+});
+
+router.post('/server/ovpn/action', async (req, res) => {
+  const action = typeof req.body?.action === 'string' ? req.body.action.trim().toLowerCase() : '';
+  if (!['enable', 'disable', 'restart'].includes(action)) {
+    return res.status(400).json({ success: false, message: 'Aksi harus enable, disable, atau restart.' });
+  }
+  try {
+    const bundle = await vpn.loadOvpnServer(pool);
+    const status = await vpn.service.controlOvpnServer(action, bundle.server, bundle.peers);
+    const view = vpn.presentOvpnServer(await vpn.loadOvpnServer(pool), status);
+    const message = action === 'disable'
+      ? 'OpenVPN Server dimatikan. Port TCP dan subnet-nya ditutup di UFW.'
+      : action === 'restart'
+        ? 'OpenVPN Server di-restart. VPN Client ikut dimatikan bila masih jalan.'
+        : 'OpenVPN Server aktif. VPN Client dimatikan. WireGuard Server tetap boleh hidup.';
+    return res.json({ success: true, message, ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal mengubah OpenVPN Server.');
+  }
+});
+
+router.post('/server/ovpn/peers', async (req, res) => {
+  try {
+    const { bundle } = await vpn.addOvpnPeer(pool, req.body || {});
+    const status = await vpn.service.syncOvpnServer(bundle.server, bundle.peers);
+    const view = vpn.presentOvpnServer(bundle, status);
+    res.json({ success: true, message: 'Peer ROS v6 ditambahkan. IP VPN diberikan otomatis.', ...view, status });
+  } catch (error) {
+    sendError(res, error, 'Gagal menambah peer OpenVPN.');
+  }
+});
+
+router.patch('/server/ovpn/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.updateOvpnPeer(pool, id, req.body || {});
+    const status = await vpn.service.syncOvpnServer(bundle.server, bundle.peers);
+    const view = vpn.presentOvpnServer(bundle, status);
+    return res.json({ success: true, message: 'Peer OpenVPN diperbarui.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal memperbarui peer OpenVPN.');
+  }
+});
+
+router.delete('/server/ovpn/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.deleteOvpnPeer(pool, id);
+    const status = await vpn.service.syncOvpnServer(bundle.server, bundle.peers);
+    const view = vpn.presentOvpnServer(bundle, status);
+    return res.json({ success: true, message: 'Peer OpenVPN dihapus.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal menghapus peer OpenVPN.');
+  }
+});
+
+router.get('/server/ovpn/peers/:id/script', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.loadOvpnServer(pool);
+    const script = vpn.ovpnServerScript(bundle, id);
+    return res.json({ success: true, script });
+  } catch (error) {
+    return sendError(res, error, 'Gagal membuat script MikroTik.');
+  }
+});
+
+router.get('/server/ovpn/ca', async (req, res) => {
+  try {
+    const pem = await vpn.service.readOvpnCa();
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, filename: 'raniah-ovpn-ca.crt', pem });
+  } catch (error) {
+    return sendError(res, error, 'Gagal membaca CA OpenVPN.');
+  }
+});
+
+router.get('/chr-nas', async (req, res) => {
+  try {
+    const data = await vpn.listChrNas(pool);
+    res.json({ success: true, ...data });
+  } catch (error) {
+    sendError(res, error, 'Gagal membaca daftar NAS CHR.');
+  }
+});
+
+router.post('/chr-nas', async (req, res) => {
+  try {
+    const item = await vpn.addChrNas(pool, req.body || {});
+    const data = await vpn.listChrNas(pool);
+    res.json({ success: true, message: 'NAS CHR ditambahkan. Secret RADIUS dibuat otomatis.', item, ...data });
+  } catch (error) {
+    sendError(res, error, 'Gagal menambah NAS CHR.');
+  }
+});
+
+router.patch('/chr-nas/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID NAS tidak valid.' });
+  }
+  try {
+    await vpn.updateChrNas(pool, id, req.body || {});
+    const data = await vpn.listChrNas(pool);
+    return res.json({ success: true, message: 'NAS CHR diperbarui.', ...data });
+  } catch (error) {
+    return sendError(res, error, 'Gagal memperbarui NAS CHR.');
+  }
+});
+
+router.delete('/chr-nas/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID NAS tidak valid.' });
+  }
+  try {
+    await vpn.deleteChrNas(pool, id);
+    const data = await vpn.listChrNas(pool);
+    return res.json({ success: true, message: 'NAS CHR dihapus dari FreeRADIUS.', ...data });
+  } catch (error) {
+    return sendError(res, error, 'Gagal menghapus NAS CHR.');
+  }
+});
+
+router.get('/chr-nas/:id/script', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID NAS tidak valid.' });
+  }
+  try {
+    const data = await vpn.chrNasScript(pool, id);
+    return res.json({ success: true, ...data });
+  } catch (error) {
+    return sendError(res, error, 'Gagal membuat script MikroTik.');
+  }
+});
+
+router.get('/server/peers/:id/script', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.loadServer(pool);
+    const script = vpn.serverScript(bundle, id);
+    return res.json({ success: true, script });
+  } catch (error) {
+    return sendError(res, error, 'Gagal membuat script MikroTik.');
+  }
+});
+
 module.exports = router;

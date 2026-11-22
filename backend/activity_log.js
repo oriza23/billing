@@ -34,7 +34,8 @@ const ACTION_BY_PATH = [
   { re: /^\/api\/auth\/login$/i, action: 'login' },
   { re: /^\/api\/sistem\/restart-service$/i, action: 'restart' },
   // Simpan konfigurasi & connect/disconnect VPN dicatat sebagai perubahan koneksi VPN.
-  { re: /^\/api\/sistem\/vpn\/(?:save|action)$/i, action: 'edit' },
+  { re: /^\/api\/sistem\/vpn\/(?:save|action|restart)$/i, action: 'edit' },
+  { re: /^\/api\/sistem\/vpn\/server\/(?:ovpn\/)?(?:save|action)$/i, action: 'edit' },
   // POST .../delete, /delete-massal, /hapus, /disconnect, /putus = hapus data.
   { re: /\/(?:delete|hapus)(?:$|[/-])/i, action: 'hapus' },
   { re: /\/(?:disconnect|putus)(?:$|[/-])/i, action: 'hapus' },

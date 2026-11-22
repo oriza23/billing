@@ -5,7 +5,8 @@
  * /usr/local/sbin/raniah-vpn-helper (lihat deploy/install-vpn-helper.sh) dan hanya boleh
  * dipanggil lewat sudoers:
  *   sudo -n /usr/local/sbin/raniah-vpn-helper apply
- *   sudo -n /usr/local/sbin/raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp> <stop|start|restart|disable>
+ *   sudo -n /usr/local/sbin/raniah-vpn-helper apply-server
+ *   sudo -n /usr/local/sbin/raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp|server> <stop|start|restart|disable>
  *
  * apply  — stdin JSON: { "protocol", "config" }. Isi divalidasi ulang lalu dirender dari template.
  * cycle  — stop bersih (unit, proses yatim, hapus interface, tunggu hilang) lalu start bila diminta.
@@ -29,13 +30,32 @@ function die(message, code = 1) {
   process.exit(code);
 }
 
+function readStdin(onJson) {
+  const chunks = [];
+  let size = 0;
+  process.stdin.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > 256 * 1024) {
+      die('Input terlalu besar.', 4);
+    }
+    chunks.push(chunk);
+  });
+  process.stdin.on('end', () => {
+    try {
+      onJson(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    } catch (error) {
+      die(error.message || String(error), error.status === 400 ? 6 : 1);
+    }
+  });
+}
+
 function main() {
   const cmd = process.argv[2];
   if (cmd === 'cycle') {
     const protocol = process.argv[3];
     const action = process.argv[4];
     if (process.argv.length !== 5) {
-      die('Pemakaian: raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp> <stop|start|restart|disable>', 2);
+      die('Pemakaian: raniah-vpn-helper cycle <wireguard|openvpn|sstp|l2tp|server> <stop|start|restart|disable>', 2);
     }
     let vpn;
     try {
@@ -43,7 +63,7 @@ function main() {
     } catch (error) {
       die(error.message || String(error), 1);
     }
-    if (!vpn.PROTOCOLS.includes(protocol) || !vpn.CYCLE_ACTIONS.includes(action)) {
+    if (!vpn.CYCLE_PROTOCOLS.includes(protocol) || !vpn.CYCLE_ACTIONS.includes(action)) {
       die('Protokol atau aksi tidak dikenal.', 5);
     }
     if (typeof process.getuid === 'function' && process.getuid() !== 0) {
@@ -57,6 +77,32 @@ function main() {
         die(error.message || String(error), error.status === 400 ? 6 : 1);
       });
     return;
+  }
+  if (cmd === 'apply-ovpn-server') {
+    if (process.argv.length !== 3) {
+      die('Pemakaian: raniah-vpn-helper apply-ovpn-server  (JSON dari stdin)', 2);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    return readStdin((payload) => {
+      const vpn = loadConfigModule();
+      const written = vpn.applyOvpnServerToDisk(payload.server, payload.peers);
+      process.stdout.write(`${JSON.stringify({ ok: true, files: written })}\n`);
+    });
+  }
+  if (cmd === 'apply-server') {
+    if (process.argv.length !== 3) {
+      die('Pemakaian: raniah-vpn-helper apply-server  (JSON dari stdin)', 2);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    return readStdin((payload) => {
+      const vpn = loadConfigModule();
+      const written = vpn.applyServerToDisk(payload.server, payload.peers);
+      process.stdout.write(`${JSON.stringify({ ok: true, files: written })}\n`);
+    });
   }
   if (cmd !== 'apply' || process.argv.length !== 3) {
     die('Pemakaian: raniah-vpn-helper apply  (JSON dari stdin)', 2);

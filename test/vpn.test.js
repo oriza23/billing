@@ -14,7 +14,7 @@ const cfg = require('../backend/vpn_config');
 const {
   createVpnService, parseIpAddr, parseWgDump, hijacksDefaultRoute, publicProfiles,
   hostOf, isSafePingTarget, tunnelGateway, publicPingTarget, tunnelPingTarget, parsePingMs,
-  vpnFailedProtocols,
+  vpnFailedProtocols, parseOvpnStatus, presentOvpnServer,
 } = require('../backend/vpn');
 
 const KEY_A = 'A'.repeat(43) + '=';
@@ -532,6 +532,7 @@ function serviceWith(system, extra = {}) {
     readText: (file) => (file === '/proc/uptime' ? '9000.5 100\n' : '1000'),
     sleep: async () => {},
     now: () => 1700000100 * 1000,
+    writeText: () => {},
     applyToDisk: (protocol, config) => applied.push([protocol, config]),
     ...extra,
   });
@@ -1566,5 +1567,209 @@ test('install.sh: UFW hanya port yang dibutuhkan, tanpa port inbound VPN, SSH ti
   assert.match(installer, /VPN_SUBNET="\$\{VPN_SUBNET-10\.210\.0\.0\/24\}"/);
   assert.match(block, />= 16 && 10#\$\{BASH_REMATCH\[6\]\} <= 32/);
   assert.doesNotMatch(block, /ufw (delete|reset)/);
+});
+
+test('wg server: subnet, alokasi IP peer, conf tanpa PostUp, script RouterOS', () => {
+  const pair = cfg.generateKeypair();
+  const server = cfg.validateServer({
+    public_endpoint: 'vpn.contoh.net',
+    listen_port: 51820,
+    address: '10.220.0.1/24',
+    private_key: pair.private_key,
+  });
+  assert.equal(server.public_key, pair.public_key);
+  assert.equal(server.network, '10.220.0.0/24');
+  assert.equal(server.mtu, 1380);
+  rejects(() => cfg.validateServer({ ...server, public_endpoint: 'vpn.contoh.net;id' }), /Endpoint publik/);
+  rejects(() => cfg.validateServer({ ...server, address: '10.220.0.0/24' }), /network atau broadcast/);
+  rejects(() => cfg.validateServer({ ...server, address: '0.0.0.0/0' }), /Subnet server/);
+
+  assert.equal(cfg.allocatePeerAddress(server.address, []), '10.220.0.2/32');
+  assert.equal(cfg.allocatePeerAddress(server.address, ['10.220.0.2/32']), '10.220.0.3/32');
+
+  const peer = cfg.validatePeer({ name: 'NAS Pusat', generate_psk: true }, null);
+  const conf = cfg.renderWgServer(server, [{ ...peer, address: '10.220.0.2/32', enabled: true }]);
+  assert.match(conf, /^Address = 10\.220\.0\.1\/24$/m);
+  assert.match(conf, /^ListenPort = 51820$/m);
+  assert.match(conf, /^MTU = 1380$/m);
+  assert.match(conf, new RegExp(`^AllowedIPs = 10\\.220\\.0\\.2/32$`, 'm'));
+  assert.doesNotMatch(conf, /PostUp|PostDown|vpn\.contoh\.net/);
+  assert.equal(conf.includes(peer.private_key), false);
+
+  const script = cfg.renderMikrotikScript(server, { ...peer, address: '10.220.0.2/32', radius_secret: 'Abcd1234SecretValue1234' });
+  assert.match(script, /persistent-keepalive=15s/);
+  assert.match(script, /endpoint-address=vpn\.contoh\.net endpoint-port=51820/);
+  assert.match(script, /address=10\.220\.0\.2\/24/);
+  assert.match(script, /comment="Auto by Billing"/);
+  assert.match(script, /\/radius add service=ppp,hotspot address=10\.220\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.220\.0\.2 comment="Auto by Billing"/);
+  assert.match(script, /\/radius incoming set accept=yes port=3799/);
+  assert.match(script, /\/ppp aaa set use-radius=yes accounting=yes interim-update=5m/);
+  assert.equal(script.includes('# /radius'), false);
+  assert.equal(script.includes(peer.private_key), true);
+  assert.equal(script.includes(server.private_key), false);
+  rejects(() => cfg.validatePeer({ name: 'nas;id' }), /Nama router/);
+});
+
+test('cycle server: matikan client dulu, enable wg-server, buka UFW; start dibatalkan bila interface masih ada', async () => {
+  const calls = [];
+  const conf = '[Interface]\nAddress = 10.220.0.1/24\nListenPort = 51820\n';
+  await cfg.cycleVpn('server', 'start', {
+    sleep: async () => {},
+    readText: (file) => (String(file).endsWith('wg-server.conf') ? conf : ''),
+    writeText: (file, content) => calls.push(`write ${file} ${content.trim()}`),
+    exec: async (file, args) => {
+      calls.push([file, ...args].join(' '));
+      if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    },
+  });
+  const enableAt = calls.indexOf('systemctl enable --now wg-quick@wg-server');
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now wg-quick@wg-billing'), calls.join('\n'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now raniah-sstp'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now raniah-l2tp'));
+  assert.ok(calls.indexOf('ufw allow 51820/udp comment WireGuard VPN server') > enableAt);
+  assert.ok(calls.includes('ufw allow from 10.220.0.0/24 comment Subnet VPN server'));
+  assert.equal(calls.some((call) => call === 'systemctl start wg-quick@wg-server'), false);
+
+  const blocked = [];
+  await assert.rejects(
+    () => cfg.cycleVpn('server', 'restart', {
+      sleep: async () => {},
+      readText: () => conf,
+      writeText: () => {},
+      exec: async (file, args) => {
+        blocked.push([file, ...args].join(' '));
+        if (file === 'ip' && args[0] === 'link' && args[1] === 'show' && args[2] === 'wg-server') {
+          return { ok: true, code: 0, stdout: 'still', stderr: '' };
+        }
+        if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    }),
+    /masih ada/,
+  );
+  assert.equal(blocked.includes('systemctl start wg-quick@wg-server'), false);
+  assert.equal(blocked.some((call) => call.startsWith('ufw allow')), false);
+});
+
+test('openvpn server: conf ROS v6, IP statis, script, dan rahasia tidak masuk daftar peer', () => {
+  const server = cfg.validateOvpnServer({
+    public_endpoint: 'vpn.contoh.net',
+    listen_port: 1194,
+    network: '10.221.0.0/24',
+  }, { avoidCidr: '10.220.0.1/24' });
+  const conf = cfg.renderOvpnServer(server);
+  assert.match(conf, /^proto tcp-server$/m);
+  assert.match(conf, /^port 1194$/m);
+  assert.match(conf, /^dev tun-ovpn-srv$/m);
+  assert.match(conf, /^topology subnet$/m);
+  assert.match(conf, /^server 10\.221\.0\.0 255\.255\.255\.0$/m);
+  assert.match(conf, /^cipher AES-256-CBC$/m);
+  assert.match(conf, /^data-ciphers AES-256-CBC$/m);
+  assert.match(conf, /^auth SHA1$/m);
+  assert.match(conf, /^tls-version-min 1\.0$/m);
+  assert.match(conf, /^tls-cipher DEFAULT:@SECLEVEL=0$/m);
+  assert.match(conf, /^verify-client-cert none$/m);
+  assert.match(conf, /^username-as-common-name$/m);
+  assert.match(conf, /^status-version 2$/m);
+  assert.match(conf, /status \/run\/openvpn-server\/status-raniah\.log 5/);
+
+  const first = cfg.allocateOvpnAddress(server.network, []);
+  const second = cfg.allocateOvpnAddress(server.network, [first]);
+  assert.equal(first, '10.221.0.2');
+  assert.equal(second, '10.221.0.3');
+  const peer = cfg.validateOvpnPeer({ name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123' });
+  const script = cfg.renderOvpnMikrotikScript(server, { ...peer, address: first, radius_secret: 'Abcd1234SecretValue1234' });
+  assert.match(script, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip user=nas-kantor password=Rahasia123 cipher=aes256 auth=sha1 add-default-route=no/);
+  assert.match(script, /comment="Auto by Billing"/);
+  assert.match(script, /\/radius add service=ppp,hotspot address=10\.221\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.221\.0\.2 comment="Auto by Billing"/);
+  assert.match(script, /\/radius incoming set accept=yes port=3799/);
+  assert.match(script, /\/ppp aaa set use-radius=yes accounting=yes interim-update=5m/);
+  assert.equal(script.includes('# /radius'), false);
+  const generated = cfg.generateRadiusSecret();
+  assert.match(generated, /^[A-Za-z0-9]{24}$/);
+
+  const withIp = cfg.renderChrMikrotikScript({
+    name: 'RB KONTE',
+    radiusAddress: '10.210.0.2',
+    secret: 'Abcd1234SecretValue1234',
+    nasIp: '10.210.0.3',
+  });
+  assert.match(withIp, /\/radius add service=ppp,hotspot address=10\.210\.0\.2 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.210\.0\.3 comment="Auto by Billing"/);
+  assert.match(withIp, /\/radius incoming set accept=yes port=3799/);
+  assert.match(withIp, /\/ppp aaa set use-radius=yes accounting=yes interim-update=5m/);
+  assert.match(withIp, /:do \{ \/ip hotspot profile set \[find\] use-radius=yes \} on-error=\{\}/);
+  const noIp = cfg.renderChrMikrotikScript({
+    name: 'RB NAPA', radiusAddress: '10.210.0.249', secret: 'Abcd1234SecretValue1234', nasIp: '',
+  });
+  assert.match(noIp, /address=10\.210\.0\.249 secret="Abcd1234SecretValue1234" timeout=3000ms comment="Auto by Billing"/);
+  assert.equal(noIp.includes('src-address='), false);
+  rejects(() => cfg.validateChrNas({ nama_router: 'nas;id', ip_vpn_nas: '10.210.0.3' }), /Nama router/);
+  rejects(() => cfg.validateChrNas({ nama_router: 'RB KONTE', ip_vpn_nas: '10.210.0.3/32' }), /IP VPN NAS/);
+  rejects(() => cfg.validateOvpnServer({ network: '10.220.0.0/24' }, { avoidCidr: '10.220.0.1/24' }), /bentrok/);
+  rejects(() => cfg.validateOvpnPeer({ name: 'nas', username: '../etc', password: 'Rahasia123' }), /Username/);
+
+  const view = presentOvpnServer({
+    server,
+    peers: [{ id: 1, name: peer.name, username: peer.username, password: 'Rahasia123', address: first, enabled: true }],
+  }, { peers: [] });
+  assert.equal(JSON.stringify(view).includes('Rahasia123'), false);
+  assert.equal(view.peers[0].password_set, true);
+  assert.equal(view.server.server_ip, '10.221.0.1');
+
+  const live = parseOvpnStatus('CLIENT_LIST,nas-kantor,1.2.3.4:9,10.221.0.2,,100,200,now,1,nas-kantor,1,0,AES-256-CBC\n');
+  assert.equal(live[0].username, 'nas-kantor');
+  assert.equal(live[0].rx_bytes, 100);
+  assert.equal(live[0].tx_bytes, 200);
+});
+
+test('openvpn server: berkas kredensial 600, ccd ifconfig-push, peer nonaktif tidak bisa login', () => {
+  const { spawnSync } = require('child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ovpn-srv-'));
+  try {
+    const server = cfg.validateOvpnServer({ public_endpoint: '203.0.113.10', network: '10.221.0.0/24' });
+    const peers = [
+      { ...cfg.validateOvpnPeer({ name: 'A', username: 'nas-a', password: 'Password11' }), address: '10.221.0.2', enabled: true },
+      { ...cfg.validateOvpnPeer({ name: 'B', username: 'nas-b', password: 'Password22' }), address: '10.221.0.3', enabled: false },
+    ];
+    cfg.applyOvpnServerToDisk(server, peers, { root, exec: () => {}, existsSync: () => true });
+    const modeOf = (target) => fs.statSync(path.join(root, target)).mode & 0o777;
+    assert.match(fs.readFileSync(path.join(root, cfg.PATHS.ovpnServerOverride), 'utf8'), /LimitNPROC=infinity\nTasksMax=infinity/);
+    assert.equal(modeOf(cfg.PATHS.ovpnServerAuth), 0o755);
+    assert.equal(modeOf(`${cfg.PATHS.ovpnServerUsers}/nas-a`), 0o600);
+    assert.equal(fs.existsSync(path.join(root, cfg.PATHS.ovpnServerUsers, 'nas-b')), false);
+    assert.match(fs.readFileSync(path.join(root, cfg.PATHS.ovpnServerCcd, 'nas-a'), 'utf8'), /^ifconfig-push 10\.221\.0\.2 255\.255\.255\.0/);
+    assert.equal(fs.existsSync(path.join(root, cfg.PATHS.ovpnServerCcd, 'nas-b')), false);
+    const script = path.join(root, cfg.PATHS.ovpnServerAuth);
+    assert.equal(spawnSync('sh', ['-n', script], { encoding: 'utf8' }).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('cycle ovpn-server: matikan client, biarkan wg-server, buka UFW TCP', async () => {
+  const calls = [];
+  const conf = 'port 1194\nserver 10.221.0.0 255.255.255.0\n';
+  await cfg.cycleVpn('ovpn-server', 'start', {
+    sleep: async () => {},
+    readText: (file) => (String(file).endsWith('raniah-server.conf') ? conf : ''),
+    writeText: () => {},
+    exec: async (file, args) => {
+      calls.push([file, ...args].join(' '));
+      if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    },
+  });
+  const enableAt = calls.indexOf('systemctl enable --now openvpn-server@raniah-server');
+  const reloadAt = calls.indexOf('systemctl daemon-reload');
+  assert.ok(reloadAt >= 0 && reloadAt < enableAt, calls.join('\n'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now wg-quick@wg-billing'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now raniah-sstp'));
+  assert.ok(enableAt > calls.indexOf('systemctl disable --now raniah-l2tp'));
+  assert.equal(calls.some((call) => call.includes('wg-quick@wg-server')), false);
+  assert.ok(calls.includes('ufw allow 1194/tcp comment OpenVPN VPN server'));
+  assert.ok(calls.includes('ufw allow from 10.221.0.0/24 comment Subnet OpenVPN server'));
 });
 

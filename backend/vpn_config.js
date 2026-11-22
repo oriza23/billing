@@ -20,6 +20,8 @@ const UNITS = {
   openvpn: 'openvpn-client@raniah-vpn',
   sstp: 'raniah-sstp',
   l2tp: 'raniah-l2tp',
+  server: 'wg-quick@wg-server',
+  'ovpn-server': 'openvpn-server@raniah-server',
 };
 // Unit pendamping yang ikut dimatikan saat protokolnya dilepas (daemon-nya hanya dipakai protokol itu).
 const COMPANION_UNITS = {
@@ -30,6 +32,8 @@ const INTERFACES = {
   openvpn: 'raniah-ovpn',
   sstp: 'raniah-sstp',
   l2tp: 'raniah-l2tp',
+  server: 'wg-server',
+  'ovpn-server': 'tun-ovpn-srv',
 };
 const PATHS = {
   wireguard: '/etc/wireguard/wg-billing.conf',
@@ -50,7 +54,29 @@ const PATHS = {
   l2tpUnit: '/etc/systemd/system/raniah-l2tp.service',
   wgOverride: '/etc/systemd/system/wg-quick@wg-billing.service.d/override.conf',
   ovpnOverride: '/etc/systemd/system/openvpn-client@raniah-vpn.service.d/override.conf',
+  wgServer: '/etc/wireguard/wg-server.conf',
+  wgServerOverride: '/etc/systemd/system/wg-quick@wg-server.service.d/override.conf',
+  wgServerUfw: '/etc/wireguard/wg-server.ufw',
+  ovpnServer: '/etc/openvpn/server/raniah-server.conf',
+  ovpnServerPki: '/etc/openvpn/server/raniah-pki',
+  ovpnServerCa: '/etc/openvpn/server/raniah-pki/ca.crt',
+  ovpnServerCert: '/etc/openvpn/server/raniah-pki/server.crt',
+  ovpnServerKey: '/etc/openvpn/server/raniah-pki/server.key',
+  ovpnServerDh: '/etc/openvpn/server/raniah-pki/dh.pem',
+  ovpnServerAuth: '/etc/openvpn/server/raniah-auth.sh',
+  ovpnServerUsers: '/etc/openvpn/server/raniah-users',
+  ovpnServerCcd: '/etc/openvpn/server/ccd',
+  ovpnServerStatus: '/run/openvpn-server/status-raniah.log',
+  ovpnServerOverride: '/etc/systemd/system/openvpn-server@raniah-server.service.d/override.conf',
+  ovpnServerUfw: '/etc/openvpn/server/raniah-server.ufw',
 };
+const SERVER_DEFAULT_PORT = 51820;
+const SERVER_DEFAULT_ADDRESS = '10.220.0.1/24';
+const SERVER_MAX_PEERS = 200;
+const OVPN_SERVER_DEFAULT_PORT = 1194;
+const OVPN_SERVER_DEFAULT_NETWORK = '10.221.0.0/24';
+const CYCLE_PROTOCOLS = [...PROTOCOLS, 'server', 'ovpn-server'];
+const HUB_PROTOCOLS = ['server', 'ovpn-server'];
 // keepalive tidak boleh digandakan dengan ping / ping-exit / ping-restart (error OpenVPN).
 const OVPN_LIVENESS = ['keepalive', 'ping', 'ping-exit', 'ping-restart'];
 const OVPN_RESILIENCE_ALWAYS = ['resolv-retry infinite', 'persist-key', 'persist-tun'];
@@ -1188,6 +1214,731 @@ function backupOnce(file) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// WireGuard server (hub untuk MikroTik NAS). Interface wg-server, terpisah dari wg-billing.
+// ---------------------------------------------------------------------------
+const PEER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
+
+function generatePresharedKey() {
+  const key = crypto.randomBytes(32).toString('base64');
+  if (!WG_KEY_RE.test(key)) {
+    fail('Gagal membuat Preshared Key.', 'preshared_key');
+  }
+  return key;
+}
+
+function assertServerAddress(addressText) {
+  const address = parseCidr(addressText, { minPrefix: 16 });
+  if (!address || address.prefix > 30) {
+    fail('Subnet server tidak valid. Gunakan IPv4/CIDR prefix /16 sampai /30, mis. 10.220.0.1/24.', 'address');
+  }
+  if (address.ip === address.network || address.ip === address.network + address.size - 1) {
+    fail('Alamat server tidak boleh alamat network atau broadcast.', 'address');
+  }
+  if (address.ip < 16777216 || (address.ip >= 2130706432 && address.ip < 2147483648) || address.ip >= 3758096384) {
+    fail('Subnet server tidak boleh 0.0.0.0, loopback, atau multicast.', 'address');
+  }
+  return address;
+}
+
+function validateServer(input = {}, existing = null) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    fail('Data server tidak valid.', 'server');
+  }
+  const endpointRaw = text(input.public_endpoint ?? input.publicEndpoint ?? existing?.public_endpoint ?? '');
+  let endpointHost = '';
+  if (endpointRaw) {
+    if (endpointRaw.includes(':')) {
+      fail('Endpoint publik diisi tanpa port. Port ada di kolom tersendiri.', 'public_endpoint');
+    }
+    endpointHost = parseHostPort(endpointRaw, {
+      portRequired: false, field: 'public_endpoint', label: 'Endpoint publik',
+    }).host;
+  }
+  const portRaw = input.listen_port ?? input.listenPort ?? existing?.listen_port ?? SERVER_DEFAULT_PORT;
+  const listenPort = Number(portRaw);
+  if (!Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) {
+    fail('Port listen harus 1-65535.', 'listen_port');
+  }
+  const address = assertServerAddress(text(input.address || input.subnet || '') || existing?.address || SERVER_DEFAULT_ADDRESS);
+  const privateKey = text(input.private_key) || existing?.private_key || '';
+  if (!WG_KEY_RE.test(privateKey)) {
+    fail('Private key server tidak valid.', 'private_key');
+  }
+  let publicKey = '';
+  try {
+    publicKey = derivePublicKey(privateKey);
+  } catch {
+    publicKey = '';
+  }
+  if (!WG_KEY_RE.test(publicKey)) {
+    fail('Private key server tidak valid.', 'private_key');
+  }
+  return {
+    public_endpoint: endpointHost,
+    listen_port: listenPort,
+    address: address.host,
+    network: address.cidr,
+    private_key: privateKey,
+    public_key: publicKey,
+    mtu: WG_DEFAULT_MTU,
+  };
+}
+
+function validatePeer(input = {}, existing = null) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    fail('Data peer tidak valid.', 'peer');
+  }
+  const name = text(input.name ?? existing?.name);
+  if (!PEER_NAME_RE.test(name)) {
+    fail('Nama router hanya huruf, angka, spasi, titik, strip, dan garis bawah (maks. 40 karakter).', 'name');
+  }
+  let publicKey = text(input.public_key);
+  let privateKey = existing?.private_key || '';
+  if (!publicKey && !existing?.public_key) {
+    const pair = generateKeypair();
+    publicKey = pair.public_key;
+    privateKey = pair.private_key;
+  } else if (!publicKey) {
+    publicKey = existing.public_key;
+  } else if (!WG_KEY_RE.test(publicKey)) {
+    fail('Public key peer tidak valid (44 karakter base64 berakhiran "=").', 'public_key');
+  } else if (publicKey !== existing?.public_key) {
+    privateKey = '';
+  }
+  let preshared = text(input.preshared_key);
+  if (!preshared && input.generate_psk === true) {
+    preshared = generatePresharedKey();
+  } else if (!preshared && input.clear_preshared_key !== true) {
+    preshared = existing?.preshared_key || '';
+  }
+  if (input.clear_preshared_key === true) {
+    preshared = '';
+  }
+  if (preshared && !WG_KEY_RE.test(preshared)) {
+    fail('Preshared Key tidak valid (44 karakter base64 berakhiran "=").', 'preshared_key');
+  }
+  const enabled = input.enabled === undefined
+    ? (existing ? Number(existing.enabled) !== 0 : true)
+    : input.enabled === true || input.enabled === 1 || input.enabled === '1';
+  return {
+    name,
+    public_key: publicKey,
+    private_key: privateKey || '',
+    preshared_key: preshared || '',
+    enabled,
+  };
+}
+
+function allocatePeerAddress(serverAddress, usedAddresses = []) {
+  const server = assertServerAddress(serverAddress);
+  const used = new Set();
+  for (const item of usedAddresses) {
+    const parsed = parseCidr(String(item).includes('/') ? String(item) : `${item}/32`, { minPrefix: 0 });
+    if (parsed) {
+      used.add(parsed.ip);
+    }
+  }
+  used.add(server.ip);
+  for (let ip = server.network + 1; ip < server.network + server.size - 1; ip += 1) {
+    if (!used.has(ip)) {
+      return `${formatIPv4(ip)}/32`;
+    }
+  }
+  fail('Subnet VPN server sudah penuh. Tidak ada IP untuk peer baru.', 'address');
+  return '';
+}
+
+function assertPeerAddress(serverAddress, peerAddress) {
+  const server = assertServerAddress(serverAddress);
+  const peer = parseCidr(peerAddress, { minPrefix: 32 });
+  if (!peer || peer.prefix !== 32) {
+    fail('Alamat peer harus IPv4/32.', 'address');
+  }
+  if (!inCidr(peer.ip, server) || peer.ip === server.ip || peer.ip === server.network || peer.ip === server.network + server.size - 1) {
+    fail('Alamat peer harus host di dalam subnet server, selain alamat server itu sendiri.', 'address');
+  }
+  return `${formatIPv4(peer.ip)}/32`;
+}
+
+function validateServerBundle(payload) {
+  const server = validateServer(payload?.server, payload?.server);
+  const list = payload?.peers;
+  if (list !== undefined && !Array.isArray(list)) {
+    fail('Daftar peer tidak valid.', 'peers');
+  }
+  const peersIn = list || [];
+  if (peersIn.length > SERVER_MAX_PEERS) {
+    fail(`Maksimal ${SERVER_MAX_PEERS} peer.`, 'peers');
+  }
+  const peers = [];
+  const seen = new Set();
+  for (const raw of peersIn) {
+    const peer = validatePeer(raw, raw);
+    const address = assertPeerAddress(server.address, raw.address);
+    if (seen.has(peer.public_key)) {
+      fail('Public key peer duplikat.', 'public_key');
+    }
+    seen.add(peer.public_key);
+    peers.push({ ...peer, address });
+  }
+  return { server, peers };
+}
+
+function renderWgServer(server, peers) {
+  const lines = [
+    HEADER,
+    '[Interface]',
+    `Address = ${server.address}`,
+    `ListenPort = ${server.listen_port}`,
+    `PrivateKey = ${server.private_key}`,
+    `MTU = ${server.mtu}`,
+    '',
+  ];
+  for (const peer of peers) {
+    if (!peer.enabled) {
+      continue;
+    }
+    lines.push('[Peer]', `PublicKey = ${peer.public_key}`);
+    if (peer.preshared_key) {
+      lines.push(`PresharedKey = ${peer.preshared_key}`);
+    }
+    lines.push(`AllowedIPs = ${peer.address}`, '');
+  }
+  return `${lines.join('\n')}`;
+}
+
+function renderMikrotikScript(server, peer) {
+  const serverNet = assertServerAddress(server.address);
+  const peerNet = parseCidr(peer.address, { minPrefix: 32 });
+  const routerAddress = `${formatIPv4(peerNet.ip)}/${serverNet.prefix}`;
+  const privateKey = peer.private_key || 'ISI_PRIVATE_KEY_ROUTER';
+  const psk = peer.preshared_key ? ` preshared-key="${peer.preshared_key}"` : '';
+  const lines = [
+    '# RANIAH Billing - tempel di terminal MikroTik RouterOS v7',
+    `# Router: ${peer.name}`,
+    `# Server: ${server.public_endpoint}:${server.listen_port}  tunnel ${server.address}`,
+    `/interface wireguard add name=wg-raniah listen-port=13231 mtu=${server.mtu} private-key="${privateKey}" comment="Auto by Billing"`,
+    `/ip address add address=${routerAddress} interface=wg-raniah`,
+    `/interface wireguard peers add interface=wg-raniah name=billing public-key="${server.public_key}" endpoint-address=${server.public_endpoint} endpoint-port=${server.listen_port} allowed-address=${formatIPv4(serverNet.ip)}/32 persistent-keepalive=15s${psk}`,
+    ...renderRadiusClientLines(formatIPv4(serverNet.ip), formatIPv4(peerNet.ip), peer),
+    '',
+  ];
+  return lines.join('\n');
+}
+
+const OVPN_USER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+const OVPN_PASS_RE = /^[A-Za-z0-9]{8,64}$/;
+
+function prefixToMask(prefix) {
+  const bits = '1'.repeat(prefix).padEnd(32, '0');
+  const parts = [0, 8, 16, 24].map((offset) => Number.parseInt(bits.slice(offset, offset + 8), 2));
+  return parts.join('.');
+}
+
+function maskToPrefix(maskText) {
+  const parts = String(maskText || '').split('.');
+  if (parts.length !== 4) {
+    return null;
+  }
+  const bits = parts.map((part) => {
+    const n = Number(part);
+    if (!/^\d{1,3}$/.test(part) || n > 255) {
+      return null;
+    }
+    return n.toString(2).padStart(8, '0');
+  });
+  if (bits.some((part) => part === null)) {
+    return null;
+  }
+  const joined = bits.join('');
+  if (!/^1*0*$/.test(joined)) {
+    return null;
+  }
+  const zero = joined.indexOf('0');
+  return zero === -1 ? 32 : zero;
+}
+
+function cidrOverlaps(leftText, rightText) {
+  const left = parseCidr(leftText, { minPrefix: 0 });
+  const right = parseCidr(rightText, { minPrefix: 0 });
+  if (!left || !right) {
+    return false;
+  }
+  return left.network < right.network + right.size && right.network < left.network + left.size;
+}
+
+function validateOvpnServer(input, { avoidCidr = null } = {}) {
+  const source = input || {};
+  const endpointRaw = String(source.public_endpoint || '').trim();
+  let endpoint = '';
+  if (endpointRaw) {
+    if (endpointRaw.includes(':')) {
+      fail('Endpoint publik diisi tanpa port. Port ada di kolom tersendiri.', 'public_endpoint');
+    }
+    endpoint = parseHostPort(endpointRaw, {
+      portRequired: false, field: 'public_endpoint', label: 'Endpoint publik',
+    }).host;
+  }
+  const port = source.listen_port == null || source.listen_port === ''
+    ? OVPN_SERVER_DEFAULT_PORT
+    : Number(source.listen_port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail('Port TCP harus 1-65535.', 'listen_port');
+  }
+  const networkText = String(source.network || OVPN_SERVER_DEFAULT_NETWORK).trim();
+  const parsed = parseCidr(networkText, { minPrefix: 16 });
+  if (!parsed) {
+    fail('Subnet harus IPv4 dengan prefix /16 sampai /30, misalnya 10.221.0.0/24.', 'network');
+  }
+  if (parsed.ip !== parsed.network || parsed.prefix > 30) {
+    fail('Isi alamat jaringan dengan prefix /16 sampai /30, misalnya 10.221.0.0/24.', 'network');
+  }
+  if (!isHost(formatIPv4(parsed.network + 1))) {
+    fail('Subnet tidak boleh memakai alamat loopback, 0.0.0.0, atau multicast.', 'network');
+  }
+  if (avoidCidr && cidrOverlaps(parsed.cidr, avoidCidr)) {
+    fail('Subnet OpenVPN bentrok dengan subnet WireGuard Server.', 'network');
+  }
+  return {
+    public_endpoint: endpoint,
+    listen_port: port,
+    network: parsed.cidr,
+    netmask: prefixToMask(parsed.prefix),
+    server_ip: formatIPv4(parsed.network + 1),
+  };
+}
+
+function generateOvpnPassword() {
+  let password = '';
+  while (password.length < 16) {
+    password += crypto.randomBytes(24).toString('base64').replace(/[^A-Za-z0-9]/g, '');
+  }
+  return password.slice(0, 16);
+}
+
+function validateOvpnPeer(input, existing = null) {
+  const source = input || {};
+  const name = String(source.name || '').trim();
+  if (!PEER_NAME_RE.test(name)) {
+    fail('Nama router 1-40 karakter: huruf, angka, spasi, titik, garis, atau garis bawah.', 'name');
+  }
+  const username = String(source.username || '').trim();
+  if (!OVPN_USER_RE.test(username)) {
+    fail('Username 1-32 karakter: huruf, angka, titik, garis, atau garis bawah.', 'username');
+  }
+  let password = source.password == null ? '' : String(source.password);
+  if (!password && existing?.password) {
+    password = existing.password;
+  }
+  if (!password) {
+    password = generateOvpnPassword();
+  }
+  if (!OVPN_PASS_RE.test(password)) {
+    fail('Password 8-64 karakter huruf dan angka.', 'password');
+  }
+  const enabled = source.enabled == null
+    ? (existing ? existing.enabled !== false : true)
+    : source.enabled === true || source.enabled === 1 || source.enabled === '1';
+  return { name, username, password, enabled };
+}
+
+function allocateOvpnAddress(networkText, usedAddresses) {
+  const parsed = parseCidr(networkText, { minPrefix: 16 });
+  if (!parsed) {
+    fail('Subnet OpenVPN Server tidak valid.', 'network');
+  }
+  const used = new Set((usedAddresses || []).map((value) => parseIPv4(String(value || '').split('/')[0])).filter((value) => value !== null));
+  const serverIp = parsed.network + 1;
+  for (let ip = parsed.network + 2; ip < parsed.network + parsed.size - 1; ip += 1) {
+    if (ip !== serverIp && !used.has(ip)) {
+      return formatIPv4(ip);
+    }
+  }
+  fail('Tidak ada alamat kosong di subnet OpenVPN Server.', 'address');
+  return '';
+}
+
+function renderOvpnAuthScript() {
+  return [
+    '#!/bin/sh',
+    'set -u',
+    'FILE=${1:-}',
+    '[ -n "$FILE" ] && [ -f "$FILE" ] || exit 1',
+    'USER=$(sed -n "1p" "$FILE")',
+    'PASS=$(sed -n "2p" "$FILE")',
+    'case "$USER" in',
+    '  *[!A-Za-z0-9._-]*|"") exit 1 ;;',
+    'esac',
+    'CRED="/etc/openvpn/server/raniah-users/$USER"',
+    '[ -f "$CRED" ] || exit 1',
+    'STORED=$(cat "$CRED")',
+    '[ "$PASS" = "$STORED" ] && exit 0',
+    'exit 1',
+    '',
+  ].join('\n');
+}
+
+function renderOvpnServer(server) {
+  const cfg = validateOvpnServer(server);
+  return [
+    '# Dibuat otomatis oleh RANIAH. OpenVPN server untuk MikroTik RouterOS v6.',
+    'proto tcp-server',
+    `port ${cfg.listen_port}`,
+    'dev tun-ovpn-srv',
+    'topology subnet',
+    `server ${cfg.network.split('/')[0]} ${cfg.netmask}`,
+    `ca ${PATHS.ovpnServerCa}`,
+    `cert ${PATHS.ovpnServerCert}`,
+    `key ${PATHS.ovpnServerKey}`,
+    `dh ${PATHS.ovpnServerDh}`,
+    'cipher AES-256-CBC',
+    'data-ciphers AES-256-CBC',
+    'data-ciphers-fallback AES-256-CBC',
+    'auth SHA1',
+    'tls-version-min 1.0',
+    'tls-cipher DEFAULT:@SECLEVEL=0',
+    'keepalive 10 30',
+    'persist-key',
+    'persist-tun',
+    'verify-client-cert none',
+    'username-as-common-name',
+    'script-security 2',
+    `auth-user-pass-verify ${PATHS.ovpnServerAuth} via-file`,
+    `client-config-dir ${PATHS.ovpnServerCcd}`,
+    `status ${PATHS.ovpnServerStatus} 5`,
+    'status-version 2',
+    'verb 3',
+    '',
+  ].join('\n');
+}
+
+function renderOvpnServerOverride() {
+  return [
+    '[Unit]',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'ExecStartPre=/bin/mkdir -p /run/openvpn-server',
+    'LimitNPROC=infinity',
+    'TasksMax=infinity',
+    '',
+  ].join('\n');
+}
+
+const RADIUS_SECRET_RE = /^[A-Za-z0-9]{20,32}$/;
+
+function generateRadiusSecret() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(24);
+  let secret = '';
+  for (let i = 0; i < 24; i += 1) {
+    secret += alphabet[bytes[i] % alphabet.length];
+  }
+  return secret;
+}
+
+const CHR_RADIUS_ADDRESS = '10.210.0.2';
+
+function validateChrNas(input) {
+  const source = input || {};
+  const name = String(source.nama_router || source.name || '').trim();
+  if (!PEER_NAME_RE.test(name)) {
+    fail('Nama router 1-40 karakter: huruf, angka, spasi, titik, garis, atau garis bawah.', 'nama_router');
+  }
+  const rawIp = String(source.ip_vpn_nas ?? source.ip ?? '').trim();
+  if (rawIp) {
+    if (!isHost(rawIp) || rawIp.includes('/')) {
+      fail('IP VPN NAS harus IPv4, misalnya 10.210.0.3.', 'ip_vpn_nas');
+    }
+  }
+  return { nama_router: name, ip_vpn_nas: rawIp };
+}
+
+function renderChrMikrotikScript({ name, radiusAddress, secret, nasIp }) {
+  const address = String(radiusAddress || CHR_RADIUS_ADDRESS).trim();
+  if (!isHost(address)) {
+    fail('Alamat RADIUS tidak valid.', 'radius_address');
+  }
+  const radiusSecret = String(secret || '');
+  if (!RADIUS_SECRET_RE.test(radiusSecret)) {
+    fail('RADIUS secret belum siap.', 'radius_secret');
+  }
+  const src = nasIp ? ` src-address=${nasIp}` : '';
+  return [
+    `# RANIAH RADIUS untuk ${name} lewat Hub CHR (RouterOS v6/v7)`,
+    `/radius add service=ppp,hotspot address=${address} secret="${radiusSecret}" timeout=3000ms${src} comment="Auto by Billing"`,
+    '/radius incoming set accept=yes port=3799',
+    '/ppp aaa set use-radius=yes accounting=yes interim-update=5m',
+    ':do { /ip hotspot profile set [find] use-radius=yes } on-error={}',
+    '',
+  ].join('\n');
+}
+
+function renderRadiusClientLines(serverIp, peerIp, peer) {
+  const secret = String(peer?.radius_secret || '');
+  if (!RADIUS_SECRET_RE.test(secret)) {
+    fail('RADIUS secret peer belum siap.', 'radius_secret');
+  }
+  return [
+    `/radius add service=ppp,hotspot address=${serverIp} secret="${secret}" timeout=3000ms src-address=${peerIp} comment="Auto by Billing"`,
+    '/radius incoming set accept=yes port=3799',
+    '/ppp aaa set use-radius=yes accounting=yes interim-update=5m',
+  ];
+}
+
+function renderOvpnMikrotikScript(server, peer) {
+  const cfg = validateOvpnServer(server);
+  if (!cfg.public_endpoint) {
+    fail('Isi endpoint publik sebelum menyalin script.', 'public_endpoint');
+  }
+  const checked = validateOvpnPeer(peer, peer);
+  const iface = 'ovpn-raniah';
+  return [
+    `# RANIAH OpenVPN client untuk ${checked.name} (RouterOS v6)`,
+    `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip user=${checked.username} password=${checked.password} cipher=aes256 auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`,
+    ...renderRadiusClientLines(cfg.server_ip, peer.address, peer),
+    '',
+  ].join('\n');
+}
+
+function ovpnServerFirewallSpec(confText) {
+  const portMatch = /^port (\d+)$/m.exec(String(confText || ''));
+  const serverMatch = /^server (\d{1,3}(?:\.\d{1,3}){3}) (\d{1,3}(?:\.\d{1,3}){3})$/m.exec(String(confText || ''));
+  if (!portMatch || !serverMatch) {
+    return null;
+  }
+  const port = Number(portMatch[1]);
+  const prefix = maskToPrefix(serverMatch[2]);
+  const parsed = prefix == null ? null : parseCidr(`${serverMatch[1]}/${prefix}`, { minPrefix: 16 });
+  if (!parsed || port < 1 || port > 65535) {
+    return null;
+  }
+  return { port, network: parsed.cidr };
+}
+
+function ensureOvpnPki(dir, { exec = execFileSync, existsSync = fs.existsSync } = {}) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const caKey = path.join(dir, 'ca.key');
+  const caCrt = path.join(dir, 'ca.crt');
+  const serverKey = path.join(dir, 'server.key');
+  const serverCrt = path.join(dir, 'server.crt');
+  const serverCsr = path.join(dir, 'server.csr');
+  const dh = path.join(dir, 'dh.pem');
+  const ready = [caKey, caCrt, serverKey, serverCrt, dh].every((file) => existsSync(file));
+  if (ready) {
+    return;
+  }
+  if (!existsSync('/usr/bin/openssl')) {
+    const error = new Error('openssl belum terpasang. Jalankan: sudo apt-get install -y openssl');
+    error.status = 503;
+    throw error;
+  }
+  const run = (args) => exec('openssl', args, { timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (!existsSync(caKey)) {
+    run(['genrsa', '-out', caKey, '2048']);
+    fs.chmodSync(caKey, 0o600);
+  }
+  if (!existsSync(caCrt)) {
+    run(['req', '-x509', '-new', '-nodes', '-key', caKey, '-sha256', '-days', '3650', '-subj', '/CN=RANIAH-OVPN-CA', '-out', caCrt]);
+    fs.chmodSync(caCrt, 0o644);
+  }
+  if (!existsSync(serverKey)) {
+    run(['genrsa', '-out', serverKey, '2048']);
+    fs.chmodSync(serverKey, 0o600);
+  }
+  if (!existsSync(serverCrt)) {
+    run(['req', '-new', '-key', serverKey, '-subj', '/CN=raniah-ovpn-server', '-out', serverCsr]);
+    const ext = path.join(dir, 'server.ext');
+    fs.writeFileSync(ext, 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n', { mode: 0o644 });
+    run(['x509', '-req', '-in', serverCsr, '-CA', caCrt, '-CAkey', caKey, '-CAcreateserial', '-out', serverCrt, '-days', '3650', '-sha256', '-extfile', ext]);
+    fs.chmodSync(serverCrt, 0o644);
+  }
+  if (!existsSync(dh)) {
+    run(['dhparam', '-dsaparam', '-out', dh, '2048']);
+    fs.chmodSync(dh, 0o644);
+  }
+}
+
+function replaceNamedFiles(dir, files, mode, dirMode) {
+  fs.mkdirSync(dir, { recursive: true, mode: dirMode });
+  fs.chmodSync(dir, dirMode);
+  const keep = new Set(Object.keys(files));
+  if (fs.existsSync(dir)) {
+    for (const name of fs.readdirSync(dir)) {
+      if (!keep.has(name) && OVPN_USER_RE.test(name)) {
+        fs.rmSync(path.join(dir, name), { force: true });
+      }
+    }
+  }
+  for (const [name, content] of Object.entries(files)) {
+    writeAtomic(path.join(dir, name), content.endsWith('\n') ? content : `${content}\n`, mode, dirMode);
+  }
+}
+
+function applyOvpnServerToDisk(server, peers, { root = '', exec = execFileSync, existsSync = fs.existsSync } = {}) {
+  const cfg = validateOvpnServer(server);
+  const list = Array.isArray(peers) ? peers : [];
+  if (list.length > SERVER_MAX_PEERS) {
+    fail(`Maksimal ${SERVER_MAX_PEERS} peer OpenVPN.`, 'peers');
+  }
+  const users = new Set();
+  const addresses = new Set();
+  const checked = list.map((peer) => {
+    const row = validateOvpnPeer(peer, peer);
+    if (users.has(row.username)) {
+      fail(`Username ${row.username} dobel.`, 'username');
+    }
+    users.add(row.username);
+    const ip = parseIPv4(String(peer.address || '').split('/')[0]);
+    const network = parseCidr(cfg.network, { minPrefix: 16 });
+    if (ip === null || ip <= network.network + 1 || ip >= network.network + network.size - 1) {
+      fail(`Alamat ${peer.address || ''} di luar subnet OpenVPN Server.`, 'address');
+    }
+    if (addresses.has(ip)) {
+      fail(`Alamat ${peer.address} dobel.`, 'address');
+    }
+    addresses.add(ip);
+    return { ...row, address: formatIPv4(ip) };
+  });
+  const at = (target) => path.join(root, target);
+  ensureOvpnPki(at(PATHS.ovpnServerPki), { exec, existsSync });
+  const written = [];
+  const put = (target, content, mode, dirMode = 0o755) => {
+    writeAtomic(at(target), content, mode, dirMode);
+    written.push(target);
+  };
+  put(PATHS.ovpnServer, renderOvpnServer(cfg), 0o600, 0o700);
+  put(PATHS.ovpnServerAuth, renderOvpnAuthScript(), 0o755);
+  put(PATHS.ovpnServerOverride, renderOvpnServerOverride(), 0o644);
+  const userFiles = {};
+  const ccdFiles = {};
+  for (const peer of checked) {
+    if (!peer.enabled) {
+      continue;
+    }
+    userFiles[peer.username] = `${peer.password}\n`;
+    ccdFiles[peer.username] = `ifconfig-push ${peer.address} ${cfg.netmask}\n`;
+  }
+  replaceNamedFiles(at(PATHS.ovpnServerUsers), userFiles, 0o600, 0o700);
+  replaceNamedFiles(at(PATHS.ovpnServerCcd), ccdFiles, 0o644, 0o755);
+  written.push(PATHS.ovpnServerUsers, PATHS.ovpnServerCcd);
+  reloadSystemd(exec, root);
+  return written;
+}
+
+function serverFirewallSpec(confText) {
+  const portMatch = /^ListenPort = (\d+)$/m.exec(String(confText || ''));
+  const addressMatch = /^Address = ([0-9.]+\/\d+)$/m.exec(String(confText || ''));
+  if (!portMatch || !addressMatch) {
+    return null;
+  }
+  const port = Number(portMatch[1]);
+  const address = parseCidr(addressMatch[1], { minPrefix: 16 });
+  if (!address || port < 1 || port > 65535) {
+    return null;
+  }
+  return { port, network: address.cidr };
+}
+
+function defaultReadText(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function defaultWriteText(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, content, { mode: 0o600 });
+}
+
+async function syncServerFirewall(mode, deps, exec) {
+  const readText = deps.readText || defaultReadText;
+  const writeText = deps.writeText || defaultWriteText;
+  const previous = String(readText(PATHS.wgServerUfw) || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const rule of previous) {
+    if (/^\d{1,5}\/udp$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', rule], { timeout: 20000 });
+    } else if (/^from \d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', 'from', rule.slice(5)], { timeout: 20000 });
+    }
+  }
+  if (mode !== 'up') {
+    writeText(PATHS.wgServerUfw, '');
+    return;
+  }
+  const spec = serverFirewallSpec(readText(PATHS.wgServer));
+  if (!spec) {
+    throw cycleError(500, 'wg-server.conf belum ada. Simpan pengaturan VPN Server dulu.');
+  }
+  const portRule = `${spec.port}/udp`;
+  const opened = await exec('ufw', ['allow', portRule, 'comment', 'WireGuard VPN server'], { timeout: 20000 });
+  if (!opened.ok) {
+    const detail = (opened.stderr || opened.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal membuka ${portRule}${detail ? `: ${detail}` : ''}.`);
+  }
+  const subnet = await exec('ufw', ['allow', 'from', spec.network, 'comment', 'Subnet VPN server'], { timeout: 20000 });
+  if (!subnet.ok) {
+    const detail = (subnet.stderr || subnet.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal mengizinkan subnet ${spec.network}${detail ? `: ${detail}` : ''}.`);
+  }
+  writeText(PATHS.wgServerUfw, `${portRule}\nfrom ${spec.network}\n`);
+}
+
+async function syncOvpnServerFirewall(mode, deps, exec) {
+  const readText = deps.readText || defaultReadText;
+  const writeText = deps.writeText || defaultWriteText;
+  const previous = String(readText(PATHS.ovpnServerUfw) || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const rule of previous) {
+    if (/^\d{1,5}\/tcp$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', rule], { timeout: 20000 });
+    } else if (/^from \d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', 'from', rule.slice(5)], { timeout: 20000 });
+    }
+  }
+  if (mode !== 'up') {
+    writeText(PATHS.ovpnServerUfw, '');
+    return;
+  }
+  const spec = ovpnServerFirewallSpec(readText(PATHS.ovpnServer));
+  if (!spec) {
+    throw cycleError(500, 'raniah-server.conf belum ada. Simpan pengaturan OpenVPN Server dulu.');
+  }
+  const portRule = `${spec.port}/tcp`;
+  const opened = await exec('ufw', ['allow', portRule, 'comment', 'OpenVPN VPN server'], { timeout: 20000 });
+  if (!opened.ok) {
+    const detail = (opened.stderr || opened.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal membuka ${portRule}${detail ? `: ${detail}` : ''}.`);
+  }
+  const subnet = await exec('ufw', ['allow', 'from', spec.network, 'comment', 'Subnet OpenVPN server'], { timeout: 20000 });
+  if (!subnet.ok) {
+    const detail = (subnet.stderr || subnet.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal mengizinkan subnet ${spec.network}${detail ? `: ${detail}` : ''}.`);
+  }
+  writeText(PATHS.ovpnServerUfw, `${portRule}\nfrom ${spec.network}\n`);
+}
+
+function applyServerToDisk(server, peers, { root = '', exec = execFileSync } = {}) {
+  const bundle = validateServerBundle({ server, peers });
+  const at = (target) => path.join(root, target);
+  const written = [];
+  const put = (target, content, mode, dirMode = 0o755) => {
+    writeAtomic(at(target), content, mode, dirMode);
+    written.push(target);
+  };
+  put(PATHS.wgServer, renderWgServer(bundle.server, bundle.peers), 0o600, 0o700);
+  put(PATHS.wgServerOverride, renderWgUnitOverride(), 0o644);
+  reloadSystemd(exec, root);
+  return written;
+}
+
 // Aksi yang boleh diminta aplikasi ke helper root. Tidak ada argumen bebas: pola pkill dan
 // nama interface dikunci di tabel ini, bukan dari input pengguna.
 const CYCLE_ACTIONS = ['stop', 'start', 'restart', 'disable'];
@@ -1200,6 +1951,8 @@ const TEARDOWN = {
   openvpn: { pkill: ['/etc/openvpn/client/raniah-vpn.conf'] },
   sstp: { pkill: ['raniah-sstp'] },
   l2tp: { pkill: ['options.l2tpd.client'] },
+  server: { pkill: [] },
+  'ovpn-server': { pkill: ['/etc/openvpn/server/raniah-server.conf'] },
 };
 
 function cycleError(status, message) {
@@ -1229,7 +1982,7 @@ function defaultCycleExec(file, args, { timeout = 20000 } = {}) {
 // Stop bersih: hentikan unit (dan companion), bunuh proses yatim, hapus interface, lalu tunggu
 // sampai kernel tidak lagi punya nama interface itu. Start hanya jalan setelah itu.
 async function cycleVpn(protocol, action, deps = {}) {
-  if (!PROTOCOLS.includes(protocol)) {
+  if (!CYCLE_PROTOCOLS.includes(protocol)) {
     throw cycleError(400, 'Protokol tidak dikenal.');
   }
   if (!CYCLE_ACTIONS.includes(action)) {
@@ -1237,6 +1990,13 @@ async function cycleVpn(protocol, action, deps = {}) {
   }
   const exec = deps.exec || defaultCycleExec;
   const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  // Kedua hub (WireGuard dan OpenVPN) boleh hidup bersamaan. Keduanya mematikan VPN Client.
+  if (HUB_PROTOCOLS.includes(protocol) && (action === 'start' || action === 'restart')) {
+    for (const client of PROTOCOLS) {
+      // eslint-disable-next-line no-await-in-loop
+      await cycleVpn(client, 'disable', deps);
+    }
+  }
   const unit = UNITS[protocol];
   const iface = INTERFACES[protocol];
   const companions = COMPANION_UNITS[protocol] || [];
@@ -1282,11 +2042,33 @@ async function cycleVpn(protocol, action, deps = {}) {
   }
 
   if (action === 'start' || action === 'restart') {
-    const started = await exec('systemctl', ['start', unit], { timeout: 20000 });
+    if (protocol === 'ovpn-server') {
+      const reloaded = await exec('systemctl', ['daemon-reload'], { timeout: 15000 });
+      if (!reloaded.ok) {
+        const detail = (reloaded.stderr || reloaded.stdout || '').trim().slice(0, 240);
+        throw cycleError(500, `systemctl daemon-reload gagal${detail ? `: ${detail}` : ''}.`);
+      }
+    }
+    const startArgs = HUB_PROTOCOLS.includes(protocol) && action === 'start'
+      ? ['enable', '--now', unit]
+      : ['start', unit];
+    const started = await exec('systemctl', startArgs, { timeout: 20000 });
     if (!started.ok) {
       const detail = (started.stderr || started.stdout || '').trim().slice(0, 240);
-      throw cycleError(500, `systemctl start ${unit} gagal${detail ? `: ${detail}` : ''}.`);
+      throw cycleError(500, `systemctl ${startArgs[0]} ${unit} gagal${detail ? `: ${detail}` : ''}.`);
     }
+  }
+  if (protocol === 'server' && (action === 'stop' || action === 'disable')) {
+    await syncServerFirewall('down', deps, exec);
+  }
+  if (protocol === 'server' && (action === 'start' || action === 'restart')) {
+    await syncServerFirewall('up', deps, exec);
+  }
+  if (protocol === 'ovpn-server' && (action === 'stop' || action === 'disable')) {
+    await syncOvpnServerFirewall('down', deps, exec);
+  }
+  if (protocol === 'ovpn-server' && (action === 'start' || action === 'restart')) {
+    await syncOvpnServerFirewall('up', deps, exec);
   }
   return { ok: true, protocol, action };
 }
@@ -1347,7 +2129,33 @@ module.exports = {
   INTERFACES,
   PATHS,
   CYCLE_ACTIONS,
+  CYCLE_PROTOCOLS,
+  SERVER_DEFAULT_PORT,
+  SERVER_DEFAULT_ADDRESS,
+  OVPN_SERVER_DEFAULT_PORT,
+  OVPN_SERVER_DEFAULT_NETWORK,
+  HUB_PROTOCOLS,
   cycleVpn,
+  validateServer,
+  validatePeer,
+  validateServerBundle,
+  allocatePeerAddress,
+  renderWgServer,
+  renderMikrotikScript,
+  generateRadiusSecret,
+  renderRadiusClientLines,
+  CHR_RADIUS_ADDRESS,
+  validateChrNas,
+  renderChrMikrotikScript,
+  applyServerToDisk,
+  validateOvpnServer,
+  validateOvpnPeer,
+  allocateOvpnAddress,
+  renderOvpnServer,
+  renderOvpnAuthScript,
+  renderOvpnMikrotikScript,
+  applyOvpnServerToDisk,
+  generatePresharedKey,
   MIN_ROUTE_PREFIX,
   WG_KEY_RE,
   VpnValidationError,

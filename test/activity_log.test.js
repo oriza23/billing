@@ -94,6 +94,8 @@ test('audit VPN: save/action tercatat sebagai edit "koneksi VPN" dan rahasia dis
   assert.equal(classifyAction('POST', '/api/sistem/vpn/save'), 'edit');
   assert.equal(classifyAction('POST', '/api/sistem/vpn/action'), 'edit');
   assert.equal(classifyAction('POST', '/api/sistem/vpn/restart'), 'edit');
+  assert.equal(classifyAction('POST', '/api/sistem/vpn/server/action'), 'edit');
+  assert.equal(classifyAction('POST', '/api/sistem/vpn/server/save'), 'edit');
   assert.equal(entityOf('/api/sistem/vpn/save'), 'koneksi VPN');
   assert.equal(entityOf('/api/sistem/vpn/action'), 'koneksi VPN');
   assert.equal(entityOf('/api/sistem/vpn/restart'), 'koneksi VPN');

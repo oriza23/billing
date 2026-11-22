@@ -16,8 +16,7 @@
  */
 
 const net = require('net');
-const { execFile } = require('child_process');
-const { execPrivileged } = require('./privileged');
+const { execPrivileged, runPrivileged } = require('./privileged');
 
 const MANAGED_PREFIX = 'billing-router:';
 const MAX_SECRET_LENGTH = 60; // nas.secret VARCHAR(60)
@@ -278,6 +277,119 @@ async function syncAfterRouterChange(db) {
   }
 }
 
+function vpnRouterMark(kind, peerId) {
+  if (kind === 'chr') {
+    return `chr_client:${peerId}`;
+  }
+  return `vpn-peer:${kind}:${peerId}`;
+}
+
+async function reloadFreeradius() {
+  const unit = serviceName();
+  try {
+    await runPrivileged('systemctl', ['reload', unit], { timeout: 20_000 });
+    return 'reload';
+  } catch (reloadError) {
+    try {
+      await runPrivileged('systemctl', ['restart', unit], { timeout: 30_000 });
+      return 'restart';
+    } catch (restartError) {
+      console.error('[radius-nas] FreeRADIUS tidak dimuat ulang:', restartError.message || reloadError.message);
+      return 'gagal';
+    }
+  }
+}
+
+async function writeVpnRouter(db, { kind, peer }) {
+  const mark = vpnRouterMark(kind, peer.id);
+  const ip = String(peer.address || '').split('/')[0].trim();
+  const secret = String(peer.radius_secret || '');
+  const [rows] = await db.execute(
+    'SELECT id, nama_router FROM routers WHERE deskripsi = ? LIMIT 1',
+    [mark],
+  );
+  const current = rows[0];
+  let nama = String(peer.name || ip).trim().slice(0, 100) || ip;
+  const [clash] = await db.execute(
+    'SELECT id FROM routers WHERE nama_router = ? AND id <> ? LIMIT 1',
+    [nama, current ? current.id : 0],
+  );
+  if (clash.length) {
+    const suffix = ` ${ip}`;
+    nama = `${nama.slice(0, 100 - suffix.length)}${suffix}`;
+  }
+  const status = peer.enabled === false ? 'Nonaktif' : 'Aktif';
+  if (!current) {
+    const [ipOwner] = await db.execute('SELECT id, deskripsi FROM routers WHERE ip_address = ? LIMIT 1', [ip]);
+    if (ipOwner.length && String(ipOwner[0].deskripsi || '') !== mark) {
+      console.warn(`[radius-nas] IP ${ip} sudah dipakai router id ${ipOwner[0].id}; peer VPN tidak menimpa baris itu.`);
+      return;
+    }
+    await db.execute(
+      'INSERT INTO routers (nama_router, ip_address, secret, deskripsi, status) VALUES (?, ?, ?, ?, ?)',
+      [nama, ip, secret, mark, status],
+    );
+    return;
+  }
+  if (current.nama_router !== nama) {
+    await db.execute('UPDATE langganan_pelanggan SET router = ? WHERE router = ?', [nama, current.nama_router]).catch(() => {});
+    await db.execute('UPDATE hotspot_vouchers SET router = ? WHERE router = ?', [nama, current.nama_router]).catch(() => {});
+  }
+  await db.execute(
+    'UPDATE routers SET nama_router = ?, ip_address = ?, secret = ?, deskripsi = ?, status = ? WHERE id = ?',
+    [nama, ip, secret, mark, status, current.id],
+  );
+}
+
+async function syncVpnPeer(db, spec) {
+  try {
+    await writeVpnRouter(db, spec);
+    const result = await syncAfterRouterChange(db);
+    const reload = await reloadFreeradius();
+    return { ok: true, ...result, reload };
+  } catch (error) {
+    console.error('[radius-nas] sinkronisasi peer VPN gagal:', error.message);
+    return { ok: false, error: error.message };
+  }
+}
+
+async function syncChrClient(db, nas) {
+  const mark = vpnRouterMark('chr', nas.id);
+  if (!String(nas.ip || '').trim()) {
+    try {
+      await db.execute('DELETE FROM routers WHERE deskripsi = ?', [mark]);
+      const result = await syncAfterRouterChange(db);
+      const reload = await reloadFreeradius();
+      return { ok: true, ...result, reload };
+    } catch (error) {
+      console.error('[radius-nas] lepas NAS CHR gagal:', error.message);
+      return { ok: false, error: error.message };
+    }
+  }
+  return syncVpnPeer(db, {
+    kind: 'chr',
+    peer: {
+      id: nas.id,
+      name: nas.name,
+      address: nas.ip,
+      radius_secret: nas.radius_secret,
+      enabled: true,
+    },
+  });
+}
+
+async function forgetVpnPeer(db, { kind, peerId }) {
+  try {
+    await db.execute('DELETE FROM routers WHERE deskripsi = ?', [vpnRouterMark(kind, peerId)]);
+    const result = await syncAfterRouterChange(db);
+    const reload = await reloadFreeradius();
+    return { ok: true, ...result, reload };
+  } catch (error) {
+    console.error('[radius-nas] hapus NAS peer VPN gagal:', error.message);
+    return { ok: false, error: error.message };
+  }
+}
+
 module.exports = {
   MANAGED_PREFIX,
   MAX_SECRET_LENGTH,
@@ -288,4 +400,8 @@ module.exports = {
   previewNasSync,
   syncNasFromRouters,
   syncAfterRouterChange,
+  reloadFreeradius,
+  syncVpnPeer,
+  syncChrClient,
+  forgetVpnPeer,
 };

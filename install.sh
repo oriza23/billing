@@ -167,6 +167,20 @@ $SUDO apt-get install -y \
 info "=== Paket VPN client: wireguard-tools, openvpn, sstp-client, xl2tpd, ppp ==="
 $SUDO apt-get install -y wireguard-tools openvpn sstp-client xl2tpd ppp \
   || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client xl2tpd ppp"
+# Unit bawaan Ubuntu membatasi openvpn-server@ ke 10 proses. auth-user-pass-verify
+# lalu gagal fork (errno 11). Drop-in ini melepas batas itu sebelum service dihidupkan.
+$SUDO install -d -m 0755 /etc/systemd/system/openvpn-server@raniah-server.service.d
+$SUDO tee /etc/systemd/system/openvpn-server@raniah-server.service.d/override.conf >/dev/null <<'EOF'
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/bin/mkdir -p /run/openvpn-server
+LimitNPROC=infinity
+TasksMax=infinity
+EOF
+$SUDO systemctl daemon-reload || true
 # strongSwan (swanctl) hanya dipakai L2TP/IPsec saat IPsec Pre-Shared Key diisi. Terpisah dari
 # xl2tpd supaya L2TP murni tetap berjalan walau paket ini tidak tersedia.
 info "=== Paket IPsec opsional untuk L2TP/IPsec: strongswan-swanctl, charon-systemd ==="
@@ -476,7 +490,7 @@ else
   VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp raniah-l2tp)
   SUDO_CMDS=()
   for SYSTEMCTL_BIN in /bin/systemctl /usr/bin/systemctl; do
-    SUDO_CMDS+=("${SYSTEMCTL_BIN} restart postgresql" "${SYSTEMCTL_BIN} restart freeradius")
+    SUDO_CMDS+=("${SYSTEMCTL_BIN} restart postgresql" "${SYSTEMCTL_BIN} restart freeradius" "${SYSTEMCTL_BIN} reload freeradius")
     for VPN_UNIT in "${VPN_UNITS[@]}"; do
       SUDO_CMDS+=(
         "${SYSTEMCTL_BIN} enable --now ${VPN_UNIT}"
@@ -491,11 +505,30 @@ else
   SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
   # Restart/connect/disconnect tidak memakai systemctl restart mentah. Helper root yang
   # menghentikan unit, membunuh proses yatim, menunggu interface hilang, lalu start.
-  for VPN_PROTO in wireguard openvpn sstp l2tp; do
+  for VPN_PROTO in wireguard openvpn sstp l2tp server ovpn-server; do
     for VPN_ACTION in stop start restart disable; do
       SUDO_CMDS+=("/usr/local/sbin/raniah-vpn-helper cycle ${VPN_PROTO} ${VPN_ACTION}")
     done
   done
+  # wg-server adalah VPN Server (hub NAS). Port UDP-nya tidak dibuka di blok UFW instalasi;
+  # helper membukanya hanya saat mode server diaktifkan, dan menutupnya saat mode client menyala.
+  SUDO_CMDS+=(
+    "/usr/bin/systemctl enable --now wg-quick@wg-server"
+    "/usr/bin/systemctl restart wg-quick@wg-server"
+    "/usr/bin/systemctl disable --now wg-quick@wg-server"
+    "/usr/bin/systemctl reset-failed wg-quick@wg-server"
+    "/usr/bin/wg show wg-server dump"
+    "/usr/bin/journalctl -u wg-quick@wg-server -n 20 --no-pager"
+    "/usr/local/sbin/raniah-vpn-helper apply-server"
+    "/usr/bin/systemctl enable --now openvpn-server@raniah-server"
+    "/usr/bin/systemctl restart openvpn-server@raniah-server"
+    "/usr/bin/systemctl disable --now openvpn-server@raniah-server"
+    "/usr/bin/systemctl reset-failed openvpn-server@raniah-server"
+    "/usr/bin/journalctl -u openvpn-server@raniah-server -n 20 --no-pager"
+    "/usr/bin/cat /etc/openvpn/server/raniah-pki/ca.crt"
+    "/usr/bin/cat /run/openvpn-server/status-raniah.log"
+    "/usr/local/sbin/raniah-vpn-helper apply-ovpn-server"
+  )
   # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP/L2TP 20 baris
   # supaya pesan TLS/sertifikat/auth tidak terpotong baris Exit pppd. Log L2TP menggabungkan
   # xl2tpd karena pppd dan xl2tpd berjalan di bawah xl2tpd.service.

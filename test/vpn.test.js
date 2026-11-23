@@ -14,7 +14,7 @@ const cfg = require('../backend/vpn_config');
 const {
   createVpnService, parseIpAddr, parseWgDump, hijacksDefaultRoute, publicProfiles,
   hostOf, isSafePingTarget, tunnelGateway, publicPingTarget, tunnelPingTarget, parsePingMs,
-  vpnFailedProtocols, parseOvpnStatus, presentOvpnServer,
+  vpnFailedProtocols, parseOvpnStatus, presentOvpnServer, parseL2tpServerPeers, presentL2tpServer,
 } = require('../backend/vpn');
 
 const KEY_A = 'A'.repeat(43) + '=';
@@ -1177,6 +1177,7 @@ test('cycleVpn: L2TP menghentikan xl2tpd; start dibatalkan bila interface masih 
   const calls = [];
   await cfg.cycleVpn('l2tp', 'disable', {
     sleep: async () => {},
+    readText: () => '[global]\n[lac raniah-l2tp]\n',
     exec: async (file, args) => {
       calls.push([file, ...args].join(' '));
       if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
@@ -1320,7 +1321,9 @@ test('connect protokol lain: l2tp + xl2tpd ikut di-disable --now dan reset-faile
     assert.ok(system.calls.includes(`systemctl disable --now ${unit}`), unit);
     assert.ok(system.calls.includes(`systemctl reset-failed ${unit}`), unit);
   }
-  assert.ok(system.calls.indexOf('systemctl disable --now raniah-l2tp') < system.calls.indexOf('systemctl disable --now xl2tpd'));
+  const clientAt = system.calls.indexOf('systemctl disable --now raniah-l2tp');
+  const companionAt = system.calls.indexOf('systemctl disable --now xl2tpd', clientAt);
+  assert.ok(companionAt > clientAt);
 });
 
 test('disconnect l2tp: disable --now raniah-l2tp dan xl2tpd', async () => {
@@ -1771,5 +1774,237 @@ test('cycle ovpn-server: matikan client, biarkan wg-server, buka UFW TCP', async
   assert.equal(calls.some((call) => call.includes('wg-quick@wg-server')), false);
   assert.ok(calls.includes('ufw allow 1194/tcp comment OpenVPN VPN server'));
   assert.ok(calls.includes('ufw allow from 10.221.0.0/24 comment Subnet OpenVPN server'));
+});
+
+test('l2tp server: chap-secrets, script ROS, dan subnet 10.222.0.0/24', () => {
+  const server = cfg.validateL2tpServer({ public_endpoint: 'vpn.contoh.net', listen_port: 1701, network: '10.222.0.0/24' });
+  assert.equal(server.server_ip, '10.222.0.1');
+  assert.equal(server.range_start, '10.222.0.2');
+  assert.equal(server.range_end, '10.222.0.254');
+  const conf = cfg.renderL2tpServerConf(server);
+  assert.match(conf, /^port = 1701$/m);
+  assert.match(conf, /^auth file = \/etc\/ppp\/chap-secrets$/m);
+  assert.match(conf, /^\[lns default\]$/m);
+  assert.match(conf, /^ip range = 10\.222\.0\.2-10\.222\.0\.254$/m);
+  assert.match(conf, /^local ip = 10\.222\.0\.1$/m);
+  assert.match(conf, /^require chap = yes$/m);
+  assert.match(conf, /^refuse pap = yes$/m);
+  assert.match(conf, /^length bit = yes$/m);
+  assert.match(cfg.renderL2tpServerOptions(), /require-mschap-v2\nmtu 1400\nmru 1400\nlcp-echo-interval 10\nlcp-echo-failure 3\nnodefaultroute/);
+  const peer = cfg.validateL2tpPeer({ name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123' });
+  const script = cfg.renderL2tpServerScript(server, {
+    ...peer, address: '10.222.0.2', radius_secret: 'Abcd1234SecretValue1234',
+  });
+  assert.equal(script.includes('#'), false);
+  assert.match(script, /\/interface l2tp-client add name="l2tp-raniah" connect-to="vpn\.contoh\.net" user="nas-kantor" password="Rahasia123" use-ipsec=no allow=mschap2 add-default-route=no disabled=no comment="Auto by Billing"/);
+  assert.match(script, /\/radius add service=ppp,hotspot address=10\.222\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.222\.0\.2 comment="Auto by Billing"/);
+  assert.match(script, /\/radius incoming set accept=yes port=3799/);
+  assert.match(script, /\/ppp aaa set use-radius=yes accounting=yes interim-update=5m/);
+  assert.match(script, /:do \{ \/ip hotspot profile set \[find\] use-radius=yes \} on-error=\{\}/);
+  rejects(() => cfg.validateL2tpServer({ network: '10.220.0.0/24' }), /bentrok/);
+  rejects(() => cfg.validateL2tpServer({ network: '10.221.0.0/24' }), /bentrok/);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'l2tp-srv-'));
+  try {
+    fs.mkdirSync(path.join(root, '/etc/ppp'), { recursive: true });
+    fs.writeFileSync(path.join(root, cfg.PATHS.l2tpServerChap), 'orang-lain * rahasia 192.0.2.9\n');
+    const peers = [
+      { ...peer, address: '10.222.0.2', enabled: true },
+      { ...cfg.validateL2tpPeer({ name: 'Mati', username: 'nas-mati', password: 'Password22' }), address: '10.222.0.3', enabled: false },
+    ];
+    cfg.applyL2tpServerToDisk(server, peers, { root, exec: () => {} });
+    const chapPath = path.join(root, cfg.PATHS.l2tpServerChap);
+    assert.equal(fs.statSync(chapPath).mode & 0o777, 0o600);
+    const chap = fs.readFileSync(chapPath, 'utf8');
+    assert.match(chap, /^nas-kantor \* Rahasia123 10\.222\.0\.2$/m);
+    assert.equal(chap.includes('nas-mati'), false);
+    assert.match(chap, /^orang-lain \* rahasia 192\.0\.2\.9$/m);
+    assert.match(fs.readFileSync(path.join(root, cfg.PATHS.l2tpdConf), 'utf8'), /\[lns default\]/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  const view = presentL2tpServer({
+    server,
+    peers: [{ id: 1, name: peer.name, username: peer.username, password: 'Rahasia123', address: '10.222.0.2', enabled: true, radius_secret: 'Abcd1234SecretValue1234' }],
+  }, { peers: [{ address: '10.222.0.2', rx_bytes: 11, tx_bytes: 22 }] });
+  assert.equal(JSON.stringify(view).includes('Rahasia123'), false);
+  assert.equal(view.peers[0].online, true);
+  assert.equal(view.peers[0].rx_bytes, 11);
+  assert.equal(view.server.server_ip, '10.222.0.1');
+  const live = parseL2tpServerPeers('5: ppp0: <POINTOPOINT,UP>\n    inet 10.222.0.1 peer 10.222.0.2/32 scope global ppp0\n6: eth0: <UP>\n    inet 192.0.2.1/24\n');
+  assert.deepEqual(live, [{ iface: 'ppp0', address: '10.222.0.2', local: '10.222.0.1' }]);
+});
+
+// Fake OS: xl2tpd hidup hanya setelah `systemctl restart xl2tpd` (seperti unit SysV sungguhan).
+function fakeL2tpOs({ orphan = false, startWorks = true, listens = true } = {}) {
+  const calls = [];
+  const os = { alive: orphan, calls };
+  os.exec = async (file, args) => {
+    calls.push([file, ...args].join(' '));
+    const ok = (stdout = '') => ({ ok: true, code: 0, stdout, stderr: '' });
+    const fail = (stderr = '') => ({ ok: false, code: 1, stdout: '', stderr });
+    if (file === 'ip' && args[1] === 'show') return fail('gone');
+    if (file === 'pkill' && args.includes('xl2tpd')) { os.alive = false; return ok(); }
+    if (file === 'pgrep') return os.alive ? ok('4242\n') : fail();
+    if (file === 'systemctl' && args[0] === 'restart' && args[1] === 'xl2tpd') {
+      os.alive = startWorks;
+      return ok();
+    }
+    if (file === 'systemctl' && args[0] === 'is-active') return os.alive ? ok('active\n') : { ok: false, code: 3, stdout: 'inactive\n', stderr: '' };
+    if (file === 'ss') {
+      return ok(os.alive && listens ? 'UNCONN 0 0 0.0.0.0:1701 0.0.0.0:* users:(("xl2tpd",pid=4242,fd=3))\n' : '');
+    }
+    if (file === 'journalctl') return ok('xl2tpd[9]: Unable to create control fifo\nxl2tpd[9]: exit\n');
+    if (file === '/usr/sbin/xl2tpd') return { ok: false, code: 1, stdout: '', stderr: 'xl2tpd[10]: open_controlfd: Unable to open /run/xl2tpd/l2tp-control: No such file or directory' };
+    return ok();
+  };
+  return os;
+}
+
+const L2TP_CONF = cfg.renderL2tpServerConf({ public_endpoint: 'vpn.contoh.net', network: '10.222.0.0/24' });
+const l2tpDeps = (os) => ({
+  sleep: async () => {},
+  readText: (file) => (String(file).endsWith('xl2tpd.conf') ? L2TP_CONF : ''),
+  writeText: () => {},
+  exec: os.exec,
+});
+
+test('cycle l2tp-server start: runtime dir, bunuh proses yatim, restart, verifikasi proses + UDP, baru buka UFW', async () => {
+  const os = fakeL2tpOs({ orphan: true });
+  await cfg.cycleVpn('l2tp-server', 'start', l2tpDeps(os));
+  const { calls } = os;
+  const restartAt = calls.indexOf('systemctl restart xl2tpd');
+  assert.ok(restartAt > calls.indexOf('systemctl disable --now wg-quick@wg-billing'));
+  assert.ok(restartAt > calls.indexOf('systemctl disable --now openvpn-client@raniah-vpn'));
+  assert.ok(restartAt > calls.indexOf('systemctl disable --now raniah-sstp'));
+  assert.ok(restartAt > calls.indexOf('systemctl disable --now raniah-l2tp'));
+  assert.ok(calls.indexOf('mkdir -p /run/xl2tpd /var/run/xl2tpd') >= 0);
+  assert.ok(calls.indexOf('mkdir -p /run/xl2tpd /var/run/xl2tpd') < restartAt);
+  assert.ok(calls.indexOf('pkill -x xl2tpd') >= 0 && calls.indexOf('pkill -x xl2tpd') < restartAt);
+  assert.ok(calls.includes('systemctl enable xl2tpd'));
+  assert.equal(calls.includes('systemctl enable --now xl2tpd'), false);
+  assert.ok(calls.indexOf('ss -ulpn') > restartAt);
+  assert.equal(calls.filter((call) => call === 'systemctl disable --now xl2tpd').length, 0);
+  assert.equal(calls.some((call) => call.includes('wg-quick@wg-server')), false);
+  assert.equal(calls.some((call) => call.includes('openvpn-server@raniah-server')), false);
+  assert.ok(calls.indexOf('ufw allow 1701/udp comment L2TP VPN server') > calls.indexOf('ss -ulpn'));
+  assert.ok(calls.includes('ufw allow from 10.222.0.0/24 comment Subnet L2TP server'));
+});
+
+test('cycle l2tp-server start: daemon mati walau systemctl sukses -> gagal dengan log asli, UFW tidak dibuka', async () => {
+  const os = fakeL2tpOs({ startWorks: false });
+  await assert.rejects(
+    () => cfg.cycleVpn('l2tp-server', 'start', l2tpDeps(os)),
+    (error) => error.status === 500
+      && /L2TP Server gagal start: proses xl2tpd tidak berjalan/.test(error.message)
+      && /journalctl: .*Unable to create control fifo/.test(error.message)
+      && /xl2tpd -D: .*open_controlfd/.test(error.message),
+  );
+  assert.equal(os.calls.some((call) => call.startsWith('ufw allow')), false);
+});
+
+test('cycle l2tp-server start: proses hidup tetapi UDP tidak listening -> gagal', async () => {
+  const os = fakeL2tpOs({ listens: false });
+  await assert.rejects(
+    () => cfg.cycleVpn('l2tp-server', 'start', l2tpDeps(os)),
+    /tidak listening di UDP 1701/,
+  );
+  assert.equal(os.calls.some((call) => call.startsWith('ufw allow')), false);
+});
+
+test('cycle l2tp-server restart: sama ketatnya dengan start', async () => {
+  const os = fakeL2tpOs({ orphan: true, startWorks: false });
+  await assert.rejects(() => cfg.cycleVpn('l2tp-server', 'restart', l2tpDeps(os)), /L2TP Server gagal start/);
+});
+
+test('stop L2TP Server: disable --now tidak cukup, tunggu proses xl2tpd benar-benar mati', async () => {
+  const os = fakeL2tpOs({ orphan: true });
+  await cfg.stopL2tpServer({
+    sleep: async () => {},
+    readText: () => '1701/udp\nfrom 10.222.0.0/24\n',
+    writeText: () => {},
+    exec: os.exec,
+  });
+  const { calls } = os;
+  assert.ok(calls.includes('systemctl disable --now xl2tpd'));
+  assert.ok(calls.includes('systemctl stop xl2tpd'));
+  assert.ok(calls.includes('systemctl reset-failed xl2tpd'));
+  assert.ok(calls.includes('pkill -x xl2tpd'));
+  assert.ok(calls.includes('pkill -f options.xl2tpd'));
+  assert.ok(calls.includes('ufw --force delete allow 1701/udp'));
+  assert.ok(calls.includes('ufw --force delete allow from 10.222.0.0/24'));
+  assert.ok(calls.lastIndexOf('pgrep -x xl2tpd') > calls.indexOf('pkill -x xl2tpd'));
+  assert.equal(os.alive, false);
+
+  // systemd bilang inactive tetapi proses yatim masih hidup -> tidak boleh dianggap berhenti.
+  await assert.rejects(
+    () => cfg.stopL2tpServer({
+      sleep: async () => {},
+      readText: () => '',
+      writeText: () => {},
+      exec: async (file, args) => {
+        if (file === 'systemctl' && args[0] === 'is-active') return { ok: false, code: 3, stdout: 'inactive\n', stderr: '' };
+        if (file === 'pgrep') return { ok: true, code: 0, stdout: '99\n', stderr: '' };
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    }),
+    /xl2tpd masih inactive/,
+  );
+
+  await assert.rejects(
+    () => cfg.stopL2tpServer({
+      sleep: async () => {},
+      readText: () => '',
+      writeText: () => {},
+      exec: async (file, args) => {
+        if (file === 'systemctl' && args[0] === 'is-active') {
+          return { ok: true, code: 0, stdout: 'active\n', stderr: '' };
+        }
+        return { ok: false, code: 1, stdout: '', stderr: 'stop ditolak' };
+      },
+    }),
+    /xl2tpd masih active/,
+  );
+});
+
+test('status L2TP Server: Aktif hanya bila pgrep xl2tpd hidup DAN conf [lns default]', async () => {
+  const lns = L2TP_CONF;
+  const lac = '[global]\n[lac raniah-l2tp]\nlns = 1.2.3.4\n';
+  const statusOf = async ({ pgrep, conf, unit = 'inactive' }) => {
+    const system = fakeSystem({ active: { 'l2tp-server': unit } });
+    const baseRun = system.run;
+    const { service } = serviceWith(
+      { ...system, run: async (file, args, options) => (file === 'pgrep' ? { ok: pgrep, code: pgrep ? 0 : 1, stdout: pgrep ? '77\n' : '', stderr: '' } : baseRun(file, args, options)) },
+      { readText: (file) => (String(file).endsWith('xl2tpd.conf') ? conf : '') },
+    );
+    return service.getL2tpServerStatus();
+  };
+  // unit SysV bilang inactive, tetapi daemon hidup => Aktif.
+  assert.equal((await statusOf({ pgrep: true, conf: lns, unit: 'inactive' })).state, 'active');
+  // unit bilang active, tetapi daemon tidak ada => Mati.
+  assert.equal((await statusOf({ pgrep: false, conf: lns, unit: 'active' })).state, 'inactive');
+  // daemon hidup tetapi conf mode klien => Mati.
+  assert.equal((await statusOf({ pgrep: true, conf: lac, unit: 'active' })).state, 'inactive');
+  assert.equal((await statusOf({ pgrep: true, conf: '', unit: 'active' })).state, 'inactive');
+});
+
+test('hub lain tidak mematikan xl2tpd yang sedang mode L2TP Server', async () => {
+  const calls = [];
+  const conf = cfg.renderL2tpServerConf({ public_endpoint: 'vpn.contoh.net' });
+  const exec = async (file, args) => {
+    calls.push([file, ...args].join(' '));
+    if (file === 'ip' && args[1] === 'show') return { ok: false, code: 1, stdout: '', stderr: 'gone' };
+    return { ok: true, code: 0, stdout: '', stderr: '' };
+  };
+  const deps = {
+    sleep: async () => {},
+    readText: (file) => (String(file).endsWith('xl2tpd.conf') ? conf : 'port 1194\nserver 10.221.0.0 255.255.255.0\n'),
+    writeText: () => {},
+    exec,
+  };
+  await cfg.cycleVpn('ovpn-server', 'start', deps);
+  await cfg.cycleVpn('l2tp', 'disable', deps);
+  assert.equal(calls.some((call) => /xl2tpd/.test(call) && /systemctl/.test(call)), false, calls.filter((call) => call.includes('xl2tpd')).join('\n'));
 });
 

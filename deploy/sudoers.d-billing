@@ -64,7 +64,14 @@ billing ALL=(root) NOPASSWD: \
   /usr/bin/cat /etc/openvpn/server/raniah-pki/ca.crt, \
   /usr/bin/cat /run/openvpn-server/status-raniah.log, \
   /usr/local/sbin/raniah-vpn-helper apply-ovpn-server, \
+  /usr/local/sbin/raniah-vpn-helper apply-l2tp-server, \
+  /usr/local/sbin/raniah-vpn-helper start-l2tp-server, \
+  /usr/local/sbin/raniah-vpn-helper stop-l2tp-server, \
   /usr/local/sbin/raniah-vpn-helper cycle ovpn-server stop, \
   /usr/local/sbin/raniah-vpn-helper cycle ovpn-server start, \
   /usr/local/sbin/raniah-vpn-helper cycle ovpn-server restart, \
-  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server disable
+  /usr/local/sbin/raniah-vpn-helper cycle ovpn-server disable, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp-server stop, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp-server start, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp-server restart, \
+  /usr/local/sbin/raniah-vpn-helper cycle l2tp-server disable

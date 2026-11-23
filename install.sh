@@ -505,7 +505,7 @@ else
   SUDO_CMDS+=("/usr/bin/wg show wg-billing dump" "/usr/local/sbin/raniah-vpn-helper apply")
   # Restart/connect/disconnect tidak memakai systemctl restart mentah. Helper root yang
   # menghentikan unit, membunuh proses yatim, menunggu interface hilang, lalu start.
-  for VPN_PROTO in wireguard openvpn sstp l2tp server ovpn-server; do
+  for VPN_PROTO in wireguard openvpn sstp l2tp server ovpn-server l2tp-server; do
     for VPN_ACTION in stop start restart disable; do
       SUDO_CMDS+=("/usr/local/sbin/raniah-vpn-helper cycle ${VPN_PROTO} ${VPN_ACTION}")
     done
@@ -528,6 +528,9 @@ else
     "/usr/bin/cat /etc/openvpn/server/raniah-pki/ca.crt"
     "/usr/bin/cat /run/openvpn-server/status-raniah.log"
     "/usr/local/sbin/raniah-vpn-helper apply-ovpn-server"
+    "/usr/local/sbin/raniah-vpn-helper apply-l2tp-server"
+    "/usr/local/sbin/raniah-vpn-helper start-l2tp-server"
+    "/usr/local/sbin/raniah-vpn-helper stop-l2tp-server"
   )
   # Log unit VPN ditampilkan di UI saat koneksi belum tersambung. SSTP/L2TP 20 baris
   # supaya pesan TLS/sertifikat/auth tidak terpotong baris Exit pppd. Log L2TP menggabungkan

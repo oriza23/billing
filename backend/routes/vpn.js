@@ -442,6 +442,128 @@ router.get('/server/ovpn/peers/:id/script', async (req, res) => {
   }
 });
 
+async function l2tpPayload(live) {
+  const bundle = await vpn.loadL2tpServer(pool);
+  const view = vpn.presentL2tpServer(bundle, live || { peers: [] });
+  return { bundle, view };
+}
+
+router.get('/server/l2tp', async (req, res) => {
+  try {
+    const live = await vpn.service.getL2tpServerStatus();
+    const { view } = await l2tpPayload(live);
+    res.json({ success: true, ...view, status: live });
+  } catch (error) {
+    console.error('[vpn] l2tp server:', error);
+    res.status(500).json({ success: false, message: 'Gagal membaca L2TP Server.' });
+  }
+});
+
+router.post('/server/l2tp/save', async (req, res) => {
+  try {
+    const bundle = await vpn.saveL2tpServerSettings(pool, req.body || {}, req.user?.username);
+    const status = await vpn.service.syncL2tpServer(bundle.server, bundle.peers);
+    const view = vpn.presentL2tpServer(bundle, status);
+    res.json({
+      success: true,
+      message: status.state === 'active' ? 'Pengaturan L2TP disimpan dan diterapkan ulang.' : 'Pengaturan L2TP disimpan.',
+      ...view,
+      status,
+    });
+  } catch (error) {
+    sendError(res, error, 'Gagal menyimpan L2TP Server.');
+  }
+});
+
+router.post('/server/l2tp/action', async (req, res) => {
+  const action = typeof req.body?.action === 'string' ? req.body.action.trim().toLowerCase() : '';
+  if (!['enable', 'disable', 'restart'].includes(action)) {
+    return res.status(400).json({ success: false, message: 'Aksi harus enable, disable, atau restart.' });
+  }
+  try {
+    const bundle = await vpn.loadL2tpServer(pool);
+    const status = await vpn.service.controlL2tpServer(action, bundle.server, bundle.peers);
+    const view = vpn.presentL2tpServer(await vpn.loadL2tpServer(pool), status);
+    if (action === 'disable' && status.state === 'active') {
+      return res.status(500).json({
+        success: false,
+        message: 'L2TP Server masih aktif setelah perintah matikan.',
+        ...view,
+        status,
+      });
+    }
+    const message = action === 'disable'
+      ? 'L2TP Server dimatikan. Port UDP dan subnet-nya ditutup di UFW.'
+      : action === 'restart'
+        ? 'L2TP Server di-restart. VPN Client ikut dimatikan bila masih jalan.'
+        : 'L2TP Server aktif. VPN Client dimatikan. WireGuard Server dan OpenVPN Server tetap boleh hidup.';
+    return res.json({ success: true, message, ...view, status });
+  } catch (error) {
+    const status = Number(error.status) || 500;
+    const detail = String(error.message || '').trim();
+    return res.status(status).json({
+      success: false,
+      message: detail || 'Gagal mengubah L2TP Server.',
+      field: error.field || undefined,
+    });
+  }
+});
+
+router.post('/server/l2tp/peers', async (req, res) => {
+  try {
+    const { bundle } = await vpn.addL2tpPeer(pool, req.body || {});
+    const status = await vpn.service.syncL2tpServer(bundle.server, bundle.peers);
+    const view = vpn.presentL2tpServer(bundle, status);
+    res.json({ success: true, message: 'Peer L2TP ditambahkan. IP VPN dan RADIUS secret dibuat otomatis.', ...view, status });
+  } catch (error) {
+    sendError(res, error, 'Gagal menambah peer L2TP.');
+  }
+});
+
+router.patch('/server/l2tp/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.updateL2tpPeer(pool, id, req.body || {});
+    const status = await vpn.service.syncL2tpServer(bundle.server, bundle.peers);
+    const view = vpn.presentL2tpServer(bundle, status);
+    return res.json({ success: true, message: 'Peer L2TP diperbarui.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal memperbarui peer L2TP.');
+  }
+});
+
+router.delete('/server/l2tp/peers/:id', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.deleteL2tpPeer(pool, id);
+    const status = await vpn.service.syncL2tpServer(bundle.server, bundle.peers);
+    const view = vpn.presentL2tpServer(bundle, status);
+    return res.json({ success: true, message: 'Peer L2TP dihapus.', ...view, status });
+  } catch (error) {
+    return sendError(res, error, 'Gagal menghapus peer L2TP.');
+  }
+});
+
+router.get('/server/l2tp/peers/:id/script', async (req, res) => {
+  const id = peerId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID peer tidak valid.' });
+  }
+  try {
+    const bundle = await vpn.loadL2tpServer(pool);
+    const script = vpn.l2tpServerScript(bundle, id);
+    return res.json({ success: true, script });
+  } catch (error) {
+    return sendError(res, error, 'Gagal membuat script MikroTik.');
+  }
+});
+
 router.get('/server/ovpn/ca', async (req, res) => {
   try {
     const pem = await vpn.service.readOvpnCa();

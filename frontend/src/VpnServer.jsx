@@ -4,6 +4,7 @@ import Swal from 'sweetalert2'
 import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
 import VpnOvpnServer from './VpnOvpnServer.jsx'
+import VpnL2tpServer from './VpnL2tpServer.jsx'
 
 const API = '/sistem/vpn/server'
 const CARD = 'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900'
@@ -47,7 +48,10 @@ async function copyText(value, title) {
 }
 
 function VpnServer() {
-  const [kind, setKind] = useState(() => (sessionStorage.getItem('vpn-server-kind') === 'ovpn' ? 'ovpn' : 'wireguard'))
+  const [kind, setKind] = useState(() => {
+    const saved = sessionStorage.getItem('vpn-server-kind')
+    return saved === 'ovpn' || saved === 'l2tp' ? saved : 'wireguard'
+  })
   const [data, setData] = useState(null)
   const [form, setForm] = useState({ public_endpoint: '', listen_port: '51820', address: '10.220.0.1/24' })
   const [peerForm, setPeerForm] = useState({ name: '', public_key: '', generate_psk: true })
@@ -214,8 +218,9 @@ function VpnServer() {
       <div className="mt-6 inline-flex rounded-xl border border-gray-200 bg-slate-100 p-1 dark:border-slate-700 dark:bg-slate-800" role="tablist" aria-label="Jenis VPN Server">
         {kindTab('wireguard', 'WireGuard Server (ROS v7)')}
         {kindTab('ovpn', 'OpenVPN Server (ROS v6)')}
+        {kindTab('l2tp', 'L2TP Server (ROS v6/v7)')}
       </div>
-      {kind === 'ovpn' ? <VpnOvpnServer /> : (
+      {kind === 'ovpn' ? <VpnOvpnServer /> : kind === 'l2tp' ? <VpnL2tpServer /> : (
       <>
       <div className={CARD} aria-live="polite">
         <div className="flex flex-wrap items-center justify-between gap-3">

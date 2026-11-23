@@ -78,6 +78,65 @@ function main() {
       });
     return;
   }
+  if (cmd === 'start-l2tp-server') {
+    if (process.argv.length !== 3) {
+      die('Pemakaian: raniah-vpn-helper start-l2tp-server', 2);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    let vpn;
+    try {
+      vpn = loadConfigModule();
+    } catch (error) {
+      die(error.message || String(error), 1);
+    }
+    // Sama dengan `cycle l2tp-server start`: matikan VPN Client, lalu start xl2tpd
+    // dengan verifikasi proses + port UDP. Gagal => exit non-nol dengan log asli.
+    vpn.cycleVpn('l2tp-server', 'start')
+      .then((result) => {
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      })
+      .catch((error) => {
+        die(error.message || String(error), error.status === 400 ? 6 : 1);
+      });
+    return;
+  }
+  if (cmd === 'stop-l2tp-server') {
+    if (process.argv.length !== 3) {
+      die('Pemakaian: raniah-vpn-helper stop-l2tp-server', 2);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    let vpn;
+    try {
+      vpn = loadConfigModule();
+    } catch (error) {
+      die(error.message || String(error), 1);
+    }
+    vpn.stopL2tpServer()
+      .then((result) => {
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      })
+      .catch((error) => {
+        die(error.message || String(error), error.status === 400 ? 6 : 1);
+      });
+    return;
+  }
+  if (cmd === 'apply-l2tp-server') {
+    if (process.argv.length !== 3) {
+      die('Pemakaian: raniah-vpn-helper apply-l2tp-server  (JSON dari stdin)', 2);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      die('Helper harus dijalankan sebagai root (lewat sudo).', 3);
+    }
+    return readStdin((payload) => {
+      const vpn = loadConfigModule();
+      const written = vpn.applyL2tpServerToDisk(payload.server, payload.peers);
+      process.stdout.write(`${JSON.stringify({ ok: true, files: written })}\n`);
+    });
+  }
   if (cmd === 'apply-ovpn-server') {
     if (process.argv.length !== 3) {
       die('Pemakaian: raniah-vpn-helper apply-ovpn-server  (JSON dari stdin)', 2);

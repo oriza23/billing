@@ -179,6 +179,32 @@ function parseOvpnStatus(output) {
   return peers;
 }
 
+function parseL2tpServerPeers(output) {
+  const peers = [];
+  const blocks = String(output || '').split(/\n(?=\d+:)/);
+  for (const block of blocks) {
+    const head = /^(\d+:\s+)?([A-Za-z0-9_.-]+):/.exec(block.trim());
+    const peer = /\bpeer\s+(\d{1,3}(?:\.\d{1,3}){3})/.exec(block);
+    const local = /\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\b/.exec(block);
+    if (!head || !peer || !/^ppp\d+$/.test(head[2])) {
+      continue;
+    }
+    peers.push({ iface: head[2], address: peer[1], local: local ? local[1] : null });
+  }
+  return peers;
+}
+
+function readIfaceCounter(iface, direction) {
+  if (!/^ppp\d+$/.test(iface) || (direction !== 'rx' && direction !== 'tx')) {
+    return 0;
+  }
+  try {
+    return Number(fs.readFileSync(`/sys/class/net/${iface}/statistics/${direction}_bytes`, 'utf8')) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 // Rute yang membelokkan seluruh trafik server lewat VPN (default / 0.0.0.0/1 / 128.0.0.0/1).
 function hijacksDefaultRoute(routeOutput) {
   return String(routeOutput || '').split('\n').some((line) => /^(default|0\.0\.0\.0\/[01]|128\.0\.0\.0\/1)\b/.test(line.trim()));
@@ -432,7 +458,7 @@ function createVpnService(overrides = {}) {
       const detail = (result.stderr || result.stdout || '').trim();
       throw httpError(
         sudoDenied(detail) ? 503 : 500,
-        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 300) || `Teardown ${LABELS[protocol] || protocol} gagal.`),
+        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 800) || `Teardown ${LABELS[protocol] || protocol} gagal.`),
       );
     }
   }
@@ -568,7 +594,13 @@ function createVpnService(overrides = {}) {
       server_active: false,
     };
     const hubLife = async (protocol) => ['active', 'activating', 'reloading'].includes(await unitState(protocol));
-    status.server_active = (await hubLife('server')) || (await hubLife('ovpn-server'));
+    let l2tpServerUp = false;
+    try {
+      l2tpServerUp = await l2tpServerRunning();
+    } catch {
+      l2tpServerUp = false;
+    }
+    status.server_active = (await hubLife('server')) || (await hubLife('ovpn-server')) || l2tpServerUp;
     if (!activeProtocol) {
       status.failed = vpnFailedProtocols(states);
       status.ping = emptyPing();
@@ -743,9 +775,10 @@ function createVpnService(overrides = {}) {
     }
     ensureTools(protocol, cfg);
     return exclusive(async () => {
-      // Client tidak boleh bersamaan dengan hub. Matikan WireGuard Server dan OpenVPN Server.
+      // Client tidak boleh bersamaan dengan hub. Matikan ketiga VPN Server.
       await cleanCycle('server', 'disable');
       await cleanCycle('ovpn-server', 'disable');
+      await cleanCycle('l2tp-server', 'disable');
       await ensureDevices(protocol);
       await applyConfig(protocol, cfg);
       await stopOthers(protocol);
@@ -1034,6 +1067,137 @@ function createVpnService(overrides = {}) {
     });
   }
 
+  async function applyL2tpServer(server, peers) {
+    if (isRoot) {
+      try {
+        vpnConfig.applyL2tpServerToDisk(server, peers);
+      } catch (error) {
+        if (error.status) {
+          throw error;
+        }
+        throw httpError(500, `Gagal menulis konfigurasi L2TP Server: ${String(error.message).slice(0, 240)}`);
+      }
+      return;
+    }
+    if (!existsSync(helperPath)) {
+      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
+    }
+    const result = await run('sudo', ['-n', helperPath, 'apply-l2tp-server'], {
+      input: JSON.stringify({ server, peers }),
+      timeout: 60000,
+    });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi L2TP Server: ${detail.slice(0, 240)}`);
+    }
+  }
+
+  function l2tpConfIsServerMode() {
+    return /^\[lns default\]\s*$/m.test(String(readText(vpnConfig.PATHS.l2tpdConf) || ''));
+  }
+
+  // Sumber kebenaran: proses xl2tpd benar-benar hidup. `systemctl is-active xl2tpd` tidak bisa
+  // dipercaya (unit SysV: bisa active tanpa daemon, atau inactive padahal daemon yatim hidup).
+  async function l2tpServerRunning() {
+    const probe = await run('pgrep', ['-x', 'xl2tpd'], { timeout: 5000 });
+    return Boolean(probe.ok) && l2tpConfIsServerMode();
+  }
+
+  async function getL2tpServerStatus() {
+    const life = await unitState('l2tp-server');
+    // Aktif hanya bila proses xl2tpd hidup DAN conf mode server ([lns default]).
+    // xl2tpd mode klien ([lac raniah-l2tp]) atau proses mati wajib tampil Mati.
+    const active = await l2tpServerRunning();
+    const status = {
+      state: active ? 'active' : 'inactive',
+      unit: life,
+      ip: null,
+      rx_bytes: 0,
+      tx_bytes: 0,
+      peers: [],
+    };
+    if (!active) {
+      return status;
+    }
+    const addr = await run('ip', ['-4', 'addr', 'show'], { timeout: 8000 });
+    const live = parseL2tpServerPeers(addr.ok ? addr.stdout : '');
+    status.ip = live.find((peer) => peer.local)?.local || null;
+    status.peers = live.map((peer) => {
+      const rx = readIfaceCounter(peer.iface, 'rx');
+      const tx = readIfaceCounter(peer.iface, 'tx');
+      status.rx_bytes += rx;
+      status.tx_bytes += tx;
+      return { iface: peer.iface, address: peer.address, rx_bytes: rx, tx_bytes: tx };
+    });
+    return status;
+  }
+
+  async function syncL2tpServer(server, peers) {
+    return exclusive(async () => {
+      await applyL2tpServer(server, peers);
+      if (await l2tpServerRunning()) {
+        await cleanCycle('l2tp-server', 'restart');
+      }
+      return getL2tpServerStatus();
+    });
+  }
+
+  async function controlL2tpServer(action, server, peers) {
+    if (!['enable', 'disable', 'restart'].includes(action)) {
+      throw httpError(400, 'Aksi server harus enable, disable, atau restart.');
+    }
+    return exclusive(async () => {
+      if (action !== 'disable') {
+        if (!server?.public_endpoint) {
+          throw httpError(400, 'Isi Endpoint Publik sebelum mengaktifkan L2TP Server.');
+        }
+        const tools = toolsInfo();
+        if (!tools.l2tp.installed) {
+          throw httpError(503, `Paket L2TP belum terpasang. Jalankan: ${tools.l2tp.hint}`);
+        }
+        await applyL2tpServer(server, peers);
+      }
+      if (action === 'disable') {
+        await stopL2tpServerClean();
+        const status = await getL2tpServerStatus();
+        if (status.state === 'active') {
+          throw httpError(500, 'L2TP Server masih aktif setelah perintah matikan.');
+        }
+        return status;
+      }
+      const cycleAction = action === 'enable' ? 'start' : action;
+      await cleanCycle('l2tp-server', cycleAction);
+      const status = await getL2tpServerStatus();
+      if (status.state !== 'active') {
+        // Jangan lapor sukses bila proses xl2tpd tidak terbukti hidup.
+        throw httpError(500, 'L2TP Server belum aktif: proses xl2tpd tidak terdeteksi setelah start. Cek: journalctl -u xl2tpd -n 30 --no-pager');
+      }
+      return status;
+    });
+  }
+
+  async function stopL2tpServerClean() {
+    if (isRoot) {
+      try {
+        await vpnConfig.stopL2tpServer({ exec: run, sleep, readText, writeText });
+      } catch (error) {
+        throw httpError(error.status || 500, error.message || 'Gagal mematikan L2TP Server.');
+      }
+      return;
+    }
+    if (!existsSync(helperPath)) {
+      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
+    }
+    const result = await run('sudo', ['-n', helperPath, 'stop-l2tp-server'], { timeout: 60000 });
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout || '').trim();
+      throw httpError(
+        sudoDenied(detail) ? 503 : 500,
+        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 300) || 'Gagal mematikan L2TP Server.'),
+      );
+    }
+  }
+
   async function readOvpnCa() {
     const pem = await readRootFile(vpnConfig.PATHS.ovpnServerCa);
     if (!pem.includes('BEGIN CERTIFICATE')) {
@@ -1045,6 +1209,7 @@ function createVpnService(overrides = {}) {
   return {
     getStatus, connect, disconnect, restart, applyConfig, applyServer, syncServer, controlServer, getServerStatus,
     applyOvpnServer, syncOvpnServer, controlOvpnServer, getOvpnServerStatus, readOvpnCa,
+    applyL2tpServer, syncL2tpServer, controlL2tpServer, getL2tpServerStatus,
     toolsInfo, measurePing, isRoot,
   };
 }
@@ -1746,6 +1911,220 @@ async function chrNasScript(pool, id) {
   };
 }
 
+async function ensureL2tpServerTables(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_l2tp_server (
+      id INT PRIMARY KEY,
+      public_endpoint VARCHAR(255) NOT NULL DEFAULT '',
+      listen_port INT NOT NULL DEFAULT 1701,
+      network VARCHAR(32) NOT NULL DEFAULT '10.222.0.0/24',
+      updated_by VARCHAR(50) DEFAULT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS vpn_l2tp_peers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(64) NOT NULL,
+      username VARCHAR(32) NOT NULL UNIQUE,
+      password TEXT NOT NULL,
+      address VARCHAR(32) NOT NULL UNIQUE,
+      enabled SMALLINT NOT NULL DEFAULT 1,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  );
+  await pool.query('ALTER TABLE vpn_l2tp_peers ADD COLUMN IF NOT EXISTS radius_secret VARCHAR(64) NULL');
+}
+
+function l2tpPeerRow(row) {
+  return {
+    id: Number(row.id),
+    name: row.name,
+    username: row.username,
+    password: row.password || '',
+    address: row.address,
+    radius_secret: row.radius_secret || '',
+    enabled: Number(row.enabled) !== 0,
+  };
+}
+
+async function loadL2tpServer(pool) {
+  await ensureL2tpServerTables(pool);
+  const [servers] = await pool.query('SELECT id, public_endpoint, listen_port, network FROM vpn_l2tp_server WHERE id = 1');
+  let server = servers[0];
+  if (!server) {
+    await pool.execute(
+      'INSERT INTO vpn_l2tp_server (id, public_endpoint, listen_port, network) VALUES (1, ?, ?, ?)',
+      ['', vpnConfig.L2TP_SERVER_DEFAULT_PORT, vpnConfig.L2TP_SERVER_DEFAULT_NETWORK],
+    );
+    server = {
+      public_endpoint: '',
+      listen_port: vpnConfig.L2TP_SERVER_DEFAULT_PORT,
+      network: vpnConfig.L2TP_SERVER_DEFAULT_NETWORK,
+    };
+  }
+  const [peerRows] = await pool.query(
+    'SELECT id, name, username, password, address, radius_secret, enabled FROM vpn_l2tp_peers ORDER BY id',
+  );
+  const peers = (peerRows || []).map(l2tpPeerRow);
+  const filled = await fillRadiusSecrets(pool, 'vpn_l2tp_peers', peers);
+  if (filled) {
+    for (const peer of peers) {
+      await radiusNas.syncVpnPeer(pool, { kind: 'l2tp', peer });
+    }
+  }
+  return {
+    server: {
+      public_endpoint: server.public_endpoint || '',
+      listen_port: Number(server.listen_port) || vpnConfig.L2TP_SERVER_DEFAULT_PORT,
+      network: server.network || vpnConfig.L2TP_SERVER_DEFAULT_NETWORK,
+    },
+    peers,
+  };
+}
+
+function presentL2tpServer(bundle, live) {
+  const byAddress = new Map((live?.peers || []).map((peer) => [peer.address, peer]));
+  const peers = bundle.peers.map((peer) => {
+    const livePeer = byAddress.get(peer.address);
+    const online = Boolean(peer.enabled && livePeer);
+    return {
+      id: peer.id,
+      name: peer.name,
+      username: peer.username,
+      address: peer.address,
+      enabled: peer.enabled,
+      password_set: Boolean(peer.password),
+      radius_secret: peer.radius_secret || '',
+      online,
+      rx_bytes: online ? livePeer.rx_bytes : 0,
+      tx_bytes: online ? livePeer.tx_bytes : 0,
+    };
+  });
+  let serverIp = '10.222.0.1';
+  try {
+    serverIp = vpnConfig.validateL2tpServer(bundle.server, { avoidCidrs: [] }).server_ip;
+  } catch {
+    serverIp = '10.222.0.1';
+  }
+  return {
+    server: {
+      public_endpoint: bundle.server.public_endpoint,
+      listen_port: bundle.server.listen_port,
+      network: bundle.server.network,
+      server_ip: serverIp,
+    },
+    peers,
+    online: peers.filter((peer) => peer.online).length,
+    total: peers.length,
+  };
+}
+
+function assertL2tpPeersFit(server, peers) {
+  const net = vpnConfig.parseCidr(server.network, { minPrefix: 16 });
+  for (const peer of peers) {
+    const ip = vpnConfig.parseIPv4(String(peer.address || '').split('/')[0]);
+    if (!net || ip === null || ip <= net.network + 1 || ip >= net.network + net.size - 1) {
+      const error = new Error('Subnet baru tidak menampung peer yang sudah ada.');
+      error.status = 400;
+      error.field = 'network';
+      throw error;
+    }
+  }
+}
+
+async function saveL2tpServerSettings(pool, input, username) {
+  const current = await loadL2tpServer(pool);
+  const wg = await loadServer(pool);
+  const ovpn = await loadOvpnServer(pool);
+  const server = vpnConfig.validateL2tpServer(
+    { ...current.server, ...input },
+    { avoidCidrs: [wg.server.address, ovpn.server.network, '10.210.0.0/24'] },
+  );
+  assertL2tpPeersFit(server, current.peers);
+  await pool.execute(
+    'UPDATE vpn_l2tp_server SET public_endpoint = ?, listen_port = ?, network = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1',
+    [server.public_endpoint, server.listen_port, server.network, username || null],
+  );
+  return loadL2tpServer(pool);
+}
+
+async function addL2tpPeer(pool, input) {
+  const current = await loadL2tpServer(pool);
+  const peer = vpnConfig.validateL2tpPeer(input, null);
+  if (current.peers.some((item) => item.username === peer.username)) {
+    const error = new Error('Username ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'username';
+    throw error;
+  }
+  const address = vpnConfig.allocateL2tpAddress(current.server.network, current.peers.map((item) => item.address));
+  const radiusSecret = vpnConfig.generateRadiusSecret();
+  const [header] = await pool.execute(
+    'INSERT INTO vpn_l2tp_peers (name, username, password, address, radius_secret, enabled) VALUES (?, ?, ?, ?, ?, ?)',
+    [peer.name, peer.username, peer.password, address, radiusSecret, peer.enabled ? 1 : 0],
+  );
+  const bundle = await loadL2tpServer(pool);
+  const created = bundle.peers.find((item) => item.id === Number(header.insertId));
+  if (created) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'l2tp', peer: created });
+  }
+  return { id: Number(header.insertId), bundle };
+}
+
+async function updateL2tpPeer(pool, id, input) {
+  const current = await loadL2tpServer(pool);
+  const existing = current.peers.find((item) => item.id === id);
+  if (!existing) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  const peer = vpnConfig.validateL2tpPeer({ ...existing, ...input, password: input.password }, existing);
+  if (current.peers.some((item) => item.id !== id && item.username === peer.username)) {
+    const error = new Error('Username ini sudah terdaftar.');
+    error.status = 400;
+    error.field = 'username';
+    throw error;
+  }
+  const radiusSecret = /^[A-Za-z0-9]{20,32}$/.test(existing.radius_secret || '')
+    ? existing.radius_secret
+    : vpnConfig.generateRadiusSecret();
+  await pool.execute(
+    'UPDATE vpn_l2tp_peers SET name = ?, username = ?, password = ?, radius_secret = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [peer.name, peer.username, peer.password, radiusSecret, peer.enabled ? 1 : 0, id],
+  );
+  const bundle = await loadL2tpServer(pool);
+  const saved = bundle.peers.find((item) => item.id === id);
+  if (saved) {
+    await radiusNas.syncVpnPeer(pool, { kind: 'l2tp', peer: saved });
+  }
+  return bundle;
+}
+
+async function deleteL2tpPeer(pool, id) {
+  const current = await loadL2tpServer(pool);
+  if (!current.peers.some((item) => item.id === id)) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  await pool.execute('DELETE FROM vpn_l2tp_peers WHERE id = ?', [id]);
+  await radiusNas.forgetVpnPeer(pool, { kind: 'l2tp', peerId: id });
+  return loadL2tpServer(pool);
+}
+
+function l2tpServerScript(bundle, id) {
+  const peer = bundle.peers.find((item) => item.id === id);
+  if (!peer) {
+    const error = new Error('Peer tidak ditemukan.');
+    error.status = 404;
+    throw error;
+  }
+  return vpnConfig.renderL2tpServerScript(bundle.server, peer);
+}
+
 function ovpnServerScript(bundle, id) {
   const peer = bundle.peers.find((item) => item.id === id);
   if (!peer) {
@@ -1766,6 +2145,7 @@ module.exports = {
   parseWgDump,
   parseWgServerDump,
   parseOvpnStatus,
+  parseL2tpServerPeers,
   hijacksDefaultRoute,
   hostOf,
   isSafePingTarget,
@@ -1796,6 +2176,14 @@ module.exports = {
   updateOvpnPeer,
   deleteOvpnPeer,
   ovpnServerScript,
+  ensureL2tpServerTables,
+  loadL2tpServer,
+  presentL2tpServer,
+  saveL2tpServerSettings,
+  addL2tpPeer,
+  updateL2tpPeer,
+  deleteL2tpPeer,
+  l2tpServerScript,
   listChrNas,
   addChrNas,
   updateChrNas,

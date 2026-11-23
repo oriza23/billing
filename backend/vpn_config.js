@@ -22,6 +22,7 @@ const UNITS = {
   l2tp: 'raniah-l2tp',
   server: 'wg-quick@wg-server',
   'ovpn-server': 'openvpn-server@raniah-server',
+  'l2tp-server': 'xl2tpd',
 };
 // Unit pendamping yang ikut dimatikan saat protokolnya dilepas (daemon-nya hanya dipakai protokol itu).
 const COMPANION_UNITS = {
@@ -34,6 +35,7 @@ const INTERFACES = {
   l2tp: 'raniah-l2tp',
   server: 'wg-server',
   'ovpn-server': 'tun-ovpn-srv',
+  'l2tp-server': 'xl2tp-server',
 };
 const PATHS = {
   wireguard: '/etc/wireguard/wg-billing.conf',
@@ -69,14 +71,19 @@ const PATHS = {
   ovpnServerStatus: '/run/openvpn-server/status-raniah.log',
   ovpnServerOverride: '/etc/systemd/system/openvpn-server@raniah-server.service.d/override.conf',
   ovpnServerUfw: '/etc/openvpn/server/raniah-server.ufw',
+  l2tpServerOptions: '/etc/ppp/options.xl2tpd',
+  l2tpServerChap: '/etc/ppp/chap-secrets',
+  l2tpServerUfw: '/etc/xl2tpd/raniah-l2tp-server.ufw',
 };
 const SERVER_DEFAULT_PORT = 51820;
 const SERVER_DEFAULT_ADDRESS = '10.220.0.1/24';
 const SERVER_MAX_PEERS = 200;
 const OVPN_SERVER_DEFAULT_PORT = 1194;
 const OVPN_SERVER_DEFAULT_NETWORK = '10.221.0.0/24';
-const CYCLE_PROTOCOLS = [...PROTOCOLS, 'server', 'ovpn-server'];
-const HUB_PROTOCOLS = ['server', 'ovpn-server'];
+const CYCLE_PROTOCOLS = [...PROTOCOLS, 'server', 'ovpn-server', 'l2tp-server'];
+const HUB_PROTOCOLS = ['server', 'ovpn-server', 'l2tp-server'];
+const L2TP_SERVER_DEFAULT_PORT = 1701;
+const L2TP_SERVER_DEFAULT_NETWORK = '10.222.0.0/24';
 // keepalive tidak boleh digandakan dengan ping / ping-exit / ping-restart (error OpenVPN).
 const OVPN_LIVENESS = ['keepalive', 'ping', 'ping-exit', 'ping-restart'];
 const OVPN_RESILIENCE_ALWAYS = ['resolv-retry infinite', 'persist-key', 'persist-tun'];
@@ -992,6 +999,205 @@ function renderL2tpOptions(cfg) {
     `lcp-echo-failure ${PPP_LCP_ECHO_FAILURE}`,
     '',
   ].join('\n');
+}
+
+function validateL2tpServer(input, { avoidCidrs = [SERVER_DEFAULT_ADDRESS, OVPN_SERVER_DEFAULT_NETWORK, '10.210.0.0/24'] } = {}) {
+  const source = input || {};
+  const endpointRaw = String(source.public_endpoint || '').trim();
+  let endpoint = '';
+  if (endpointRaw) {
+    if (endpointRaw.includes(':')) {
+      fail('Endpoint publik diisi tanpa port. Port ada di kolom tersendiri.', 'public_endpoint');
+    }
+    endpoint = parseHostPort(endpointRaw, {
+      portRequired: false, field: 'public_endpoint', label: 'Endpoint publik',
+    }).host;
+  }
+  const port = source.listen_port == null || source.listen_port === ''
+    ? L2TP_SERVER_DEFAULT_PORT
+    : Number(source.listen_port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail('Port UDP harus 1-65535.', 'listen_port');
+  }
+  const networkText = String(source.network || L2TP_SERVER_DEFAULT_NETWORK).trim();
+  const parsed = parseCidr(networkText, { minPrefix: 16 });
+  if (!parsed || parsed.ip !== parsed.network || parsed.prefix > 30) {
+    fail('Subnet harus alamat jaringan /16 sampai /30, misalnya 10.222.0.0/24.', 'network');
+  }
+  if (!isHost(formatIPv4(parsed.network + 1))) {
+    fail('Subnet tidak boleh memakai alamat loopback, 0.0.0.0, atau multicast.', 'network');
+  }
+  for (const other of avoidCidrs) {
+    if (other && cidrOverlaps(parsed.cidr, other)) {
+      fail('Subnet L2TP bentrok dengan subnet VPN lain.', 'network');
+    }
+  }
+  return {
+    public_endpoint: endpoint,
+    listen_port: port,
+    network: parsed.cidr,
+    server_ip: formatIPv4(parsed.network + 1),
+    range_start: formatIPv4(parsed.network + 2),
+    range_end: formatIPv4(parsed.network + parsed.size - 2),
+  };
+}
+
+function validateL2tpPeer(input, existing = null) {
+  const source = input || {};
+  const name = String(source.name || '').trim();
+  if (!PEER_NAME_RE.test(name)) {
+    fail('Nama router 1-40 karakter: huruf, angka, spasi, titik, garis, atau garis bawah.', 'name');
+  }
+  const username = String(source.username || '').trim();
+  if (!OVPN_USER_RE.test(username)) {
+    fail('Username 1-32 karakter: huruf, angka, titik, garis, atau garis bawah.', 'username');
+  }
+  let password = source.password == null ? '' : String(source.password);
+  if (!password && existing?.password) {
+    password = existing.password;
+  }
+  if (!password) {
+    password = generateOvpnPassword();
+  }
+  if (!OVPN_PASS_RE.test(password)) {
+    fail('Password 8-64 karakter huruf dan angka.', 'password');
+  }
+  const enabled = source.enabled == null
+    ? (existing ? existing.enabled !== false : true)
+    : source.enabled === true || source.enabled === 1 || source.enabled === '1';
+  return { name, username, password, enabled };
+}
+
+function allocateL2tpAddress(networkText, usedAddresses) {
+  return allocateOvpnAddress(networkText, usedAddresses);
+}
+
+function renderL2tpServerConf(server) {
+  const cfg = validateL2tpServer(server, { avoidCidrs: [] });
+  return [
+    '; Dibuat otomatis oleh RANIAH. L2TP server murni, tanpa IPsec.',
+    '[global]',
+    `port = ${cfg.listen_port}`,
+    `auth file = ${PATHS.l2tpServerChap}`,
+    `; raniah-subnet ${cfg.network}`,
+    '',
+    '[lns default]',
+    `ip range = ${cfg.range_start}-${cfg.range_end}`,
+    `local ip = ${cfg.server_ip}`,
+    'require chap = yes',
+    'refuse pap = yes',
+    'require authentication = yes',
+    `pppoptfile = ${PATHS.l2tpServerOptions}`,
+    'length bit = yes',
+    '',
+  ].join('\n');
+}
+
+function renderL2tpServerOptions() {
+  return [
+    '# Dibuat otomatis oleh RANIAH. Opsi PPP untuk L2TP server.',
+    'require-mschap-v2',
+    'mtu 1400',
+    'mru 1400',
+    'lcp-echo-interval 10',
+    'lcp-echo-failure 3',
+    'nodefaultroute',
+    'lock',
+    'nobsdcomp',
+    'novj',
+    'novjccomp',
+    '',
+  ].join('\n');
+}
+
+function renderL2tpChapSecrets(peers, existing = '') {
+  const enabled = (Array.isArray(peers) ? peers : []).filter((peer) => peer.enabled);
+  const ours = new Set(enabled.map((peer) => peer.username));
+  const kept = String(existing || '').split('\n').filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      return false;
+    }
+    const user = trimmed.split(/\s+/)[0];
+    return user && !ours.has(user);
+  });
+  const lines = ['# RANIAH L2TP server. Baris peer aktif ditulis ulang otomatis.'];
+  for (const peer of enabled) {
+    lines.push(`${peer.username} * ${peer.password} ${peer.address}`);
+  }
+  return [...lines, ...kept, ''].join('\n');
+}
+
+function renderL2tpServerScript(server, peer) {
+  const cfg = validateL2tpServer(server, { avoidCidrs: [] });
+  if (!cfg.public_endpoint) {
+    fail('Isi endpoint publik sebelum menyalin script.', 'public_endpoint');
+  }
+  validateL2tpPeer(peer, peer);
+  const lines = [
+    `/interface l2tp-client add name="l2tp-raniah" connect-to="${cfg.public_endpoint}" user="${peer.username}" password="${peer.password}" use-ipsec=no allow=mschap2 add-default-route=no disabled=no comment="Auto by Billing"`,
+    ...renderRadiusClientLines(cfg.server_ip, peer.address, peer),
+    ':do { /ip hotspot profile set [find] use-radius=yes } on-error={}',
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function l2tpServerFirewallSpec(confText) {
+  const portMatch = /^port = (\d+)$/m.exec(String(confText || ''));
+  const netMatch = /^; raniah-subnet (\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2})$/m.exec(String(confText || ''));
+  if (!portMatch || !netMatch) {
+    return null;
+  }
+  const port = Number(portMatch[1]);
+  const parsed = parseCidr(netMatch[1], { minPrefix: 16 });
+  if (!parsed || port < 1 || port > 65535) {
+    return null;
+  }
+  return { port, network: parsed.cidr };
+}
+
+function applyL2tpServerToDisk(server, peers, { root = '', exec = execFileSync } = {}) {
+  const cfg = validateL2tpServer(server, { avoidCidrs: [] });
+  const list = Array.isArray(peers) ? peers : [];
+  if (list.length > SERVER_MAX_PEERS) {
+    fail(`Maksimal ${SERVER_MAX_PEERS} peer L2TP.`, 'peers');
+  }
+  const users = new Set();
+  const addresses = new Set();
+  const network = parseCidr(cfg.network, { minPrefix: 16 });
+  const checked = list.map((peer) => {
+    const row = validateL2tpPeer(peer, peer);
+    if (users.has(row.username)) {
+      fail(`Username ${row.username} dobel.`, 'username');
+    }
+    users.add(row.username);
+    const ip = parseIPv4(String(peer.address || '').split('/')[0]);
+    if (ip === null || ip <= network.network + 1 || ip >= network.network + network.size - 1) {
+      fail(`Alamat ${peer.address || ''} di luar subnet L2TP Server.`, 'address');
+    }
+    if (addresses.has(ip)) {
+      fail(`Alamat ${peer.address} dobel.`, 'address');
+    }
+    addresses.add(ip);
+    return { ...row, address: formatIPv4(ip) };
+  });
+  const at = (target) => path.join(root, target);
+  const written = [];
+  const put = (target, content, mode, dirMode = 0o755) => {
+    writeAtomic(at(target), content, mode, dirMode);
+    written.push(target);
+  };
+  let existingChap = '';
+  try {
+    existingChap = fs.readFileSync(at(PATHS.l2tpServerChap), 'utf8');
+  } catch {
+    existingChap = '';
+  }
+  put(PATHS.l2tpdConf, renderL2tpServerConf(cfg), 0o644);
+  put(PATHS.l2tpServerOptions, renderL2tpServerOptions(), 0o644);
+  put(PATHS.l2tpServerChap, renderL2tpChapSecrets(checked, existingChap), 0o600);
+  reloadSystemd(exec, root);
+  return written;
 }
 
 function renderL2tpRoutes(cfg) {
@@ -1925,6 +2131,46 @@ async function syncOvpnServerFirewall(mode, deps, exec) {
   writeText(PATHS.ovpnServerUfw, `${portRule}\nfrom ${spec.network}\n`);
 }
 
+async function syncL2tpServerFirewall(mode, deps, exec) {
+  const readText = deps.readText || defaultReadText;
+  const writeText = deps.writeText || defaultWriteText;
+  const previous = String(readText(PATHS.l2tpServerUfw) || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const rule of previous) {
+    if (/^\d{1,5}\/udp$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', rule], { timeout: 20000 });
+    } else if (/^from \d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(rule)) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('ufw', ['--force', 'delete', 'allow', 'from', rule.slice(5)], { timeout: 20000 });
+    }
+  }
+  if (mode !== 'up') {
+    writeText(PATHS.l2tpServerUfw, '');
+    return;
+  }
+  const spec = l2tpServerFirewallSpec(readText(PATHS.l2tpdConf));
+  if (!spec) {
+    throw cycleError(500, 'xl2tpd.conf mode server belum ada. Simpan pengaturan L2TP Server dulu.');
+  }
+  const portRule = `${spec.port}/udp`;
+  const opened = await exec('ufw', ['allow', portRule, 'comment', 'L2TP VPN server'], { timeout: 20000 });
+  if (!opened.ok) {
+    const detail = (opened.stderr || opened.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal membuka ${portRule}${detail ? `: ${detail}` : ''}.`);
+  }
+  const subnet = await exec('ufw', ['allow', 'from', spec.network, 'comment', 'Subnet L2TP server'], { timeout: 20000 });
+  if (!subnet.ok) {
+    const detail = (subnet.stderr || subnet.stdout || '').trim().slice(0, 200);
+    throw cycleError(500, `ufw gagal mengizinkan subnet ${spec.network}${detail ? `: ${detail}` : ''}.`);
+  }
+  writeText(PATHS.l2tpServerUfw, `${portRule}\nfrom ${spec.network}\n`);
+}
+
+function l2tpConfIsServer(deps) {
+  const readText = deps.readText || defaultReadText;
+  return String(readText(PATHS.l2tpdConf) || '').includes('[lns default]');
+}
+
 function applyServerToDisk(server, peers, { root = '', exec = execFileSync } = {}) {
   const bundle = validateServerBundle({ server, peers });
   const at = (target) => path.join(root, target);
@@ -1953,12 +2199,165 @@ const TEARDOWN = {
   l2tp: { pkill: ['options.l2tpd.client'] },
   server: { pkill: [] },
   'ovpn-server': { pkill: ['/etc/openvpn/server/raniah-server.conf'] },
+  'l2tp-server': { pkill: ['options.xl2tpd'] },
 };
 
 function cycleError(status, message) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function l2tpUnitState(result) {
+  return String(result?.stdout || '').trim();
+}
+
+// xl2tpd di Debian adalah unit SysV. `systemctl disable --now` hanya memanggil
+// systemd-sysv-install dan TIDAK menjalankan ExecStop, lalu tetap keluar 0.
+// Tanpa `systemctl stop` + pkill, daemon tetap hidup dan UI terus membaca Aktif.
+async function stopL2tpServer(deps = {}) {
+  const exec = deps.exec || defaultCycleExec;
+  const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const unit = UNITS['l2tp-server'];
+  const notes = [];
+  const runQuiet = async (file, args, timeout = 20000) => {
+    const result = await exec(file, args, { timeout });
+    if (!result.ok) {
+      const detail = String(result.stderr || result.stdout || '').trim();
+      if (detail && file !== 'pkill') {
+        notes.push(`${file} ${args.join(' ')}: ${detail.slice(0, 180)}`);
+      }
+    }
+    return result;
+  };
+  await runQuiet('systemctl', ['disable', '--now', unit]);
+  await runQuiet('systemctl', ['stop', unit]);
+  await runQuiet('systemctl', ['reset-failed', unit], 8000);
+  await runQuiet('pkill', ['-x', 'xl2tpd'], 8000);
+  await runQuiet('pkill', ['-f', 'options.xl2tpd'], 8000);
+  await runQuiet('systemctl', ['stop', unit]);
+  await runQuiet('systemctl', ['reset-failed', unit], 8000);
+  await syncL2tpServerFirewall('down', deps, exec);
+  let state = '';
+  for (let i = 0; i < IFACE_GONE_POLLS; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const probe = await exec('systemctl', ['is-active', unit], { timeout: 8000 });
+    state = l2tpUnitState(probe);
+    // Proses nyata yang jadi patokan: proses yatim di luar systemd tetap harus mati.
+    // eslint-disable-next-line no-await-in-loop
+    const alive = await exec('pgrep', ['-x', 'xl2tpd'], { timeout: 5000 });
+    if ((state === 'inactive' || state === 'unknown' || state === 'dead') && !alive.ok) {
+      return { ok: true, state };
+    }
+    if (i === 4 || i === 10) {
+      // eslint-disable-next-line no-await-in-loop
+      await runQuiet('pkill', ['-x', 'xl2tpd'], 8000);
+      // eslint-disable-next-line no-await-in-loop
+      await runQuiet('systemctl', ['stop', unit]);
+    }
+    if (i < IFACE_GONE_POLLS - 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(IFACE_GONE_INTERVAL_MS);
+    }
+  }
+  const extra = notes.slice(0, 2).join(' | ');
+  throw cycleError(500, `xl2tpd masih ${state || 'active'} setelah stop L2TP Server.${extra ? ` ${extra}` : ''}`);
+}
+
+const L2TP_RUN_DIRS = ['/run/xl2tpd', '/var/run/xl2tpd'];
+const L2TP_START_POLLS = 24;
+const L2TP_START_INTERVAL_MS = 250;
+
+async function l2tpProcessAlive(exec) {
+  const probe = await exec('pgrep', ['-x', 'xl2tpd'], { timeout: 5000 });
+  return Boolean(probe.ok);
+}
+
+// xl2tpd listening pada UDP `port`. Dicek lewat `ss -ulpn` (root melihat nama proses).
+async function l2tpPortListening(exec, port) {
+  const probe = await exec('ss', ['-ulpn'], { timeout: 8000 });
+  if (!probe.ok) return false;
+  const portPattern = new RegExp(`[:\\]]${port}\\s`);
+  return String(probe.stdout || '').split('\n').some((line) => portPattern.test(line) && line.includes('xl2tpd'));
+}
+
+// Ringkas log mentah jadi satu baris yang muat di popup frontend.
+function compactLog(text, maxLines = 6, maxChars = 420) {
+  const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines.slice(-maxLines).join(' | ').slice(-maxChars);
+}
+
+async function collectL2tpFailureLog(exec) {
+  const parts = [];
+  const journal = await exec('journalctl', ['-u', 'xl2tpd', '-n', '12', '--no-pager', '-o', 'cat'], { timeout: 8000 });
+  const journalText = compactLog(journal.stdout || journal.stderr);
+  if (journalText) parts.push(`journalctl: ${journalText}`);
+  // Uji foreground singkat: xl2tpd -D mencetak alasan gagal (conf salah, fifo tidak bisa dibuat, dll).
+  // Dihentikan lewat timeout bila ternyata bisa jalan, lalu dibersihkan pkill.
+  const trial = await exec('/usr/sbin/xl2tpd', ['-D', '-c', PATHS.l2tpdConf], { timeout: 2500 });
+  const trialText = compactLog(`${trial.stdout || ''}\n${trial.stderr || ''}`);
+  if (trialText) parts.push(`xl2tpd -D: ${trialText}`);
+  await exec('pkill', ['-x', 'xl2tpd'], { timeout: 8000 });
+  return parts.join(' || ');
+}
+
+// Start L2TP Server dengan bukti nyata. Unit xl2tpd adalah SysV: `systemctl enable --now` tidak
+// menjalankan daemon, dan `systemctl start` keluar 0 walau /usr/sbin/xl2tpd langsung mati
+// (mis. /run/xl2tpd tidak ada). Sukses hanya bila proses hidup DAN UDP port listening.
+async function startL2tpServer(deps = {}) {
+  const exec = deps.exec || defaultCycleExec;
+  const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const readText = deps.readText || defaultReadText;
+  const unit = UNITS['l2tp-server'];
+  const spec = l2tpServerFirewallSpec(readText(PATHS.l2tpdConf));
+  if (!spec) {
+    throw cycleError(500, 'xl2tpd.conf mode server belum ada. Simpan pengaturan L2TP Server dulu.');
+  }
+
+  await exec('mkdir', ['-p', ...L2TP_RUN_DIRS], { timeout: 5000 });
+  // Bersihkan instance lama termasuk proses yatim (mis. `xl2tpd -D` manual di luar systemd).
+  await exec('systemctl', ['stop', unit], { timeout: 20000 });
+  await exec('pkill', ['-x', 'xl2tpd'], { timeout: 8000 });
+  await exec('pkill', ['-f', 'options.xl2tpd'], { timeout: 8000 });
+  for (let i = 0; i < IFACE_GONE_POLLS; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await l2tpProcessAlive(exec))) break;
+    if (i === 8) {
+      // eslint-disable-next-line no-await-in-loop
+      await exec('pkill', ['-9', '-x', 'xl2tpd'], { timeout: 8000 });
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(IFACE_GONE_INTERVAL_MS);
+  }
+  await exec('systemctl', ['reset-failed', unit], { timeout: 8000 });
+  await exec('mkdir', ['-p', ...L2TP_RUN_DIRS], { timeout: 5000 });
+  await exec('systemctl', ['enable', unit], { timeout: 20000 });
+  const started = await exec('systemctl', ['restart', unit], { timeout: 25000 });
+
+  let alive = false;
+  let listening = false;
+  for (let i = 0; i < L2TP_START_POLLS; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    alive = await l2tpProcessAlive(exec);
+    // eslint-disable-next-line no-await-in-loop
+    listening = alive && (await l2tpPortListening(exec, spec.port));
+    if (alive && listening) break;
+    if (i < L2TP_START_POLLS - 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(L2TP_START_INTERVAL_MS);
+    }
+  }
+  if (!alive || !listening) {
+    const reason = !alive ? 'proses xl2tpd tidak berjalan' : `xl2tpd tidak listening di UDP ${spec.port}`;
+    const unitDetail = started.ok ? '' : String(started.stderr || started.stdout || '').trim().slice(0, 160);
+    const log = await collectL2tpFailureLog(exec);
+    throw cycleError(
+      500,
+      `L2TP Server gagal start: ${reason}.${unitDetail ? ` systemctl: ${unitDetail}.` : ''}${log ? ` ${log}` : ''}`,
+    );
+  }
+  await syncL2tpServerFirewall('up', deps, exec);
+  return { ok: true, port: spec.port };
 }
 
 function defaultCycleExec(file, args, { timeout = 20000 } = {}) {
@@ -1988,6 +2387,10 @@ async function cycleVpn(protocol, action, deps = {}) {
   if (!CYCLE_ACTIONS.includes(action)) {
     throw cycleError(400, 'Aksi VPN tidak dikenal.');
   }
+  if (protocol === 'l2tp-server' && (action === 'stop' || action === 'disable')) {
+    await stopL2tpServer(deps);
+    return { ok: true, protocol, action };
+  }
   const exec = deps.exec || defaultCycleExec;
   const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   // Kedua hub (WireGuard dan OpenVPN) boleh hidup bersamaan. Keduanya mematikan VPN Client.
@@ -1996,6 +2399,10 @@ async function cycleVpn(protocol, action, deps = {}) {
       // eslint-disable-next-line no-await-in-loop
       await cycleVpn(client, 'disable', deps);
     }
+  }
+  if (protocol === 'l2tp-server' && (action === 'start' || action === 'restart')) {
+    await startL2tpServer({ ...deps, exec, sleep });
+    return { ok: true, protocol, action };
   }
   const unit = UNITS[protocol];
   const iface = INTERFACES[protocol];
@@ -2007,6 +2414,10 @@ async function cycleVpn(protocol, action, deps = {}) {
     await exec('systemctl', [...verb, unit], { timeout: 20000 });
     await exec('systemctl', ['reset-failed', unit], { timeout: 8000 });
     for (const companion of companions) {
+      // xl2tpd milik L2TP Server tidak boleh ikut mati saat client L2TP di-disable.
+      if (protocol === 'l2tp' && companion === 'xl2tpd' && l2tpConfIsServer(deps)) {
+        continue;
+      }
       // eslint-disable-next-line no-await-in-loop
       await exec('systemctl', [...verb, companion], { timeout: 20000 });
       // eslint-disable-next-line no-await-in-loop
@@ -2134,6 +2545,8 @@ module.exports = {
   SERVER_DEFAULT_ADDRESS,
   OVPN_SERVER_DEFAULT_PORT,
   OVPN_SERVER_DEFAULT_NETWORK,
+  L2TP_SERVER_DEFAULT_PORT,
+  L2TP_SERVER_DEFAULT_NETWORK,
   HUB_PROTOCOLS,
   cycleVpn,
   validateServer,
@@ -2155,6 +2568,16 @@ module.exports = {
   renderOvpnAuthScript,
   renderOvpnMikrotikScript,
   applyOvpnServerToDisk,
+  validateL2tpServer,
+  validateL2tpPeer,
+  allocateL2tpAddress,
+  renderL2tpServerConf,
+  renderL2tpServerOptions,
+  renderL2tpChapSecrets,
+  renderL2tpServerScript,
+  applyL2tpServerToDisk,
+  stopL2tpServer,
+  startL2tpServer,
   generatePresharedKey,
   MIN_ROUTE_PREFIX,
   WG_KEY_RE,

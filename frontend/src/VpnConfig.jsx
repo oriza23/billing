@@ -557,7 +557,7 @@ function VpnConfig() {
     if (status?.server_active) {
       const confirmServer = await Swal.fire({
         title: 'Matikan VPN Server?',
-        text: 'WireGuard Server atau OpenVPN Server sedang aktif. Menghubungkan VPN Client akan mematikan keduanya supaya tidak bentrok.',
+        text: 'WireGuard Server, OpenVPN Server, atau L2TP Server sedang aktif. Menghubungkan VPN Client akan mematikan ketiganya supaya tidak bentrok.',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Ya, matikan server',

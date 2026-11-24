@@ -417,7 +417,11 @@ run_root test -f "$RADIUS_SCHEMA" || die "Skema RADIUS tidak ada: $RADIUS_SCHEMA
 
 info "=== Impor skema SQL RADIUS ke ${DB_NAME} ==="
 # schema.sql milik freerad (mode 640): user postgres tidak bisa membukanya. Dibaca root, dialirkan lewat stdin.
-run_root cat "$RADIUS_SCHEMA" | run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f -
+# CREATE TABLE di skema sudah IF NOT EXISTS, tetapi CREATE INDEX tidak; tanpa ini run kedua gagal
+# dengan "relation ... already exists". sed menambahkan IF NOT EXISTS ke CREATE [UNIQUE] INDEX
+# (bila belum ada) sehingga impor aman diulang.
+run_root sed -E 's/CREATE (UNIQUE )?INDEX (IF NOT EXISTS )?/CREATE \1INDEX IF NOT EXISTS /gI' "$RADIUS_SCHEMA" \
+  | run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f -
 
 run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
 GRANT ALL ON SCHEMA public TO "${DB_USER_SQL}";
@@ -425,6 +429,21 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${DB_USER_SQL}";
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${DB_USER_SQL}";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${DB_USER_SQL}";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${DB_USER_SQL}";
+SQL
+
+# Tabel dari skema FreeRADIUS diimpor sebagai superuser postgres, sehingga dimiliki postgres.
+# server.js melakukan ALTER TABLE (hanya pemilik yang boleh) -> pindahkan kepemilikan ke DB_USER.
+run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
+DO \$\$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I OWNER TO %I', r.tablename, '${DB_USER_SQL}');
+  END LOOP;
+  FOR r IN SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public' LOOP
+    EXECUTE format('ALTER SEQUENCE public.%I OWNER TO %I', r.sequence_name, '${DB_USER_SQL}');
+  END LOOP;
+END\$\$;
 SQL
 
 SQL_MOD="${RADDB}/mods-available/sql"

@@ -138,7 +138,7 @@ async function ensureHotspotVouchersTable() {
 
 async function ensureRoutersTable() {
   await pool.query(
-    "CREATE TABLE IF NOT EXISTS routers (id INT AUTO_INCREMENT PRIMARY KEY, nama_router VARCHAR(100), ip_address VARCHAR(50), secret VARCHAR(100), deskripsi TEXT, status VARCHAR(20) DEFAULT 'Aktif', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE TABLE IF NOT EXISTS routers (id INT AUTO_INCREMENT PRIMARY KEY, nama_router VARCHAR(100), ip_address VARCHAR(50), secret VARCHAR(100), deskripsi TEXT, status VARCHAR(20) DEFAULT 'Aktif', api_user VARCHAR(64) NULL, api_password VARCHAR(128) NULL, api_port INT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
   );
 }
 
@@ -162,17 +162,20 @@ async function ensureDataWilayahTable() {
 
 async function start() {
   await pool.ensureCompat();
+  // Tabel inti WAJIB dibuat paling awal: banyak migrasi di bawah ini melakukan
+  // ALTER / UPDATE / SELECT ke routers dan langganan_pelanggan (FK -> langganan_profiles).
+  // Pada database PostgreSQL kosong, urutan ini mencegah error "relation ... does not exist".
+  await ensureRoutersTable();
+  await langgananProfilRouter.ensureTable();
+  await langgananDataRouter.ensureTable();
   await ensureAdminTable();
   await ensurePppoeIsolirSchema(pool);
   await ensureHotspotProfilesTable();
   await ensureHotspotVouchersTable();
-  await ensureRoutersTable();
   await ensureNasTable(pool);
   await syncAfterRouterChange(pool);
   await ensureOutletsTable();
   await outletsRouter.ensureTglGabungColumn();
-  await langgananProfilRouter.ensureTable();
-  await langgananDataRouter.ensureTable();
   await ensureRouterServers();
   await ensureProtocolSeparation(pool);
   const routerLocks = await syncRouterLocks(pool);

@@ -282,6 +282,21 @@ async function ensureTable() {
       kode_unik VARCHAR(50),
       note TEXT,
       status ENUM('Aktif', 'Non Aktif', 'Isolir') DEFAULT 'Aktif',
+      id_pelanggan VARCHAR(20) NULL,
+      phone VARCHAR(20) NULL,
+      koordinat VARCHAR(60) NULL,
+      tgl_invoice_perdana DATE NULL,
+      jatuh_tempo DATE NULL,
+      harga_prorata DECIMAL(15,2) NOT NULL DEFAULT 0,
+      komisi_reseller DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ppn TINYINT(1) NOT NULL DEFAULT 0,
+      kirim_wa TINYINT(1) NOT NULL DEFAULT 0,
+      sub_total DECIMAL(15,2) NOT NULL DEFAULT 0,
+      ppn_nominal DECIMAL(15,2) NOT NULL DEFAULT 0,
+      total DECIMAL(15,2) NOT NULL DEFAULT 0,
+      profil_id_sebelum_isolir INT NULL,
+      tgl_isolir_dijalankan DATETIME NULL,
+      isolir_sumber ENUM('manual','cron','jatuh_tempo','tgl_isolir') NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT fk_langganan_pelanggan_profil
         FOREIGN KEY (profil_id) REFERENCES langganan_profiles(id)
@@ -292,7 +307,8 @@ async function ensureTable() {
   await pool.query(
     'ALTER TABLE langganan_pelanggan ADD INDEX IF NOT EXISTS idx_langganan_username (username)',
   );
-  // Kolom tambahan untuk halaman "Tambah Langganan PPPoE".
+  // Kolom-kolom ini sudah ada di CREATE di atas (instalasi baru). ALTER ... IF NOT EXISTS
+  // di sini hanya untuk upgrade database lama yang dibuat sebelum kolomnya ditambahkan.
   await pool.query(
     `ALTER TABLE langganan_pelanggan
       ADD COLUMN IF NOT EXISTS id_pelanggan VARCHAR(20) NULL,

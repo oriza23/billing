@@ -1545,14 +1545,14 @@ test('install.sh: sysctl tuning VPN ditulis ke /etc/sysctl.d/99-raniah-vpn.conf 
   }
   assert.match(installer, /sysctl --system/);
   // Kegagalan satu parameter (LXC read-only) hanya memicu fallback, tidak menghentikan installer (set -e).
-  assert.match(installer, /if ! \$SUDO sysctl --system/);
+  assert.match(installer, /if ! run_root sysctl --system/);
   assert.match(installer, /sysctl -w "\$\{SYSCTL_KEY\}=\$\{SYSCTL_VAL\}"[^\n]*\|\| SYSCTL_DENIED/);
 });
 
 test('install.sh: UFW hanya port yang dibutuhkan, tanpa port inbound VPN, SSH tidak pernah diputus', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
   const block = installer
-    .slice(installer.indexOf('info "=== UFW ==="'), installer.indexOf('$SUDO ufw reload'))
+    .slice(installer.indexOf('info "=== UFW ==="'), installer.indexOf('run_root ufw reload'))
     .split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
   assert.ok(block.length > 200, 'blok UFW ditemukan');
   const allowed = [...block.matchAll(/ufw allow\s+("?[^\s"]+"?)/g)].map((m) => m[1].replace(/"/g, ''));
@@ -1565,7 +1565,7 @@ test('install.sh: UFW hanya port yang dibutuhkan, tanpa port inbound VPN, SSH ti
   assert.match(block, /ufw default allow outgoing/);
   // SSH harus diizinkan sebelum ufw enable, dan reload dijalankan setelahnya.
   assert.ok(block.indexOf('ufw allow OpenSSH') > -1 && block.indexOf('ufw allow OpenSSH') < block.indexOf('ufw --force enable'));
-  assert.ok(block.indexOf('ufw --force enable') < installer.indexOf('$SUDO ufw reload'));
+  assert.ok(block.indexOf('ufw --force enable') < installer.indexOf('run_root ufw reload'));
   // Subnet VPN wajib divalidasi prefix >= /16 sebelum dipakai.
   assert.match(installer, /VPN_SUBNET="\$\{VPN_SUBNET-10\.210\.0\.0\/24\}"/);
   assert.match(block, />= 16 && 10#\$\{BASH_REMATCH\[6\]\} <= 32/);

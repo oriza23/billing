@@ -407,6 +407,99 @@ ok "PostgreSQL: role ${DB_USER} dan database ${DB_NAME} siap (password terverifi
 # =============================================================================
 # 4. FreeRADIUS + PostgreSQL
 # =============================================================================
+# Hapus client ganda dari clients.conf bila read_clients = yes (FreeRADIUS juga memuat client dari
+# tabel nas). Entri clients.conf dihapus bila ipaddr/ipv4addr/ipv6addr-nya atau nama client-nya sama
+# dengan entri tabel nas, termasuk "client localhost" bila nas berisi 127.0.0.1. Tabel nas = sumber kebenaran.
+dedupe_clients_conf() {
+  if ! run_root grep -qE '^[[:space:]]*read_clients[[:space:]]*=[[:space:]]*yes' "$SQL_MOD"; then
+    info "read_clients tidak aktif di mods-available/sql: pengecekan duplikat client dilewati."
+    return 0
+  fi
+  local nas_list dedup_tmp
+  nas_list=$(mktemp)
+  dedup_tmp=$(mktemp)
+  # Gagal baca tabel nas (mis. belum ada) tidak fatal: daftar kosong berarti tidak ada yang dihapus.
+  run_postgres psql -d "$DB_NAME" -At -F $'\t' \
+    -c "SELECT nasname, COALESCE(shortname, '') FROM nas WHERE nasname IS NOT NULL" >"$nas_list" 2>/dev/null || true
+
+  run_root cat "$CLIENTS_CONF" | awk -v nasfile="$nas_list" '
+    BEGIN {
+      while ((getline line < nasfile) > 0) {
+        n = split(line, f, "\t")
+        if (f[1] != "") nas_ip[f[1]] = 1
+        if (n > 1 && f[2] != "") nas_name[f[2]] = 1
+      }
+      close(nasfile)
+    }
+    {
+      code = $0
+      sub(/#.*/, "", code)
+      if (!in_blk && code ~ /^[ \t]*client[ \t]+[^ \t{]+[ \t]*\{/) {
+        in_blk = 1; depth = 0; buf = ""; drop = 0
+        name = code
+        sub(/^[ \t]*client[ \t]+/, "", name)
+        sub(/[ \t]*\{.*$/, "", name)
+        if (name in nas_name) drop = 1
+      }
+      if (in_blk) {
+        buf = buf $0 "\n"
+        if (code ~ /^[ \t]*ip(v4|v6)?addr[ \t]*=/) {
+          v = code
+          sub(/^[^=]*=[ \t]*/, "", v)
+          sub(/[ \t]+$/, "", v)
+          gsub(/"/, "", v)
+          if (v in nas_ip) drop = 1
+        }
+        tmp = code
+        opens = gsub(/\{/, "{", tmp)
+        closes = gsub(/\}/, "}", tmp)
+        depth += opens - closes
+        if (depth <= 0) {
+          in_blk = 0
+          if (drop) print "Client ganda dihapus dari clients.conf: " name > "/dev/stderr"
+          else printf "%s", buf
+        }
+      } else {
+        print
+      }
+    }
+  ' >"$dedup_tmp"
+
+  if [[ ! -s "$dedup_tmp" ]]; then
+    rm -f "$nas_list" "$dedup_tmp"
+    die "Pemeriksaan client ganda gagal: hasil clients.conf kosong. clients.conf tidak diubah."
+  fi
+  if ! run_root cat "$CLIENTS_CONF" | cmp -s - "$dedup_tmp"; then
+    run_root install -o root -g freerad -m 640 "$dedup_tmp" "$CLIENTS_CONF"
+    ok "clients.conf diperbarui: client ganda terhadap tabel nas dihapus."
+  else
+    info "clients.conf: tidak ada client ganda terhadap tabel nas."
+  fi
+  rm -f "$nas_list" "$dedup_tmp"
+}
+
+# Validasi konfigurasi FreeRADIUS sebelum service dijalankan. Dua pemeriksaan:
+#   1. freeradius -XC sebagai root (sesuai permintaan).
+#   2. freeradius -Cx sebagai user freerad, persis seperti ExecStartPre di unit systemd.
+#      Config yang hanya terbaca root lolos tahap 1 tetapi membuat service gagal start.
+validate_freeradius_config() {
+  local log_root="/tmp/freeradius-install-${STAMP}.log"
+  local log_freerad="/tmp/freeradius-install-freerad-${STAMP}.log"
+  info "=== Validasi konfigurasi FreeRADIUS (freeradius -XC) ==="
+  if ! (cd / && run_root freeradius -XC) >"$log_root" 2>&1; then
+    warn "freeradius -XC GAGAL. 50 baris terakhir output:"
+    tail -n 50 "$log_root" >&2
+    die "Perbaiki konfigurasi FreeRADIUS di atas. Log lengkap: $log_root"
+  fi
+  # Tanpa -g: flag -g menghapus grup tambahan, sedangkan systemd (User=freerad) tetap memakainya.
+  if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout) >"$log_freerad" 2>&1; then
+    warn "freeradius -Cx sebagai user freerad GAGAL (sama seperti ExecStartPre). 50 baris terakhir:"
+    tail -n 50 "$log_freerad" >&2
+    die "Cek izin baca file config untuk user freerad. Log lengkap: $log_freerad"
+  fi
+  ok "freeradius -XC dan -Cx (user freerad) lulus."
+}
+
 info "=== FreeRADIUS + freeradius-postgresql ==="
 apt_get install -y freeradius freeradius-postgresql
 if dpkg -s freeradius-mysql >/dev/null 2>&1; then
@@ -496,8 +589,23 @@ if run_root grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
   info "Blok catch-all lama (${CLIENTS_MARKER}) dihapus dari clients.conf."
 fi
 
-if ! run_root freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then
-  die "freeradius -XC gagal — lihat /tmp/freeradius-install-${STAMP}.log"
+dedupe_clients_conf
+
+# Daemon freerad (User=freerad di unit systemd) harus bisa membaca kedua file ini.
+# Berisi password DB (mods-available/sql) dan secret NAS (clients.conf), jadi bukan world-readable.
+run_root chown root:freerad "$SQL_MOD" "$CLIENTS_CONF"
+run_root chmod 640 "$SQL_MOD" "$CLIENTS_CONF"
+
+# Modul eap (TLS) membaca /etc/ssl/private/ssl-cert-snakeoil.key (root:ssl-cert 640). Tanpa keanggotaan
+# grup ssl-cert, freerad gagal inisialisasi eap dan service tidak bisa start (terlihat di freeradius -Cx).
+if getent group ssl-cert >/dev/null; then
+  case " $(id -nG freerad) " in
+    *" ssl-cert "*) ;;
+    *)
+      run_root usermod -aG ssl-cert freerad
+      info "User freerad ditambahkan ke grup ssl-cert (akses baca sertifikat TLS snakeoil)."
+      ;;
+  esac
 fi
 
 # =============================================================================
@@ -653,8 +761,13 @@ fi
 run_root ufw --force enable || true
 run_root ufw reload || true
 
+validate_freeradius_config
 run_root systemctl enable freeradius
-run_root systemctl restart freeradius
+if ! run_root systemctl restart freeradius; then
+  warn "freeradius gagal dijalankan. 40 baris terakhir journalctl:"
+  run_root journalctl -u freeradius -n 40 --no-pager >&2 || true
+  die "Gagal mengaktifkan FreeRADIUS."
+fi
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
 # Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)

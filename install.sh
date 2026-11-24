@@ -143,6 +143,64 @@ freeradius_escape() {
   printf '%s' "$value"
 }
 
+# Nilai .env yang aman untuk karakter khusus (# spasi $ dan sejenisnya).
+dotenv_quote() {
+  local v=$1
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  printf '"%s"' "$v"
+}
+
+generate_db_password() {
+  # 32 karakter hex (128 bit), memenuhi syarat minimal 20 karakter.
+  openssl rand -hex 16
+}
+
+assert_db_password_ready() {
+  [[ -n "${DB_PASSWORD:-}" ]] || die "DB_PASSWORD kosong. Ulangi input password database atau biarkan kosong agar dibuat otomatis."
+  [[ "$DB_PASSWORD" != *$'\n'* ]] || die "DB_PASSWORD tidak boleh mengandung baris baru."
+  (( ${#DB_PASSWORD} >= 8 )) || die "Password database minimal 8 karakter."
+}
+
+# URL postgres:// untuk alat eksternal (psql, backup). User, password, dan nama DB di-encode.
+build_database_url() {
+  DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" DB_NAME="$DB_NAME" DB_PORT="5432" python3 - <<'PY'
+import os, urllib.parse
+user = urllib.parse.quote(os.environ["DB_USER"], safe="")
+password = urllib.parse.quote(os.environ["DB_PASSWORD"], safe="")
+name = urllib.parse.quote(os.environ["DB_NAME"], safe="")
+port = os.environ.get("DB_PORT", "5432")
+host = os.environ.get("DB_HOST", "localhost")
+print(f"postgresql://{user}:{password}@{host}:{port}/{name}")
+PY
+}
+
+# Wajib sebelum node server.js / migrasi: file .env ada dan DB_PASSWORD tidak kosong (bukan string kosong di Node).
+validate_dotenv_db() {
+  local env_file="$APP_DIR/.env"
+  [[ -f "$env_file" ]] || die "File .env tidak ada di ${APP_DIR}. Tahap penulisan .env gagal atau dilewati."
+  local line val
+  line=$(grep -E '^DB_PASSWORD=' "$env_file" | tail -1) || true
+  [[ -n "$line" ]] || die "Baris DB_PASSWORD tidak ditemukan di .env."
+  val="${line#DB_PASSWORD=}"
+  val="${val%\"}"
+  val="${val#\"}"
+  val="${val%\'}"
+  val="${val#\'}"
+  [[ -n "$val" ]] || die "DB_PASSWORD di .env kosong. Periksa tahap PostgreSQL (role/password) dan penulisan .env."
+  ( cd "$APP_DIR" && node -e "
+const path=require('path');
+require('./backend/load_env')(path.join(process.cwd(),'.env'));
+const p=process.env.DB_PASSWORD;
+if(typeof p!=='string'||p.length===0){process.exit(2);}
+" ) || die "Node tidak bisa membaca DB_PASSWORD dari .env (harus string tidak kosong). Periksa isi ${env_file}."
+}
+
+test_db_login() {
+  PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'SELECT 1 AS ok;' \
+    || die "Login PostgreSQL gagal untuk ${DB_USER}@${DB_NAME}. Password role tidak cocok dengan DB_PASSWORD."
+}
+
 if [[ ! -f "$APP_DIR/server.js" || ! -f "$APP_DIR/frontend/package.json" ]]; then
   die "Jalankan script di folder clone billing (ada server.js dan frontend/package.json)."
 fi
@@ -162,12 +220,13 @@ DB_NAME=${DB_NAME:-orizabil}
 read -r -p "Username DB (DB_USER) [oriza]: " DB_USER
 DB_USER=${DB_USER:-oriza}
 
-read -r -s -p "Password DB (DB_PASS) [Enter = otomatis]: " DB_PASS
+read -r -s -p "Password DB (DB_PASSWORD) [Enter = otomatis]: " DB_PASSWORD
 echo
-if [[ -z "$DB_PASS" ]]; then
-  DB_PASS=$(openssl rand -hex 16)
-  info "Password DB dibuat otomatis."
+if [[ -z "$DB_PASSWORD" ]]; then
+  DB_PASSWORD=$(generate_db_password)
+  ok "Password DB dibuat otomatis (${#DB_PASSWORD} karakter)."
 fi
+assert_db_password_ready
 
 echo
 read -r -p "Username Superadmin Web (WEB_ADMIN) [admin]: " WEB_ADMIN
@@ -196,7 +255,6 @@ fi
 if [[ ! "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
   die "DB_USER tidak valid."
 fi
-[[ "$DB_PASS" != *$'\n'* ]] || die "DB_PASS tidak boleh mengandung baris baru."
 [[ "$WEB_ADMIN" =~ ^[A-Za-z0-9._-]{1,50}$ ]] || die "WEB_ADMIN tidak valid."
 [[ ${#WEB_PASS} -ge 8 ]] || die "WEB_PASS minimal 8 karakter."
 
@@ -219,7 +277,6 @@ read -r -p "Lanjut instalasi? [y/N]: " CONFIRM
 CONFIRM=${CONFIRM:-N}
 [[ "$CONFIRM" =~ ^[yY] ]] || die "Instalasi dibatalkan."
 
-DB_PASSWORD="$DB_PASS"
 SUPERADMIN_USER="$WEB_ADMIN"
 SUPERADMIN_PASS="$WEB_PASS"
 SUPERADMIN_NAMA="$WEB_ADMIN_NAMA"
@@ -324,7 +381,7 @@ info "=== PostgreSQL: role, database, hak akses ==="
 run_root systemctl enable --now postgresql
 
 DB_USER_SQL=$(sql_escape_pg "$DB_USER")
-DB_PASSWORD_SQL=$(sql_escape_pg "$DB_PASS")
+DB_PASSWORD_SQL=$(sql_escape_pg "$DB_PASSWORD")
 DB_NAME_SQL=$(sql_escape_pg "$DB_NAME")
 
 run_postgres psql -v ON_ERROR_STOP=1 <<SQL
@@ -344,8 +401,8 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME_SQL}')\gexe
 GRANT ALL PRIVILEGES ON DATABASE "${DB_NAME_SQL}" TO "${DB_USER_SQL}";
 SQL
 
-PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'SELECT 1;' \
-  || die "Koneksi PostgreSQL gagal untuk ${DB_USER}."
+test_db_login
+ok "PostgreSQL: role ${DB_USER} dan database ${DB_NAME} siap (password terverifikasi)."
 
 # =============================================================================
 # 4. FreeRADIUS + PostgreSQL
@@ -380,7 +437,7 @@ run_root sed -i \
   -e 's/^[[:space:]]*driver[[:space:]]*=.*/\tdriver = "rlm_sql_postgresql"/' \
   "$SQL_MOD"
 
-RAD_ESC_PASS=$(freeradius_escape "$DB_PASS")
+RAD_ESC_PASS=$(freeradius_escape "$DB_PASSWORD")
 run_root sed -i \
   -e 's/^[[:space:]]*server[[:space:]]*=.*/\tserver = "localhost"/' \
   -e 's/^[[:space:]]*port[[:space:]]*=.*/\tport = 5432/' \
@@ -435,21 +492,24 @@ if [[ "$USE_PM2" == "1" ]] && ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 JWT_SECRET=$(openssl rand -hex 48)
+DATABASE_URL=$(build_database_url)
 
 info "=== .env (backend / server.js) ==="
+assert_db_password_ready
 umask 077
 {
   echo "PORT=${APP_PORT}"
   echo "DB_HOST=localhost"
   echo "DB_PORT=5432"
   echo "DB_USER=${DB_USER}"
-  echo "DB_PASSWORD=${DB_PASS}"
+  echo "DB_PASSWORD=$(dotenv_quote "$DB_PASSWORD")"
   echo "DB_NAME=${DB_NAME}"
   echo "DB_SERVICE=postgresql"
+  echo "DATABASE_URL=$(dotenv_quote "$DATABASE_URL")"
   echo "JWT_SECRET=${JWT_SECRET}"
   echo "JWT_EXPIRES_IN=12h"
   echo "BOOTSTRAP_ADMIN_USERNAME=${WEB_ADMIN}"
-  echo "BOOTSTRAP_ADMIN_PASSWORD=${WEB_PASS}"
+  echo "BOOTSTRAP_ADMIN_PASSWORD=$(dotenv_quote "$WEB_PASS")"
   echo "SETUP_ADMIN_NAMA_LENGKAP=${WEB_ADMIN_NAMA}"
   if [[ "$USE_NGINX" == "1" ]]; then
     echo "TRUST_PROXY=1"
@@ -457,15 +517,19 @@ umask 077
 } > "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
 echo "VITE_API_URL=" > "$APP_DIR/frontend/.env.production"
+validate_dotenv_db
+test_db_login
 
 info "=== npm install backend (akar proyek) ==="
 cd "$APP_DIR"
 npm install
 
 info "=== Migrasi tabel billing (server.js) ==="
+validate_dotenv_db
 BILLING_SCHEMA_ONLY=1 node server.js
 
 info "=== Seeder superadmin (WEB_ADMIN) ==="
+validate_dotenv_db
 node "$APP_DIR/scripts/setup-admin.js"
 
 info "=== npm install & build frontend ==="

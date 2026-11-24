@@ -45,12 +45,15 @@ CYAN='\033[1;36m'
 RED='\033[1;31m'
 NC='\033[0m'
 
+# Dua mode: root langsung, atau user biasa (mis. ubuntu) yang punya akses sudo.
+RUN_USER=$(id -un)
+RUN_GROUP=$(id -gn)
 if [[ "$(id -u)" -eq 0 ]]; then
-  SUDO=""
+  IS_ROOT=1
   APP_USER="${SUDO_USER:-root}"
 else
-  SUDO="sudo"
-  APP_USER="$USER"
+  IS_ROOT=0
+  APP_USER="$RUN_USER"
 fi
 APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6)
 
@@ -59,48 +62,72 @@ info() { echo -e "${YELLOW}$*${NC}"; }
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${RED}$*${NC}"; }
 
-# apt-get non-interaktif. `sudo` membuang environment, jadi variabelnya dikirim eksplisit lewat env.
-apt_get() {
-  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
-    apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
-}
+# Non-root: pastikan sudo ada dan minta password SEKARANG, bukan gagal di tengah instalasi.
+# Timestamp sudo diperbarui di latar belakang karena apt upgrade bisa lebih lama dari 15 menit.
+if [[ "$IS_ROOT" -eq 0 ]]; then
+  command -v sudo >/dev/null 2>&1 \
+    || die "Perintah sudo tidak ditemukan. Jalankan sebagai root, atau pasang sudo dan beri user ${RUN_USER} akses sudo."
+  info "Menjalankan sebagai ${RUN_USER} (bukan root): meminta autentikasi sudo..."
+  sudo -v || die "Autentikasi sudo gagal. User ${RUN_USER} harus punya akses sudo."
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null || exit 0; sleep 50; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+fi
 
-# Jalankan perintah sebagai user postgres. Root memakai runuser (util-linux, selalu ada);
-# bukan root memakai sudo -u. `$SUDO -u ...` salah karena $SUDO kosong saat root.
-# cd / agar psql tidak mengeluh tidak bisa masuk ke direktori kerja milik user lain.
-as_postgres() {
-  if [[ "$(id -u)" -eq 0 ]]; then
-    (cd / && runuser -u postgres -- "$@")
+# Jalankan perintah sebagai root: langsung bila sudah root, lewat sudo bila bukan.
+# Dipakai untuk semua perintah sistem (apt-get, systemctl, ufw, menulis ke /etc, chown, visudo, ...).
+run_root() {
+  if [[ "$IS_ROOT" -eq 1 ]]; then
+    "$@"
   else
-    (cd / && sudo -u postgres "$@")
+    sudo "$@"
   fi
 }
 
-# Node.js >= 20 dan npm wajib ada sebelum tahap npm install / npm run build.
-node_ok() {
-  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || return 1
+# apt-get non-interaktif. sudo membuang environment, jadi variabelnya dikirim eksplisit lewat env.
+apt_get() {
+  run_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
+    apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
+# Perintah PostgreSQL (psql, createuser, createdb, ...) selalu sebagai user postgres.
+# cd / agar tidak ada peringatan "could not change directory" dari folder milik user lain.
+run_postgres() {
+  (cd / && run_root runuser -u postgres -- "$@")
+}
+
+# Node.js minimal v22 (LTS) dan npm wajib ada sebelum tahap npm install / npm run build.
+NODE_MIN_MAJOR=22
+
+node_major() {
   local major
-  major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 1
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 20 ))
+  command -v node >/dev/null 2>&1 || { echo 0; return; }
+  major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || major=0
+  [[ "$major" =~ ^[0-9]+$ ]] || major=0
+  echo "$major"
+}
+
+node_ok() {
+  command -v npm >/dev/null 2>&1 && (( $(node_major) >= NODE_MIN_MAJOR ))
 }
 
 ensure_node() {
   if node_ok; then
-    ok "Node.js $(node -v) dan npm $(npm -v) sudah terpasang."
+    ok "Node.js $(node -v) dan npm $(npm -v) sudah memenuhi syarat (minimal v${NODE_MIN_MAJOR})."
     return 0
   fi
-  info "Node.js/npm belum ada atau di bawah v20: memasang Node.js 22 LTS (NodeSource)."
-  if curl -fsSL https://deb.nodesource.com/setup_22.x | ${SUDO:+$SUDO -E} bash -; then
-    apt_get install -y nodejs
-  else
-    warn "Repo NodeSource gagal disiapkan. Mencoba paket apt: nodejs npm."
-    apt_get install -y nodejs npm
+  local current="belum terpasang"
+  if command -v node >/dev/null 2>&1; then
+    current="$(node -v)"
   fi
+  info "Node.js ${current}: butuh minimal v${NODE_MIN_MAJOR}. Memasang Node.js ${NODE_MIN_MAJOR}.x LTS dari NodeSource..."
+  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" \
+    | run_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash - \
+    || die "Gagal menyiapkan repositori NodeSource. Periksa koneksi internet VPS lalu jalankan ulang install.sh."
+  apt_get install -y nodejs
   hash -r
-  if ! node_ok; then
-    die "Node.js >= 20 dan npm tidak berhasil dipasang. Pasang manual lalu jalankan ulang install.sh."
-  fi
-  node -v && npm -v
+  node_ok || die "Node.js >= v${NODE_MIN_MAJOR} dan npm tidak berhasil dipasang. Pasang manual lalu jalankan ulang install.sh."
+  ok "Terpasang: Node.js $(node -v), npm $(npm -v)"
 }
 
 sql_escape_pg() {
@@ -220,8 +247,8 @@ apt_get install -y wireguard-tools openvpn sstp-client xl2tpd ppp \
   || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client xl2tpd ppp"
 # Unit bawaan Ubuntu membatasi openvpn-server@ ke 10 proses. auth-user-pass-verify
 # lalu gagal fork (errno 11). Drop-in ini melepas batas itu sebelum service dihidupkan.
-$SUDO install -d -m 0755 /etc/systemd/system/openvpn-server@raniah-server.service.d
-$SUDO tee /etc/systemd/system/openvpn-server@raniah-server.service.d/override.conf >/dev/null <<'EOF'
+run_root install -d -m 0755 /etc/systemd/system/openvpn-server@raniah-server.service.d
+run_root tee /etc/systemd/system/openvpn-server@raniah-server.service.d/override.conf >/dev/null <<'EOF'
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -231,7 +258,7 @@ ExecStartPre=/bin/mkdir -p /run/openvpn-server
 LimitNPROC=infinity
 TasksMax=infinity
 EOF
-$SUDO systemctl daemon-reload || true
+run_root systemctl daemon-reload || true
 # strongSwan (swanctl) hanya dipakai L2TP/IPsec saat IPsec Pre-Shared Key diisi. Terpisah dari
 # xl2tpd supaya L2TP murni tetap berjalan walau paket ini tidak tersedia.
 info "=== Paket IPsec opsional untuk L2TP/IPsec: strongswan-swanctl, charon-systemd ==="
@@ -244,7 +271,7 @@ apt_get install -y strongswan-swanctl charon-systemd \
 if ! systemctl is-active --quiet raniah-l2tp 2>/dev/null; then
   for L2TP_SVC in xl2tpd strongswan strongswan-starter strongswan-swanctl; do
     if systemctl cat "${L2TP_SVC}.service" >/dev/null 2>&1; then
-      $SUDO systemctl disable --now "${L2TP_SVC}.service" >/dev/null 2>&1 || true
+      run_root systemctl disable --now "${L2TP_SVC}.service" >/dev/null 2>&1 || true
     fi
   done
 fi
@@ -265,16 +292,16 @@ net.ipv4.udp_wmem_min=16384
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.conf.all.rp_filter=2
 EOF
-$SUDO install -m 0644 "$SYSCTL_VPN_TMP" "$SYSCTL_VPN_FILE"
+run_root install -m 0644 "$SYSCTL_VPN_TMP" "$SYSCTL_VPN_FILE"
 rm -f "$SYSCTL_VPN_TMP"
 # Di LXC/kontainer sebagian parameter read-only (hanya host yang boleh mengubahnya). Itu tidak
 # boleh menggagalkan instalasi: coba sysctl --system, bila ada yang gagal terapkan per parameter
 # dan laporkan mana yang ditolak.
-if ! $SUDO sysctl --system >/dev/null 2>&1; then
+if ! run_root sysctl --system >/dev/null 2>&1; then
   SYSCTL_DENIED=()
   while IFS='=' read -r SYSCTL_KEY SYSCTL_VAL; do
     [[ "$SYSCTL_KEY" =~ ^net\.[a-z0-9_.]+$ ]] || continue
-    $SUDO sysctl -w "${SYSCTL_KEY}=${SYSCTL_VAL}" >/dev/null 2>&1 || SYSCTL_DENIED+=("$SYSCTL_KEY")
+    run_root sysctl -w "${SYSCTL_KEY}=${SYSCTL_VAL}" >/dev/null 2>&1 || SYSCTL_DENIED+=("$SYSCTL_KEY")
   done < "$SYSCTL_VPN_FILE"
   if (( ${#SYSCTL_DENIED[@]} > 0 )); then
     warn "Parameter sysctl ditolak (read-only di kontainer/host): ${SYSCTL_DENIED[*]}. Berkas tetap tersimpan; set di host Proxmox bila perlu."
@@ -294,13 +321,13 @@ fi
 # 3. PostgreSQL
 # =============================================================================
 info "=== PostgreSQL: role, database, hak akses ==="
-$SUDO systemctl enable --now postgresql
+run_root systemctl enable --now postgresql
 
 DB_USER_SQL=$(sql_escape_pg "$DB_USER")
 DB_PASSWORD_SQL=$(sql_escape_pg "$DB_PASS")
 DB_NAME_SQL=$(sql_escape_pg "$DB_NAME")
 
-as_postgres psql -v ON_ERROR_STOP=1 <<SQL
+run_postgres psql -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DB_USER_SQL}') THEN
@@ -329,12 +356,13 @@ if dpkg -s freeradius-mysql >/dev/null 2>&1; then
   apt_get purge -y freeradius-mysql || true
 fi
 
-[[ -f "$RADIUS_SCHEMA" ]] || die "Skema RADIUS tidak ada: $RADIUS_SCHEMA"
+run_root test -f "$RADIUS_SCHEMA" || die "Skema RADIUS tidak ada: $RADIUS_SCHEMA"
 
 info "=== Impor skema SQL RADIUS ke ${DB_NAME} ==="
-as_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$RADIUS_SCHEMA"
+# schema.sql milik freerad (mode 640): user postgres tidak bisa membukanya. Dibaca root, dialirkan lewat stdin.
+run_root cat "$RADIUS_SCHEMA" | run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f -
 
-as_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
+run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
 GRANT ALL ON SCHEMA public TO "${DB_USER_SQL}";
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${DB_USER_SQL}";
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${DB_USER_SQL}";
@@ -344,16 +372,16 @@ SQL
 
 SQL_MOD="${RADDB}/mods-available/sql"
 STAMP=$(date +%Y%m%d-%H%M%S)
-$SUDO cp -a "$SQL_MOD" "${SQL_MOD}.bak.${STAMP}"
+run_root cp -a "$SQL_MOD" "${SQL_MOD}.bak.${STAMP}"
 
 info "=== mods-enabled/sql → PostgreSQL ==="
-$SUDO sed -i \
+run_root sed -i \
   -e 's/^[[:space:]]*dialect[[:space:]]*=.*/\tdialect = "postgresql"/' \
   -e 's/^[[:space:]]*driver[[:space:]]*=.*/\tdriver = "rlm_sql_postgresql"/' \
   "$SQL_MOD"
 
 RAD_ESC_PASS=$(freeradius_escape "$DB_PASS")
-$SUDO sed -i \
+run_root sed -i \
   -e 's/^[[:space:]]*server[[:space:]]*=.*/\tserver = "localhost"/' \
   -e 's/^[[:space:]]*port[[:space:]]*=.*/\tport = 5432/' \
   -e "s/^[[:space:]]*login[[:space:]]*=.*/\tlogin = \"${DB_USER}\"/" \
@@ -361,12 +389,12 @@ $SUDO sed -i \
   -e "s/^[[:space:]]*radius_db[[:space:]]*=.*/\tradius_db = \"${DB_NAME}\"/" \
   "$SQL_MOD"
 
-$SUDO ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
+run_root ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
 
 HOTSPOT_MOD="$APP_DIR/deploy/freeradius/mods-available/hotspot_time"
 if [[ -f "$HOTSPOT_MOD" ]]; then
-  $SUDO install -o freerad -g freerad -m 640 "$HOTSPOT_MOD" "${RADDB}/mods-available/hotspot_time"
-  $SUDO ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
+  run_root install -o freerad -g freerad -m 640 "$HOTSPOT_MOD" "${RADDB}/mods-available/hotspot_time"
+  run_root ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
 fi
 
 info "=== clients.conf (MikroTik / NAS) ==="
@@ -374,12 +402,12 @@ info "=== clients.conf (MikroTik / NAS) ==="
 # lalu disinkronkan otomatis ke tabel nas (lihat docs/MULTI_NAS.md). Hapus sisa blok
 # install lama bila ada, supaya NAS yang tidak terdaftar ditolak.
 CLIENTS_CONF="${RADDB}/clients.conf"
-if $SUDO grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
-  $SUDO sed -i "/# --- ${CLIENTS_MARKER} ---/,/# --- ${CLIENTS_MARKER}-END ---/d" "$CLIENTS_CONF"
+if run_root grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
+  run_root sed -i "/# --- ${CLIENTS_MARKER} ---/,/# --- ${CLIENTS_MARKER}-END ---/d" "$CLIENTS_CONF"
   info "Blok catch-all lama (${CLIENTS_MARKER}) dihapus dari clients.conf."
 fi
 
-if ! $SUDO freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then
+if ! run_root freeradius -XC >"/tmp/freeradius-install-${STAMP}.log" 2>&1; then
   die "freeradius -XC gagal — lihat /tmp/freeradius-install-${STAMP}.log"
 fi
 
@@ -389,13 +417,21 @@ fi
 info "=== Verifikasi Node.js & npm ==="
 ensure_node
 # Upgrade npm bersifat opsional: npm bawaan Node 22 sudah cukup untuk build.
-$SUDO npm install -g 'npm@^12' || warn "Upgrade npm ke ^12 dilewati; memakai npm $(npm -v)."
+run_root npm install -g 'npm@^12' || warn "Upgrade npm ke ^12 dilewati; memakai npm $(npm -v)."
 hash -r
 node -v && npm -v
 
+# npm install / build berjalan sebagai user ini, jadi folder proyek harus miliknya. Bila tidak
+# (mis. sisa instalasi sebelumnya milik billing atau root), node_modules, frontend/dist dan .env
+# gagal ditulis. Di akhir instalasi kepemilikan dikembalikan ke user service.
+if [[ "$IS_ROOT" -eq 0 ]]; then
+  info "=== Kepemilikan folder aplikasi → ${RUN_USER}:${RUN_GROUP} (untuk npm install & build) ==="
+  run_root chown -R "${RUN_USER}:${RUN_GROUP}" "$APP_DIR"
+fi
+
 if [[ "$USE_PM2" == "1" ]] && ! command -v pm2 >/dev/null 2>&1; then
   info "=== PM2 global ==="
-  $SUDO npm install -g pm2
+  run_root npm install -g pm2
 fi
 
 JWT_SECRET=$(openssl rand -hex 48)
@@ -445,7 +481,7 @@ if [[ "$USE_PM2" == "1" ]]; then
   pm2 delete billing 2>/dev/null || true
   pm2 start "$APP_DIR/server.js" --name billing --cwd "$APP_DIR"
   pm2 save
-  $SUDO env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
+  run_root env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
   pm2 save
 else
   info "PM2 dilewati. Jalankan backend dengan: cd \"$APP_DIR\" && npm start"
@@ -453,7 +489,7 @@ fi
 
 if [[ "$USE_NGINX" == "1" ]]; then
   info "=== Nginx reverse proxy → 127.0.0.1:${APP_PORT} ==="
-  NGINX_CONF=$($SUDO mktemp)
+  NGINX_CONF=$(mktemp)
   cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
@@ -474,13 +510,13 @@ server {
     }
 }
 EOF
-  $SUDO cp "$NGINX_CONF" "/etc/nginx/sites-available/${NGINX_SITE_NAME}"
+  run_root install -m 0644 "$NGINX_CONF" "/etc/nginx/sites-available/${NGINX_SITE_NAME}"
   rm -f "$NGINX_CONF"
-  $SUDO ln -sf "/etc/nginx/sites-available/${NGINX_SITE_NAME}" "/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
-  $SUDO rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-  $SUDO nginx -t
-  $SUDO systemctl enable --now nginx
-  $SUDO systemctl reload nginx
+  run_root ln -sf "/etc/nginx/sites-available/${NGINX_SITE_NAME}" "/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
+  run_root rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+  run_root nginx -t
+  run_root systemctl enable --now nginx
+  run_root systemctl reload nginx
 fi
 
 # =============================================================================
@@ -490,39 +526,39 @@ info "=== UFW ==="
 # Hanya port yang dibutuhkan billing, FreeRADIUS, dan GenieACS. Server ini adalah VPN CLIENT,
 # jadi tidak ada port inbound VPN (1194, 1701, 500/4500, 51820, 9921, dst. tidak dibuka).
 # Aturan yang sudah ada tidak dihapus oleh installer; hapus sisa uji coba dengan: ufw delete allow <port>/<proto>.
-$SUDO ufw default deny incoming
-$SUDO ufw default allow outgoing
+run_root ufw default deny incoming
+run_root ufw default allow outgoing
 # SSH dibuka lebih dulu, sebelum ufw enable, supaya sesi tidak terputus.
-$SUDO ufw allow OpenSSH
-$SUDO ufw allow "${APP_PORT}/tcp" comment 'Billing web' 2>/dev/null || true
+run_root ufw allow OpenSSH
+run_root ufw allow "${APP_PORT}/tcp" comment 'Billing web' 2>/dev/null || true
 if [[ "$USE_NGINX" == "1" ]]; then
-  $SUDO ufw allow 80/tcp comment 'Web HTTP (Nginx/reverse proxy)' 2>/dev/null || true
-  $SUDO ufw allow 443/tcp comment 'Web HTTPS (Nginx/reverse proxy)' 2>/dev/null || true
+  run_root ufw allow 80/tcp comment 'Web HTTP (Nginx/reverse proxy)' 2>/dev/null || true
+  run_root ufw allow 443/tcp comment 'Web HTTPS (Nginx/reverse proxy)' 2>/dev/null || true
 fi
-$SUDO ufw allow 1812/udp comment 'FreeRADIUS auth' 2>/dev/null || true
-$SUDO ufw allow 1813/udp comment 'FreeRADIUS acct' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP (TR-069)' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS File Server' 2>/dev/null || true
-$SUDO ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI' 2>/dev/null || true
+run_root ufw allow 1812/udp comment 'FreeRADIUS auth' 2>/dev/null || true
+run_root ufw allow 1813/udp comment 'FreeRADIUS acct' 2>/dev/null || true
+run_root ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP (TR-069)' 2>/dev/null || true
+run_root ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS File Server' 2>/dev/null || true
+run_root ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI' 2>/dev/null || true
 if [[ "${GENIEACS_OPEN_NBI}" == "1" ]]; then
   warn "Port NBI GenieACS ${GENIEACS_NBI_PORT} dibuka ke publik tanpa auth bawaan."
-  $SUDO ufw allow "${GENIEACS_NBI_PORT}/tcp" comment 'GenieACS NBI'
+  run_root ufw allow "${GENIEACS_NBI_PORT}/tcp" comment 'GenieACS NBI'
 fi
 if [[ -n "$VPN_SUBNET" ]]; then
   # Validasi ketat: /0../15 akan membuka semua port ke sebagian besar internet.
   if [[ "$VPN_SUBNET" =~ ^(([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3}))/([0-9]{1,2})$ ]] \
     && (( 10#${BASH_REMATCH[2]} <= 255 && 10#${BASH_REMATCH[3]} <= 255 && 10#${BASH_REMATCH[4]} <= 255 && 10#${BASH_REMATCH[5]} <= 255 )) \
     && (( 10#${BASH_REMATCH[6]} >= 16 && 10#${BASH_REMATCH[6]} <= 32 )); then
-    $SUDO ufw allow from "$VPN_SUBNET" comment 'Subnet VPN (client ke CHR)' 2>/dev/null || true
+    run_root ufw allow from "$VPN_SUBNET" comment 'Subnet VPN (client ke CHR)' 2>/dev/null || true
   else
     warn "VPN_SUBNET='${VPN_SUBNET}' tidak valid (wajib CIDR IPv4 prefix /16../32); aturan UFW subnet VPN dilewati."
   fi
 fi
-$SUDO ufw --force enable || true
-$SUDO ufw reload || true
+run_root ufw --force enable || true
+run_root ufw reload || true
 
-$SUDO systemctl enable freeradius
-$SUDO systemctl restart freeradius
+run_root systemctl enable freeradius
+run_root systemctl restart freeradius
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
 # Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)
@@ -533,7 +569,7 @@ elif [[ ! "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
   warn "User ${APP_USER} tidak dipakai untuk sudoers restart."
 else
   info "=== Helper VPN (root-owned) ==="
-  $SUDO bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
+  run_root bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
 
   info "=== sudoers layanan & VPN untuk ${APP_USER} ==="
   VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp raniah-l2tp)
@@ -600,18 +636,37 @@ else
 # Penulisan konfigurasi VPN hanya lewat helper root-owned yang memvalidasi ulang inputnya.
 ${APP_USER} ALL=(root) NOPASSWD: ${SUDO_LIST}
 EOF
-  $SUDO visudo -cf "$SUDOERS_TMP"
-  $SUDO install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/raniah-services
-  $SUDO chmod 0440 /etc/sudoers.d/raniah-services
-  if ! $SUDO visudo -cf /etc/sudoers.d/raniah-services; then
-    $SUDO rm -f /etc/sudoers.d/raniah-services
+  run_root visudo -cf "$SUDOERS_TMP"
+  run_root install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/raniah-services
+  run_root chmod 0440 /etc/sudoers.d/raniah-services
+  if ! run_root visudo -cf /etc/sudoers.d/raniah-services; then
+    run_root rm -f /etc/sudoers.d/raniah-services
     rm -f "$SUDOERS_TMP"
     die "sudoers /etc/sudoers.d/raniah-services tidak valid, berkas dibatalkan."
   fi
-  $SUDO rm -f /etc/sudoers.d/raniah-restart
+  run_root rm -f /etc/sudoers.d/raniah-restart
   rm -f "$SUDOERS_TMP"
 fi
-[[ "$USE_NGINX" == "1" ]] && $SUDO systemctl reload nginx
+if [[ "$USE_NGINX" == "1" ]]; then
+  run_root systemctl reload nginx
+fi
+
+# =============================================================================
+# 8. Kepemilikan akhir & restart billing.service
+# =============================================================================
+# Service systemd berjalan sebagai user billing (deploy/install-service.sh). Build tadi dibuat oleh
+# user yang menjalankan installer, jadi kepemilikan dikembalikan ke billing:billing sebelum restart.
+# Mode PM2 berjalan sebagai ${APP_USER}, jadi kepemilikannya tidak diubah.
+if run_root systemctl cat billing.service >/dev/null 2>&1; then
+  if [[ "$USE_PM2" != "1" ]] && getent passwd billing >/dev/null 2>&1; then
+    info "=== Kepemilikan folder aplikasi → billing:billing ==="
+    run_root chown -R billing:billing "$APP_DIR"
+  fi
+  info "=== Restart billing.service ==="
+  run_root systemctl restart billing.service || warn "billing.service gagal direstart. Cek: journalctl -u billing -n 30 --no-pager"
+else
+  info "billing.service belum terpasang; folder aplikasi tetap milik ${RUN_USER}. Untuk service systemd: sudo deploy/install-service.sh"
+fi
 
 SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
 [[ -n "${SERVER_IP}" ]] || SERVER_IP="127.0.0.1"

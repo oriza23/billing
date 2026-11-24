@@ -14,6 +14,11 @@
 # =============================================================================
 set -euo pipefail
 
+# APT non-interaktif: tanpa dialog debconf, tanpa prompt needrestart / "Pending kernel upgrade".
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_PORT="${APP_PORT:-5000}"
 USE_NGINX="${USE_NGINX:-0}"
@@ -53,6 +58,50 @@ die() { echo -e "${RED}$*${NC}" >&2; exit 1; }
 info() { echo -e "${YELLOW}$*${NC}"; }
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${RED}$*${NC}"; }
+
+# apt-get non-interaktif. `sudo` membuang environment, jadi variabelnya dikirim eksplisit lewat env.
+apt_get() {
+  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
+    apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
+# Jalankan perintah sebagai user postgres. Root memakai runuser (util-linux, selalu ada);
+# bukan root memakai sudo -u. `$SUDO -u ...` salah karena $SUDO kosong saat root.
+# cd / agar psql tidak mengeluh tidak bisa masuk ke direktori kerja milik user lain.
+as_postgres() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    (cd / && runuser -u postgres -- "$@")
+  else
+    (cd / && sudo -u postgres "$@")
+  fi
+}
+
+# Node.js >= 20 dan npm wajib ada sebelum tahap npm install / npm run build.
+node_ok() {
+  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || return 1
+  local major
+  major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 1
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 20 ))
+}
+
+ensure_node() {
+  if node_ok; then
+    ok "Node.js $(node -v) dan npm $(npm -v) sudah terpasang."
+    return 0
+  fi
+  info "Node.js/npm belum ada atau di bawah v20: memasang Node.js 22 LTS (NodeSource)."
+  if curl -fsSL https://deb.nodesource.com/setup_22.x | ${SUDO:+$SUDO -E} bash -; then
+    apt_get install -y nodejs
+  else
+    warn "Repo NodeSource gagal disiapkan. Mencoba paket apt: nodejs npm."
+    apt_get install -y nodejs npm
+  fi
+  hash -r
+  if ! node_ok; then
+    die "Node.js >= 20 dan npm tidak berhasil dipasang. Pasang manual lalu jalankan ulang install.sh."
+  fi
+  node -v && npm -v
+}
 
 sql_escape_pg() {
   local value=$1
@@ -152,20 +201,22 @@ SUPERADMIN_NAMA="$WEB_ADMIN_NAMA"
 # 2. OS & dependensi
 # =============================================================================
 info "=== apt update & upgrade ==="
-export DEBIAN_FRONTEND=noninteractive
-$SUDO apt-get update
-$SUDO apt-get upgrade -y
+apt_get update
+apt_get upgrade -y
 
 info "=== Paket dasar: curl, wget, git, PostgreSQL ==="
-$SUDO apt-get install -y \
+apt_get install -y \
   ca-certificates curl wget git openssl ufw \
   postgresql postgresql-contrib \
   build-essential
 
+info "=== Node.js & npm (wajib sebelum build) ==="
+ensure_node
+
 # Paket VPN client untuk menu Sistem > Koneksi VPN (WireGuard / OpenVPN / SSTP / L2TP ke MikroTik CHR).
 # Dipasang terpisah: bila satu paket tidak tersedia di repo, instalasi billing tetap lanjut.
 info "=== Paket VPN client: wireguard-tools, openvpn, sstp-client, xl2tpd, ppp ==="
-$SUDO apt-get install -y wireguard-tools openvpn sstp-client xl2tpd ppp \
+apt_get install -y wireguard-tools openvpn sstp-client xl2tpd ppp \
   || warn "Sebagian paket VPN gagal dipasang. Menu Koneksi VPN tetap tampil; pasang manual: apt install wireguard-tools openvpn sstp-client xl2tpd ppp"
 # Unit bawaan Ubuntu membatasi openvpn-server@ ke 10 proses. auth-user-pass-verify
 # lalu gagal fork (errno 11). Drop-in ini melepas batas itu sebelum service dihidupkan.
@@ -184,7 +235,7 @@ $SUDO systemctl daemon-reload || true
 # strongSwan (swanctl) hanya dipakai L2TP/IPsec saat IPsec Pre-Shared Key diisi. Terpisah dari
 # xl2tpd supaya L2TP murni tetap berjalan walau paket ini tidak tersedia.
 info "=== Paket IPsec opsional untuk L2TP/IPsec: strongswan-swanctl, charon-systemd ==="
-$SUDO apt-get install -y strongswan-swanctl charon-systemd \
+apt_get install -y strongswan-swanctl charon-systemd \
   || warn "Paket strongSwan gagal dipasang. L2TP murni tetap bisa dipakai; untuk L2TP/IPsec pasang manual: apt install strongswan-swanctl charon-systemd"
 # Paket Debian/Ubuntu langsung menyalakan xl2tpd (UDP 1701) dan strongSwan (UDP 500/4500) dengan
 # konfigurasi bawaan. Keduanya hanya dibutuhkan saat L2TP dihubungkan (raniah-l2tp.service yang
@@ -232,7 +283,7 @@ fi
 
 if [[ "$USE_NGINX" == "1" ]]; then
   info "=== Nginx reverse proxy ==="
-  $SUDO apt-get install -y nginx
+  apt_get install -y nginx
 fi
 
 if systemctl is-active mariadb >/dev/null 2>&1 || systemctl is-active mysql >/dev/null 2>&1; then
@@ -249,7 +300,7 @@ DB_USER_SQL=$(sql_escape_pg "$DB_USER")
 DB_PASSWORD_SQL=$(sql_escape_pg "$DB_PASS")
 DB_NAME_SQL=$(sql_escape_pg "$DB_NAME")
 
-$SUDO -u postgres psql -v ON_ERROR_STOP=1 <<SQL
+as_postgres psql -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DB_USER_SQL}') THEN
@@ -273,17 +324,17 @@ PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v O
 # 4. FreeRADIUS + PostgreSQL
 # =============================================================================
 info "=== FreeRADIUS + freeradius-postgresql ==="
-$SUDO apt-get install -y freeradius freeradius-postgresql
+apt_get install -y freeradius freeradius-postgresql
 if dpkg -s freeradius-mysql >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive $SUDO apt-get purge -y freeradius-mysql || true
+  apt_get purge -y freeradius-mysql || true
 fi
 
 [[ -f "$RADIUS_SCHEMA" ]] || die "Skema RADIUS tidak ada: $RADIUS_SCHEMA"
 
 info "=== Impor skema SQL RADIUS ke ${DB_NAME} ==="
-$SUDO -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$RADIUS_SCHEMA"
+as_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$RADIUS_SCHEMA"
 
-$SUDO -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
+as_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
 GRANT ALL ON SCHEMA public TO "${DB_USER_SQL}";
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${DB_USER_SQL}";
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${DB_USER_SQL}";
@@ -335,14 +386,12 @@ fi
 # =============================================================================
 # 5. Node.js 22, npm, backend, frontend build, migrasi & seeder
 # =============================================================================
-info "=== Node.js 22 LTS (NodeSource) ==="
-if [[ -n "$SUDO" ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash -
-else
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-fi
-$SUDO apt-get install -y nodejs
-$SUDO npm install -g 'npm@^12'
+info "=== Verifikasi Node.js & npm ==="
+ensure_node
+# Upgrade npm bersifat opsional: npm bawaan Node 22 sudah cukup untuk build.
+$SUDO npm install -g 'npm@^12' || warn "Upgrade npm ke ^12 dilewati; memakai npm $(npm -v)."
+hash -r
+node -v && npm -v
 
 if [[ "$USE_PM2" == "1" ]] && ! command -v pm2 >/dev/null 2>&1; then
   info "=== PM2 global ==="

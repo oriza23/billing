@@ -431,8 +431,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${DB_USER_SQL}
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${DB_USER_SQL}";
 SQL
 
-# Tabel dari skema FreeRADIUS diimpor sebagai superuser postgres, sehingga dimiliki postgres.
-# server.js melakukan ALTER TABLE (hanya pemilik yang boleh) -> pindahkan kepemilikan ke DB_USER.
+# Objek di schema public bisa dimiliki postgres (skema FreeRADIUS diimpor sebagai superuser postgres;
+# fungsi get_lock/release_lock dari server.js juga bisa). server.js melakukan ALTER TABLE dan
+# CREATE OR REPLACE FUNCTION, dan itu hanya boleh oleh pemiliknya -> pindahkan kepemilikan tabel,
+# sequence, dan fungsi (bukan milik extension) ke DB_USER.
 run_postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 DECLARE r record;
@@ -442,6 +444,17 @@ BEGIN
   END LOOP;
   FOR r IN SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public' LOOP
     EXECUTE format('ALTER SEQUENCE public.%I OWNER TO %I', r.sequence_name, '${DB_USER_SQL}');
+  END LOOP;
+  FOR r IN
+    SELECT p.oid::regprocedure AS sig, p.prokind
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND p.prokind IN ('f', 'p')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER %s %s OWNER TO %I',
+      CASE WHEN r.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, r.sig, '${DB_USER_SQL}');
   END LOOP;
 END\$\$;
 SQL

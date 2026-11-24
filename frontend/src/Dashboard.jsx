@@ -216,7 +216,7 @@ function ProfileMenu({ username, onLogout }) {
             <User size={16} />
           )}
         </span>
-        <span className="min-w-0 text-left">
+        <span className="min-w-0 text-left max-[380px]:sr-only">
           <span className="block max-w-[10rem] truncate leading-tight">{label}</span>
           <span className="block truncate text-[11px] font-semibold text-gray-400 leading-tight dark:text-gray-400">{roleLabel}</span>
         </span>
@@ -354,7 +354,6 @@ function Dashboard() {
             <strong className="mt-0.5 block text-[15px] font-semibold">Panel Admin</strong>
           </div>
         </div>
-        <ServerClock />
 
         <nav className="grid flex-1 content-start gap-1.5 overflow-x-hidden overflow-y-auto pr-1 custom-sidebar-scrollbar" aria-label="Menu utama">
           <SidebarNavLink to="/dashboard" end label="Dashboard" icon={LayoutDashboard} />
@@ -396,10 +395,10 @@ function Dashboard() {
 
       <main className="min-w-0 flex-1 bg-gray-50 p-6 text-gray-900 transition-colors duration-300 md:px-10 md:py-9 dark:bg-gray-900 dark:text-gray-100">
         <header className="sticky top-0 z-30 -mx-6 -mt-6 mb-5 flex h-14 items-center justify-between gap-3 border-b border-gray-200 bg-white/95 px-3 backdrop-blur-sm md:-mx-10 md:-mt-9 md:px-6 dark:border-gray-700 dark:bg-gray-900/95">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <button
               type="button"
-              className="grid h-10 w-10 cursor-pointer place-items-center rounded-xl border-0 bg-transparent text-gray-800 transition-colors duration-300 hover:bg-gray-100 md:hidden dark:text-gray-100 dark:hover:bg-gray-800"
+              className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-xl border-0 bg-transparent text-gray-800 transition-colors duration-300 hover:bg-gray-100 md:hidden dark:text-gray-100 dark:hover:bg-gray-800"
               aria-label="Buka menu"
               aria-controls="app-sidebar"
               aria-expanded={isSidebarOpen}
@@ -407,11 +406,14 @@ function Dashboard() {
             >
               <Menu size={22} strokeWidth={2.2} />
             </button>
-            <span className="truncate text-sm font-bold tracking-[0.08em] text-gray-900 uppercase md:hidden dark:text-gray-100">
+            <ServerClock />
+            <span className="hidden min-w-0 truncate text-sm font-bold tracking-[0.08em] text-gray-900 uppercase sm:block md:hidden dark:text-gray-100">
               Sistem Billing
             </span>
           </div>
-          <ProfileMenu username={getUsername()} onLogout={handleLogout} />
+          <div className="shrink-0">
+            <ProfileMenu username={getUsername()} onLogout={handleLogout} />
+          </div>
         </header>
         <Outlet />
       </main>

@@ -1164,13 +1164,15 @@ function DetailRow({ label, children }) {
 
 function DeviceMetricCard({ title, icon: Icon, iconClassName, children }) {
   return (
-    <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm transition-all duration-200 hover:shadow-md dark:border-slate-700 dark:bg-slate-800">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="mb-1 text-xs font-bold tracking-wider text-gray-500 uppercase dark:text-gray-400">{title}</p>
-          {children}
-        </div>
-        <Icon className={`h-8 w-8 shrink-0 ${iconClassName}`} strokeWidth={2} aria-hidden />
+    <div className="relative rounded-xl border border-gray-100 bg-white px-4 py-5 shadow-sm transition-all duration-200 hover:shadow-md dark:border-slate-700 dark:bg-slate-800">
+      <Icon
+        className={`pointer-events-none absolute top-3 right-3 h-7 w-7 opacity-85 ${iconClassName}`}
+        strokeWidth={2}
+        aria-hidden
+      />
+      <div className="flex min-h-[5.5rem] flex-col items-center justify-center text-center">
+        <p className="mb-2 w-full text-xs font-bold tracking-wider text-gray-500 uppercase dark:text-gray-400">{title}</p>
+        <div className="flex w-full flex-col items-center justify-center gap-0 text-center">{children}</div>
       </div>
     </div>
   )
@@ -1201,7 +1203,7 @@ function renderMetricRx(value) {
         {abnormal && '*'}
         <span className="ml-1 text-base font-bold text-gray-500 dark:text-gray-400">dBm</span>
       </p>
-      <div className="mt-1.5 flex items-center gap-1.5 text-sm font-medium text-gray-600 dark:text-gray-300">
+      <div className="mt-1.5 flex items-center justify-center gap-1.5 text-sm font-medium text-gray-600 dark:text-gray-300">
         <span className={`h-2 w-2 shrink-0 rounded-full ${warnaDot}`} aria-hidden />
         <span>{label}</span>
       </div>

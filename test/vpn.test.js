@@ -39,6 +39,41 @@ function rejects(fn, pattern) {
 // ---------------------------------------------------------------------------
 // WireGuard
 // ---------------------------------------------------------------------------
+test('script bundle: WireGuard hanya v7, OpenVPN/L2TP/CHR punya v6 dan v7 dengan field konsisten', () => {
+  const wgServer = {
+    address: '10.220.0.1/24', public_endpoint: 'vpn.contoh.net', listen_port: 51820, mtu: 1380, public_key: 'PubKeyServerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=',
+  };
+  const wgPeer = { name: 'NAS Pusat', address: '10.220.0.2/32', private_key: 'PrivKeyRouterXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=', radius_secret: 'Abcd1234SecretValue1234' };
+  const wg = cfg.wireguardScriptBundle(wgServer, wgPeer);
+  assert.equal(wg.script_v6, null);
+  assert.equal(wg.ros_v6_supported, false);
+  assert.equal(wg.ros_v7_supported, true);
+  assert.equal(wg.script, wg.script_v7);
+  assert.match(wg.script_v7, /\/interface wireguard peers add/);
+  assert.match(wg.notes.join('\n'), /RouterOS v7/);
+
+  const l2tpServer = { public_endpoint: 'vpn.contoh.net', listen_port: 1701, network: '10.222.0.0/24' };
+  const l2tpPeer = { name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123', address: '10.222.0.2', radius_secret: 'Abcd1234SecretValue1234' };
+  const l2tp = cfg.l2tpScriptBundle(l2tpServer, l2tpPeer);
+  assert.equal(l2tp.script_v6, l2tp.script_v7);
+  assert.equal(l2tp.ros_v6_supported, true);
+  assert.equal(l2tp.ros_v7_supported, true);
+  assert.match(l2tp.script, /\/radius incoming set accept=yes port=3799/);
+
+  const ovpnServer = { public_endpoint: 'vpn.contoh.net', listen_port: 1194, network: '10.221.0.0/24' };
+  const ovpnPeer = { name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123', address: '10.221.0.2', radius_secret: 'Abcd1234SecretValue1234' };
+  const ovpn = cfg.openvpnScriptBundle(ovpnServer, ovpnPeer);
+  assert.equal(ovpn.script_v6, ovpn.script_v7);
+  assert.notEqual(ovpn.script_v6, null);
+  assert.match(ovpn.script, /protocol=tcp/);
+
+  const chr = cfg.chrScriptBundle({ name: 'CHR A', radiusAddress: '10.210.0.2', secret: 'Abcd1234SecretValue1234', nasIp: '10.210.0.5' });
+  assert.equal(chr.script_v6, chr.script_v7);
+  assert.match(chr.script, /\/radius incoming set accept=yes port=3799/);
+
+  assert.deepEqual(Object.keys(cfg.scriptResponse({ v7: 'x' })).sort(), ['notes', 'ros_v6_supported', 'ros_v7_supported', 'script', 'script_v6', 'script_v7']);
+});
+
 test('wireguard: input valid dinormalkan, keepalive default 15', () => {
   const out = cfg.validateWireguard(wgInput({ allowed_ips: '10.10.99.5/24, 192.168.50.0/24' }));
   assert.equal(out.endpoint, 'chr.contoh.net:51820');
@@ -1600,7 +1635,10 @@ test('wg server: subnet, alokasi IP peer, conf tanpa PostUp, script RouterOS', (
   assert.equal(conf.includes(peer.private_key), false);
 
   const script = cfg.renderMikrotikScript(server, { ...peer, address: '10.220.0.2/32', radius_secret: 'Abcd1234SecretValue1234' });
-  assert.match(script, /persistent-keepalive=15s/);
+  assert.match(script, /persistent-keepalive=25s/);
+  assert.match(script, /allowed-address=10\.220\.0\.0\/24/);
+  assert.match(script, /\/ip route add dst-address=10\.220\.0\.0\/24 gateway=wg-raniah/);
+  assert.match(script, /^# .*RouterOS v7/m);
   assert.match(script, /endpoint-address=vpn\.contoh\.net endpoint-port=51820/);
   assert.match(script, /address=10\.220\.0\.2\/24/);
   assert.match(script, /comment="Auto by Billing"/);
@@ -1684,7 +1722,8 @@ test('openvpn server: conf ROS v6, IP statis, script, dan rahasia tidak masuk da
   assert.equal(second, '10.221.0.3');
   const peer = cfg.validateOvpnPeer({ name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123' });
   const script = cfg.renderOvpnMikrotikScript(server, { ...peer, address: first, radius_secret: 'Abcd1234SecretValue1234' });
-  assert.match(script, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip user=nas-kantor password=Rahasia123 cipher=aes256 auth=sha1 add-default-route=no/);
+  assert.match(script, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip protocol=tcp user=nas-kantor password=Rahasia123 cipher=aes256 auth=sha1 add-default-route=no/);
+  assert.match(script, /\/ip route add dst-address=10\.221\.0\.0\/24 gateway=ovpn-raniah/);
   assert.match(script, /comment="Auto by Billing"/);
   assert.match(script, /\/radius add service=ppp,hotspot address=10\.221\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.221\.0\.2 comment="Auto by Billing"/);
   assert.match(script, /\/radius incoming set accept=yes port=3799/);
@@ -1796,7 +1835,8 @@ test('l2tp server: chap-secrets, script ROS, dan subnet 10.222.0.0/24', () => {
     ...peer, address: '10.222.0.2', radius_secret: 'Abcd1234SecretValue1234',
   });
   assert.equal(script.includes('#'), false);
-  assert.match(script, /\/interface l2tp-client add name="l2tp-raniah" connect-to="vpn\.contoh\.net" user="nas-kantor" password="Rahasia123" use-ipsec=no allow=mschap2 add-default-route=no disabled=no comment="Auto by Billing"/);
+  assert.match(script, /\/interface l2tp-client add name="l2tp-raniah" connect-to="vpn\.contoh\.net" user="nas-kantor" password="Rahasia123" use-ipsec=no allow=mschap2,mschap1,chap,pap add-default-route=no disabled=no comment="Auto by Billing"/);
+  assert.match(script, /\/ip route add dst-address=10\.222\.0\.0\/24 gateway=l2tp-raniah/);
   assert.match(script, /\/radius add service=ppp,hotspot address=10\.222\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.222\.0\.2 comment="Auto by Billing"/);
   assert.match(script, /\/radius incoming set accept=yes port=3799/);
   assert.match(script, /\/ppp aaa set use-radius=yes accounting=yes interim-update=5m/);

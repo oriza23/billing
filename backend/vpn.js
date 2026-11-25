@@ -1563,7 +1563,7 @@ function serverScript(bundle, id) {
     error.field = 'public_endpoint';
     throw error;
   }
-  return vpnConfig.renderMikrotikScript(bundle.server, peer);
+  return vpnConfig.wireguardScriptBundle(bundle.server, peer);
 }
 
 function ovpnPeerRow(row) {
@@ -1902,7 +1902,7 @@ async function chrNasScript(pool, id) {
   const radiusAddress = await chrRadiusAddress();
   return {
     radius_address: radiusAddress,
-    script: vpnConfig.renderChrMikrotikScript({
+    ...vpnConfig.chrScriptBundle({
       name: row.nama_router,
       radiusAddress,
       secret: row.radius_secret,
@@ -2122,7 +2122,7 @@ function l2tpServerScript(bundle, id) {
     error.status = 404;
     throw error;
   }
-  return vpnConfig.renderL2tpServerScript(bundle.server, peer);
+  return vpnConfig.l2tpScriptBundle(bundle.server, peer);
 }
 
 function ovpnServerScript(bundle, id) {
@@ -2132,7 +2132,7 @@ function ovpnServerScript(bundle, id) {
     error.status = 404;
     throw error;
   }
-  return vpnConfig.renderOvpnMikrotikScript(bundle.server, peer);
+  return vpnConfig.openvpnScriptBundle(bundle.server, peer);
 }
 
 const service = createVpnService();

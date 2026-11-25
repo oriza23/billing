@@ -3,6 +3,7 @@ import { Copy, Plus, Power, RefreshCw, Save, Server, Trash2 } from 'lucide-react
 import Swal from 'sweetalert2'
 import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
+import { showVpnScriptModal } from './vpnScript.js'
 import VpnOvpnServer from './VpnOvpnServer.jsx'
 import VpnL2tpServer from './VpnL2tpServer.jsx'
 
@@ -175,18 +176,14 @@ function VpnServer() {
     setBusy(true)
     try {
       const response = await api.get(`${API}/peers/${peer.id}/script`)
-      const script = response.data?.script || ''
-      await Swal.fire({
-        title: `Script ${peer.name}`,
-        html: '<p class="text-sm">Tempel di terminal RouterOS v7. Baris RADIUS sudah aktif dan secret-nya sudah tersinkron dengan FreeRADIUS billing. Jika public key diisi manual, ganti ISI_PRIVATE_KEY_ROUTER dengan private key router.</p>',
-        input: 'textarea',
-        inputValue: script,
-        width: 720,
-        confirmButtonText: 'Salin dan tutup',
+      const shown = await showVpnScriptModal({
+        title: `Script MikroTik · ${peer.name}`,
+        subtitle: 'WireGuard membutuhkan RouterOS v7. Baris RADIUS dan route ke subnet VPN sudah aktif, dan secret-nya sudah tersinkron dengan FreeRADIUS billing. Jika public key diisi manual, ganti ISI_PRIVATE_KEY_ROUTER dengan private key router.',
+        body: response.data || {},
       })
-      await navigator.clipboard.writeText(script)
+      if (!shown) throw new Error('Server tidak mengirim isi script.')
     } catch (err) {
-      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || 'Script tidak tersedia.' })
+      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || err.message || 'Permintaan ke server gagal.' })
     } finally {
       setBusy(false)
     }

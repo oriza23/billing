@@ -1128,18 +1128,71 @@ function renderL2tpChapSecrets(peers, existing = '') {
   return [...lines, ...kept, ''].join('\n');
 }
 
+// L2TP client murni (tanpa IPsec, sesuai L2TP Server Mandiri). Berlaku untuk RouterOS v6 dan v7.
 function renderL2tpServerScript(server, peer) {
   const cfg = validateL2tpServer(server, { avoidCidrs: [] });
   if (!cfg.public_endpoint) {
     fail('Isi endpoint publik sebelum menyalin script.', 'public_endpoint');
   }
   validateL2tpPeer(peer, peer);
+  const peerIp = String(peer.address || '').split('/')[0];
   const lines = [
-    `/interface l2tp-client add name="l2tp-raniah" connect-to="${cfg.public_endpoint}" user="${peer.username}" password="${peer.password}" use-ipsec=no allow=mschap2 add-default-route=no disabled=no comment="Auto by Billing"`,
-    ...renderRadiusClientLines(cfg.server_ip, peer.address, peer),
+    `/interface l2tp-client add name="l2tp-raniah" connect-to="${cfg.public_endpoint}" user="${peer.username}" password="${peer.password}" use-ipsec=no allow=mschap2,mschap1,chap,pap add-default-route=no disabled=no comment="Auto by Billing"`,
+    `/ip route add dst-address=${cfg.network} gateway=l2tp-raniah comment="Auto by Billing: subnet VPN/RADIUS"`,
+    ...renderRadiusClientLines(cfg.server_ip, peerIp, peer),
     ':do { /ip hotspot profile set [find] use-radius=yes } on-error={}',
   ];
   return `${lines.join('\n')}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Respons script untuk frontend. Selalu berisi script (default), script_v6, dan script_v7.
+// Nilai null berarti protokol tidak tersedia di versi tersebut. Frontend membaca field ini saja.
+// ---------------------------------------------------------------------------
+function scriptResponse({ v6 = null, v7 = null, notes = [] }) {
+  return {
+    script: v7 || v6 || '',
+    script_v6: v6,
+    script_v7: v7,
+    ros_v6_supported: Boolean(v6),
+    ros_v7_supported: Boolean(v7),
+    notes,
+  };
+}
+
+function wireguardScriptBundle(server, peer) {
+  const notes = ['WireGuard hanya tersedia di RouterOS v7 (7.x) ke atas.'];
+  if (!peer.private_key) {
+    notes.push('Private key router belum tersimpan. Ganti ISI_PRIVATE_KEY_ROUTER dengan private key perangkat sebelum menempel.');
+  }
+  return scriptResponse({ v7: renderMikrotikScript(server, peer), notes });
+}
+
+function openvpnScriptBundle(server, peer) {
+  const text = renderOvpnMikrotikScript(server, peer);
+  return scriptResponse({
+    v6: text,
+    v7: text,
+    notes: ['Skrip OpenVPN sama untuk RouterOS v6 dan v7.'],
+  });
+}
+
+function l2tpScriptBundle(server, peer) {
+  const text = renderL2tpServerScript(server, peer);
+  return scriptResponse({
+    v6: text,
+    v7: text,
+    notes: ['Skrip L2TP sama untuk RouterOS v6 dan v7 (tanpa IPsec).'],
+  });
+}
+
+function chrScriptBundle(params) {
+  const text = renderChrMikrotikScript(params);
+  return scriptResponse({
+    v6: text,
+    v7: text,
+    notes: ['Skrip RADIUS lewat Hub CHR sama untuk RouterOS v6 dan v7.'],
+  });
 }
 
 function l2tpServerFirewallSpec(confText) {
@@ -1614,20 +1667,25 @@ function renderWgServer(server, peers) {
   return `${lines.join('\n')}`;
 }
 
+// WireGuard client untuk RouterOS v7 (WireGuard tidak ada di v6). Allowed-address memakai subnet
+// tunnel supaya seluruh subnet VPN/RADIUS lewat terowongan; persistent-keepalive 25 detik agar NAT tetap terbuka.
 function renderMikrotikScript(server, peer) {
   const serverNet = assertServerAddress(server.address);
   const peerNet = parseCidr(peer.address, { minPrefix: 32 });
   const routerAddress = `${formatIPv4(peerNet.ip)}/${serverNet.prefix}`;
+  const subnet = `${formatIPv4(serverNet.network)}/${serverNet.prefix}`;
+  const serverIp = formatIPv4(serverNet.ip);
   const privateKey = peer.private_key || 'ISI_PRIVATE_KEY_ROUTER';
   const psk = peer.preshared_key ? ` preshared-key="${peer.preshared_key}"` : '';
   const lines = [
-    '# RANIAH Billing - tempel di terminal MikroTik RouterOS v7',
+    '# RANIAH Billing - WireGuard client. WAJIB RouterOS v7 (7.x) ke atas. Tempel di terminal MikroTik.',
     `# Router: ${peer.name}`,
     `# Server: ${server.public_endpoint}:${server.listen_port}  tunnel ${server.address}`,
     `/interface wireguard add name=wg-raniah listen-port=13231 mtu=${server.mtu} private-key="${privateKey}" comment="Auto by Billing"`,
-    `/ip address add address=${routerAddress} interface=wg-raniah`,
-    `/interface wireguard peers add interface=wg-raniah name=billing public-key="${server.public_key}" endpoint-address=${server.public_endpoint} endpoint-port=${server.listen_port} allowed-address=${formatIPv4(serverNet.ip)}/32 persistent-keepalive=15s${psk}`,
-    ...renderRadiusClientLines(formatIPv4(serverNet.ip), formatIPv4(peerNet.ip), peer),
+    `/ip address add address=${routerAddress} interface=wg-raniah comment="Auto by Billing"`,
+    `/interface wireguard peers add interface=wg-raniah name=billing public-key="${server.public_key}" endpoint-address=${server.public_endpoint} endpoint-port=${server.listen_port} allowed-address=${subnet} persistent-keepalive=25s${psk} comment="Auto by Billing"`,
+    `/ip route add dst-address=${subnet} gateway=wg-raniah comment="Auto by Billing: subnet VPN/RADIUS"`,
+    ...renderRadiusClientLines(serverIp, formatIPv4(peerNet.ip), peer),
     '',
   ];
   return lines.join('\n');
@@ -1894,6 +1952,8 @@ function renderRadiusClientLines(serverIp, peerIp, peer) {
   ];
 }
 
+// OpenVPN client untuk RouterOS v6 dan v7. Server memakai proto tcp-server, cipher AES-256-CBC, auth SHA1,
+// dan autentikasi user/password (verify-client-cert none), jadi klien cukup user + password.
 function renderOvpnMikrotikScript(server, peer) {
   const cfg = validateOvpnServer(server);
   if (!cfg.public_endpoint) {
@@ -1901,10 +1961,15 @@ function renderOvpnMikrotikScript(server, peer) {
   }
   const checked = validateOvpnPeer(peer, peer);
   const iface = 'ovpn-raniah';
+  const peerIp = String(peer.address || '').split('/')[0];
   return [
-    `# RANIAH OpenVPN client untuk ${checked.name} (RouterOS v6)`,
-    `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip user=${checked.username} password=${checked.password} cipher=aes256 auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`,
-    ...renderRadiusClientLines(cfg.server_ip, peer.address, peer),
+    `# RANIAH OpenVPN client untuk ${checked.name} (RouterOS v6 dan v7)`,
+    `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip protocol=tcp user=${checked.username} password=${checked.password} cipher=aes256 auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`,
+    `/ip route add dst-address=${cfg.network} gateway=${iface} comment="Auto by Billing: subnet VPN/RADIUS"`,
+    ...renderRadiusClientLines(cfg.server_ip, peerIp, peer),
+    '# Opsional - verifikasi sertifikat server: unduh CA dari menu OpenVPN Server (Unduh CA), lalu',
+    '#   /certificate import file-name=raniah-ovpn-ca.crt',
+    `#   /interface ovpn-client set [find name=${iface}] verify-server-certificate=yes`,
     '',
   ].join('\n');
 }
@@ -2575,6 +2640,11 @@ module.exports = {
   renderL2tpServerOptions,
   renderL2tpChapSecrets,
   renderL2tpServerScript,
+  scriptResponse,
+  wireguardScriptBundle,
+  openvpnScriptBundle,
+  l2tpScriptBundle,
+  chrScriptBundle,
   applyL2tpServerToDisk,
   stopL2tpServer,
   startL2tpServer,

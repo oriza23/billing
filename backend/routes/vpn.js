@@ -435,8 +435,8 @@ router.get('/server/ovpn/peers/:id/script', async (req, res) => {
   }
   try {
     const bundle = await vpn.loadOvpnServer(pool);
-    const script = vpn.ovpnServerScript(bundle, id);
-    return res.json({ success: true, script });
+    const result = vpn.ovpnServerScript(bundle, id);
+    return res.json({ success: true, ...result });
   } catch (error) {
     return sendError(res, error, 'Gagal membuat script MikroTik.');
   }
@@ -557,8 +557,8 @@ router.get('/server/l2tp/peers/:id/script', async (req, res) => {
   }
   try {
     const bundle = await vpn.loadL2tpServer(pool);
-    const script = vpn.l2tpServerScript(bundle, id);
-    return res.json({ success: true, script });
+    const result = vpn.l2tpServerScript(bundle, id);
+    return res.json({ success: true, ...result });
   } catch (error) {
     return sendError(res, error, 'Gagal membuat script MikroTik.');
   }
@@ -641,8 +641,8 @@ router.get('/server/peers/:id/script', async (req, res) => {
   }
   try {
     const bundle = await vpn.loadServer(pool);
-    const script = vpn.serverScript(bundle, id);
-    return res.json({ success: true, script });
+    const result = vpn.serverScript(bundle, id);
+    return res.json({ success: true, ...result });
   } catch (error) {
     return sendError(res, error, 'Gagal membuat script MikroTik.');
   }

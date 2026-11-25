@@ -8,7 +8,7 @@
 #
 # Backend: server.js + folder backend/ (kode) di akar repositori (bukan paket npm terpisah).
 # Frontend: frontend/ (React + Vite build → frontend/dist, dilayani Express).
-# Default development: Node langsung (port 5000); PM2 dan Nginx hanya bila diminta.
+# Default: proses dijalankan PM2 dengan nama "billing" (port 5000). Nginx hanya bila USE_NGINX=1.
 #
 # MariaDB: tidak dipasang. Proyek acs-standalone (jika ada) memakai installer sendiri.
 # =============================================================================
@@ -22,7 +22,7 @@ export NEEDRESTART_SUSPEND=1
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_PORT="${APP_PORT:-5000}"
 USE_NGINX="${USE_NGINX:-0}"
-USE_PM2="${USE_PM2:-0}"
+USE_PM2="${USE_PM2:-1}"
 NGINX_SITE_NAME="${NGINX_SITE_NAME:-raniah-billing}"
 
 GENIEACS_UI_PORT="${GENIEACS_UI_PORT:-3000}"
@@ -56,6 +56,13 @@ else
   APP_USER="$RUN_USER"
 fi
 APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6)
+
+# Pemilik proyek (node_modules, .env, frontend/dist) dan user PM2. Dengan sudo, SUDO_USER adalah user
+# asli (mis. ubuntu), bukan root. Di login root langsung, targetnya root.
+TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+TARGET_GROUP=$(id -gn "$TARGET_USER")
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+[[ -n "$TARGET_HOME" ]] || { echo "User target ${TARGET_USER} tidak ditemukan." >&2; exit 1; }
 
 die() { echo -e "${RED}$*${NC}" >&2; exit 1; }
 info() { echo -e "${YELLOW}$*${NC}"; }
@@ -94,6 +101,21 @@ apt_get() {
 # cd / agar tidak ada peringatan "could not change directory" dari folder milik user lain.
 run_postgres() {
   (cd / && run_root runuser -u postgres -- "$@")
+}
+
+# Perintah yang harus berjalan sebagai user target (npm install, build, migrasi, PM2), bukan root.
+# Dengan sudo, runuser menjaga PATH dan HOME tetap milik user target (npm config, ~/.pm2).
+run_as_target() {
+  if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+    runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" PATH="$PATH" "$@"
+  else
+    env HOME="$TARGET_HOME" "$@"
+  fi
+}
+
+# Serahkan seluruh folder proyek ke user target sebelum/sesudah langkah yang ditulis sebagai root.
+own_app_dir() {
+  run_root chown -R "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR"
 }
 
 # Node.js minimal v22 (LTS) dan npm wajib ada sebelum tahap npm install / npm run build.
@@ -608,28 +630,33 @@ if getent group ssl-cert >/dev/null; then
   esac
 fi
 
+# Daemon freerad (User=freerad) menulis log di /var/log/freeradius. Bila dimiliki root, start gagal.
+if [[ -d /var/log/freeradius ]]; then
+  run_root chown -R freerad:freerad /var/log/freeradius
+fi
+
 # =============================================================================
 # 5. Node.js 22, npm, backend, frontend build, migrasi & seeder
 # =============================================================================
 info "=== Verifikasi Node.js & npm ==="
 ensure_node
+
+# Registry npm wajib HTTPS. VPS dengan mirror HTTP bawaan gagal dengan EALLOWREMOTE. Diset untuk user
+# target (~/.npmrc) dan root (konfigurasi global), sebelum npm install apa pun.
+info "=== npm registry → https://registry.npmjs.org/ ==="
+NPM_REGISTRY="https://registry.npmjs.org/"
+run_as_target npm config set registry "$NPM_REGISTRY"
+run_root npm config set --global registry "$NPM_REGISTRY"
+
 # Upgrade npm bersifat opsional: npm bawaan Node 22 sudah cukup untuk build.
-run_root npm install -g 'npm@^12' || warn "Upgrade npm ke ^12 dilewati; memakai npm $(npm -v)."
+run_root npm install -g 'npm@^12' --no-audit --registry="$NPM_REGISTRY" \
+  || warn "Upgrade npm ke ^12 dilewati; memakai npm $(npm -v)."
 hash -r
 node -v && npm -v
 
-# npm install / build berjalan sebagai user ini, jadi folder proyek harus miliknya. Bila tidak
-# (mis. sisa instalasi sebelumnya milik billing atau root), node_modules, frontend/dist dan .env
-# gagal ditulis. Di akhir instalasi kepemilikan dikembalikan ke user service.
-if [[ "$IS_ROOT" -eq 0 ]]; then
-  info "=== Kepemilikan folder aplikasi → ${RUN_USER}:${RUN_GROUP} (untuk npm install & build) ==="
-  run_root chown -R "${RUN_USER}:${RUN_GROUP}" "$APP_DIR"
-fi
-
-if [[ "$USE_PM2" == "1" ]] && ! command -v pm2 >/dev/null 2>&1; then
-  info "=== PM2 global ==="
-  run_root npm install -g pm2
-fi
+# npm install / build dijalankan sebagai TARGET_USER, jadi folder proyek harus miliknya sebelum build.
+info "=== Kepemilikan folder aplikasi → ${TARGET_USER}:${TARGET_GROUP} ==="
+own_app_dir
 
 JWT_SECRET=$(openssl rand -hex 48)
 DATABASE_URL=$(build_database_url)
@@ -657,36 +684,51 @@ umask 077
 } > "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
 echo "VITE_API_URL=" > "$APP_DIR/frontend/.env.production"
+umask 022
+# .env ditulis oleh installer (root bila sudo): kembalikan kepemilikannya ke user target agar PM2 bisa membacanya.
+run_root chown "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR/.env" "$APP_DIR/frontend/.env.production"
 validate_dotenv_db
 test_db_login
 
-info "=== npm install backend (akar proyek) ==="
-cd "$APP_DIR"
-npm install
+info "=== npm install backend (akar proyek, modul express dll.) ==="
+(cd "$APP_DIR" && run_as_target npm install --no-audit --registry="$NPM_REGISTRY")
 
 info "=== Migrasi tabel billing (server.js) ==="
 validate_dotenv_db
-BILLING_SCHEMA_ONLY=1 node server.js
+(cd "$APP_DIR" && run_as_target env BILLING_SCHEMA_ONLY=1 node server.js)
 
 info "=== Seeder superadmin (WEB_ADMIN) ==="
 validate_dotenv_db
-node "$APP_DIR/scripts/setup-admin.js"
+(cd "$APP_DIR" && run_as_target node "$APP_DIR/scripts/setup-admin.js")
 
 info "=== npm install & build frontend ==="
-cd "$APP_DIR/frontend"
-npm install
-npm run build
+(cd "$APP_DIR/frontend" && run_as_target npm install --no-audit --registry="$NPM_REGISTRY")
+(cd "$APP_DIR/frontend" && run_as_target npm run build)
 
 # =============================================================================
 # 6. Optional PM2 & Nginx
 # =============================================================================
 if [[ "$USE_PM2" == "1" ]]; then
-  info "=== PM2: billing ==="
-  pm2 delete billing 2>/dev/null || true
-  pm2 start "$APP_DIR/server.js" --name billing --cwd "$APP_DIR"
-  pm2 save
-  run_root env PATH="$PATH:/usr/bin" pm2 startup systemd -u "$APP_USER" --hp "$APP_HOME" || true
-  pm2 save
+  info "=== PM2: billing (user ${TARGET_USER}) ==="
+  if ! command -v pm2 >/dev/null 2>&1; then
+    run_root npm install -g pm2 --no-audit --registry="$NPM_REGISTRY"
+    hash -r
+  fi
+  # Unit dev billing.service (deploy/install-dev-service.sh) juga memakai port ${APP_PORT}. Jalankan
+  # keduanya bersamaan akan crash-loop, jadi PM2 dilewati dan layanan dev dibiarkan.
+  if run_root systemctl is-active --quiet billing.service; then
+    warn "billing.service (mode dev) sedang aktif di port ${APP_PORT}. PM2 dilewati agar tidak bentrok."
+    warn "Untuk beralih ke PM2: sudo systemctl disable --now billing && cd \"$APP_DIR\" && pm2 start server.js --name billing"
+  else
+    own_app_dir
+    (cd "$APP_DIR" && run_as_target pm2 delete billing >/dev/null 2>&1 || true)
+    (cd "$APP_DIR" && run_as_target pm2 start server.js --name billing --cwd "$APP_DIR")
+    run_as_target pm2 save
+    # pm2 startup harus dijalankan root; unit systemd dibuat untuk user target.
+    run_root env PATH="$PATH" pm2 startup systemd -u "$TARGET_USER" --hp "$TARGET_HOME" \
+      || warn "pm2 startup gagal. Jalankan manual: sudo env PATH=\$PATH pm2 startup systemd -u ${TARGET_USER} --hp ${TARGET_HOME}"
+    run_as_target pm2 save
+  fi
 else
   info "PM2 dilewati. Jalankan backend dengan: cd \"$APP_DIR\" && npm start"
 fi
@@ -780,6 +822,27 @@ else
   info "=== Helper VPN (root-owned) ==="
   run_root bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
 
+  # Izin user aplikasi (TARGET_USER) menjalankan helper root tanpa password. Aplikasi tetap berjalan
+  # sebagai user biasa; hanya helper ini yang naik ke root. Helper memvalidasi sendiri protokol, aksi,
+  # jumlah argumen, dan JSON stdin, jadi pemanggilan dengan argumen lain ditolak olehnya.
+  info "=== sudoers helper VPN untuk ${TARGET_USER} (/etc/sudoers.d/raniah-vpn-helper) ==="
+  [[ "$TARGET_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "User ${TARGET_USER} tidak valid untuk sudoers helper VPN."
+  VPN_HELPER_SUDOERS=/etc/sudoers.d/raniah-vpn-helper
+  VPN_HELPER_SUDOERS_TMP=$(mktemp)
+  printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/raniah-vpn-helper\n' "$TARGET_USER" > "$VPN_HELPER_SUDOERS_TMP"
+  if ! run_root visudo -cf "$VPN_HELPER_SUDOERS_TMP" >/dev/null; then
+    rm -f "$VPN_HELPER_SUDOERS_TMP"
+    die "Isi sudoers helper VPN tidak valid. Berkas tidak dipasang."
+  fi
+  run_root install -m 0440 -o root -g root "$VPN_HELPER_SUDOERS_TMP" "$VPN_HELPER_SUDOERS"
+  rm -f "$VPN_HELPER_SUDOERS_TMP"
+  # Validasi seluruh konfigurasi sudo (termasuk berkas lain di sudoers.d). Gagal => berkas dihapus lagi.
+  if ! run_root visudo -c >/dev/null; then
+    run_root rm -f "$VPN_HELPER_SUDOERS"
+    die "visudo -c gagal setelah memasang ${VPN_HELPER_SUDOERS}. Berkas dihapus; periksa konfigurasi sudo."
+  fi
+  ok "sudoers helper VPN terpasang: ${TARGET_USER} → /usr/local/sbin/raniah-vpn-helper (NOPASSWD, 0440)."
+
   info "=== sudoers layanan & VPN untuk ${APP_USER} ==="
   VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp raniah-l2tp)
   SUDO_CMDS=()
@@ -865,7 +928,7 @@ fi
 # =============================================================================
 # Service systemd berjalan sebagai user billing (deploy/install-service.sh). Build tadi dibuat oleh
 # user yang menjalankan installer, jadi kepemilikan dikembalikan ke billing:billing sebelum restart.
-# Mode PM2 berjalan sebagai ${APP_USER}, jadi kepemilikannya tidak diubah.
+# Mode PM2 berjalan sebagai ${TARGET_USER}, jadi kepemilikannya tidak diubah.
 if run_root systemctl cat billing.service >/dev/null 2>&1; then
   if [[ "$USE_PM2" != "1" ]] && getent passwd billing >/dev/null 2>&1; then
     info "=== Kepemilikan folder aplikasi → billing:billing ==="

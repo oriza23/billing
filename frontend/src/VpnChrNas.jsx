@@ -3,6 +3,7 @@ import { Copy, Plus, Trash2 } from 'lucide-react'
 import Swal from 'sweetalert2'
 import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
+import { showVpnScriptModal } from './vpnScript.js'
 
 const API = '/sistem/vpn/chr-nas'
 const CARD = 'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900'
@@ -91,18 +92,14 @@ function VpnChrNas({ radiusAddress }) {
     setBusy(true)
     try {
       const { data } = await api.get(`${API}/${row.id}/script`)
-      const script = data.script || ''
-      await Swal.fire({
-        title: `Script ${row.nama_router}`,
-        html: `<p class="text-sm">Tempel di terminal RouterOS v6 atau v7. Baris RADIUS sudah aktif ke ${data.radius_address || serverAddress} dan secret-nya sudah tersinkron dengan FreeRADIUS billing.</p>`,
-        input: 'textarea',
-        inputValue: script,
-        width: 720,
-        confirmButtonText: 'Salin dan tutup',
+      const shown = await showVpnScriptModal({
+        title: `Script MikroTik · ${row.nama_router}`,
+        subtitle: `Baris RADIUS sudah aktif ke ${data.radius_address || serverAddress} dan secret-nya sudah tersinkron dengan FreeRADIUS billing. Berlaku untuk RouterOS v6 dan v7.`,
+        body: data,
       })
-      await navigator.clipboard.writeText(script)
+      if (!shown) throw new Error('Server tidak mengirim isi script.')
     } catch (err) {
-      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || 'Script tidak tersedia.' })
+      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || err.message || 'Permintaan ke server gagal.' })
     } finally {
       setBusy(false)
     }

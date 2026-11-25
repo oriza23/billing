@@ -3,6 +3,7 @@ import { Copy, Download, Plus, Power, RefreshCw, Save, Server, Trash2 } from 'lu
 import Swal from 'sweetalert2'
 import api from './api/axios.js'
 import { fireError, fireSuccess } from './swals.js'
+import { showVpnScriptModal } from './vpnScript.js'
 
 const API = '/sistem/vpn/server/ovpn'
 const CARD = 'mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900'
@@ -172,18 +173,14 @@ function VpnOvpnServer() {
     setBusy(true)
     try {
       const { data: body } = await api.get(`${API}/peers/${row.id}/script`)
-      const script = body.script || ''
-      await Swal.fire({
-        title: `Script ROS v6 · ${row.name}`,
-        html: '<p class="text-sm">Tempel di terminal RouterOS v6. Baris RADIUS sudah aktif dan secret-nya sudah tersinkron dengan FreeRADIUS billing.</p>',
-        input: 'textarea',
-        inputValue: script,
-        width: 720,
-        confirmButtonText: 'Salin dan tutup',
+      const shown = await showVpnScriptModal({
+        title: `Script MikroTik · ${row.name}`,
+        subtitle: 'OpenVPN untuk RouterOS v6 dan v7. Baris RADIUS dan route ke subnet VPN sudah aktif, dan secret-nya sudah tersinkron dengan FreeRADIUS billing.',
+        body,
       })
-      await navigator.clipboard.writeText(script)
+      if (!shown) throw new Error('Server tidak mengirim isi script.')
     } catch (err) {
-      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || 'Script tidak tersedia.' })
+      fireError({ title: 'Gagal membuat script', text: err.response?.data?.message || err.message || 'Permintaan ke server gagal.' })
     } finally {
       setBusy(false)
     }
@@ -338,7 +335,7 @@ function VpnOvpnServer() {
                     <div className="flex flex-wrap gap-2">
                       <button type="button" className={BTN_NEUTRAL} onClick={() => copyScript(row)} disabled={busy}>
                         <Copy size={14} aria-hidden="true" />
-                        Salin Script ROS v6
+                        Salin Script
                       </button>
                       <button type="button" className={BTN_NEUTRAL} onClick={() => navigator.clipboard.writeText(row.radius_secret || '').then(() => fireSuccess({ title: 'RADIUS secret tersalin', text: 'Tersalin ke clipboard.' })).catch(() => fireError({ title: 'Gagal menyalin', text: 'Clipboard tidak tersedia di browser ini.' }))} disabled={busy || !row.radius_secret}>
                         Salin Secret

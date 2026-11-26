@@ -223,6 +223,147 @@ test_db_login() {
     || die "Login PostgreSQL gagal untuk ${DB_USER}@${DB_NAME}. Password role tidak cocok dengan DB_PASSWORD."
 }
 
+# Baca satu nilai dari .env billing (sumber kebenaran kredensial DB / FreeRADIUS).
+dotenv_get() {
+  local key=$1 file=$2 line val
+  [[ -f "$file" ]] || return 1
+  line=$(grep -E "^${key}=" "$file" | tail -1) || return 1
+  val="${line#*=}"
+  if [[ "$val" == \"*\" && "$val" == *\" ]]; then
+    val="${val:1:${#val}-2}"
+  elif [[ "$val" == \'*\' && "$val" == *\' ]]; then
+    val="${val:1:${#val}-2}"
+  fi
+  printf '%s' "$val"
+}
+
+# Muat DB_* dari .env ke variabel FR_DB_* (sinkron dengan backend Node).
+load_freeradius_db_from_dotenv() {
+  local env_file="$APP_DIR/.env"
+  validate_dotenv_db
+  FR_DB_USER=$(dotenv_get DB_USER "$env_file") || die "DB_USER tidak ditemukan di .env"
+  FR_DB_PASSWORD=$(dotenv_get DB_PASSWORD "$env_file") || die "DB_PASSWORD tidak ditemukan di .env"
+  FR_DB_NAME=$(dotenv_get DB_NAME "$env_file") || die "DB_NAME tidak ditemukan di .env"
+  FR_DB_PORT=$(dotenv_get DB_PORT "$env_file")
+  FR_DB_PORT=${FR_DB_PORT:-5432}
+  [[ -n "$FR_DB_USER" && -n "$FR_DB_PASSWORD" && -n "$FR_DB_NAME" ]] \
+    || die "Kredensial database di .env tidak lengkap untuk FreeRADIUS."
+}
+
+test_freeradius_db_tcp() {
+  PGPASSWORD="$FR_DB_PASSWORD" psql -h 127.0.0.1 -p "$FR_DB_PORT" -U "$FR_DB_USER" -d "$FR_DB_NAME" \
+    -v ON_ERROR_STOP=1 -c 'SELECT 1;' \
+    || die "Koneksi PostgreSQL gagal untuk FreeRADIUS (${FR_DB_USER}@${FR_DB_NAME} @ 127.0.0.1:${FR_DB_PORT}). Periksa .env dan role PostgreSQL."
+}
+
+# Tulis mods-available/sql dari sql.orig + kredensial .env (tanpa sed pada baris terkomentar).
+freeradius_write_sql_from_dotenv() {
+  SQL_MOD="${RADDB}/mods-available/sql"
+  load_freeradius_db_from_dotenv
+  run_root test -f "$SQL_MOD" || die "Berkas mods-available/sql tidak ada. Pasang paket freeradius."
+  if [[ ! -f "${SQL_MOD}.orig" ]]; then
+    run_root cp -a "$SQL_MOD" "${SQL_MOD}.orig"
+    ok "Backup bawaan disimpan sekali: ${SQL_MOD}.orig"
+  fi
+  local py="$APP_DIR/deploy/freeradius/patch-sql-mod.py"
+  [[ -f "$py" ]] || die "Tidak menemukan ${py}"
+  run_root env RADDB="$RADDB" \
+    DB_USER="$FR_DB_USER" \
+    DB_PASSWORD="$FR_DB_PASSWORD" \
+    DB_NAME="$FR_DB_NAME" \
+    DB_PORT="$FR_DB_PORT" \
+    python3 "$py" || die "Gagal menulis ${SQL_MOD} dari .env"
+  run_root ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
+  run_root grep -Eq '^[[:space:]]*server[[:space:]]*=[[:space:]]*"127\.0\.0\.1"' "$SQL_MOD" \
+    || die "${SQL_MOD}: server 127.0.0.1 tidak terpasang."
+  run_root grep -Fq "login = \"${FR_DB_USER}\"" "$SQL_MOD" \
+    || die "${SQL_MOD}: login tidak cocok dengan DB_USER di .env."
+  run_root grep -Eq '^[[:space:]]*driver[[:space:]]*=[[:space:]]*"rlm_sql_postgresql"' "$SQL_MOD" \
+    || die "${SQL_MOD}: driver rlm_sql_postgresql tidak terpasang."
+  run_root grep -Eq '^[[:space:]]*read_clients[[:space:]]*=[[:space:]]*yes' "$SQL_MOD" \
+    || die "${SQL_MOD}: read_clients = yes tidak aktif."
+  test_freeradius_db_tcp
+  ok "mods-available/sql selaras dengan ${APP_DIR}/.env (${FR_DB_USER}@${FR_DB_NAME})."
+}
+
+freeradius_ensure_ssl_cert_group() {
+  if getent group ssl-cert >/dev/null; then
+    case " $(id -nG freerad) " in
+      *" ssl-cert "*) ;;
+      *)
+        run_root usermod -aG ssl-cert freerad
+        info "User freerad ditambahkan ke grup ssl-cert (akses baca sertifikat TLS snakeoil)."
+        ;;
+    esac
+  fi
+}
+
+# Setelah freeradius -XC sebagai root: kembalikan izin agar daemon freerad bisa start.
+freeradius_apply_runtime_permissions() {
+  SQL_MOD="${RADDB}/mods-available/sql"
+  CLIENTS_CONF="${RADDB}/clients.conf"
+  run_root chown root:freerad "$SQL_MOD" "$CLIENTS_CONF"
+  run_root chmod 640 "$SQL_MOD" "$CLIENTS_CONF"
+  if [[ -d /var/log/freeradius ]]; then
+    run_root chown -R freerad:freerad /var/log/freeradius
+  fi
+  if [[ -d /run/freeradius ]]; then
+    run_root chown -R freerad:freerad /run/freeradius
+  fi
+}
+
+freeradius_install_hotspot_mod() {
+  local hotspot_mod="$APP_DIR/deploy/freeradius/mods-available/hotspot_time"
+  if [[ -f "$hotspot_mod" ]]; then
+    run_root install -o freerad -g freerad -m 640 "$hotspot_mod" "${RADDB}/mods-available/hotspot_time"
+    run_root ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
+  fi
+}
+
+# Validasi → izin runtime → start service (urutan wajib agar tidak gagal diam-diam di Ubuntu 24.04).
+freeradius_finalize_and_start() {
+  local stamp log_root log_freerad
+  stamp=$(date +%Y%m%d-%H%M%S)
+  log_root="/tmp/freeradius-install-${stamp}.log"
+  log_freerad="/tmp/freeradius-install-freerad-${stamp}.log"
+
+  info "=== FreeRADIUS: konfigurasi dari .env, validasi, enable service ==="
+  freeradius_write_sql_from_dotenv
+  freeradius_install_hotspot_mod
+  dedupe_clients_conf
+
+  info "=== Validasi konfigurasi FreeRADIUS (freeradius -XC, sebagai root) ==="
+  if ! (cd / && run_root freeradius -XC) >"$log_root" 2>&1; then
+    warn "freeradius -XC GAGAL. 50 baris terakhir output:"
+    tail -n 50 "$log_root" >&2
+    die "Perbaiki konfigurasi FreeRADIUS. Log lengkap: $log_root"
+  fi
+
+  freeradius_ensure_ssl_cert_group
+  freeradius_apply_runtime_permissions
+
+  info "=== Validasi ExecStartPre (freeradius -Cx, user freerad) ==="
+  if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout) >"$log_freerad" 2>&1; then
+    warn "freeradius -Cx sebagai user freerad GAGAL. 50 baris terakhir:"
+    tail -n 50 "$log_freerad" >&2
+    die "Cek izin baca file config untuk user freerad. Log: $log_freerad"
+  fi
+  ok "freeradius -XC dan -Cx (user freerad) lulus."
+
+  run_root pkill -9 freeradius 2>/dev/null || true
+  run_root systemctl enable freeradius
+  if ! run_root systemctl restart freeradius; then
+    warn "freeradius gagal dijalankan. 40 baris terakhir journalctl:"
+    run_root journalctl -u freeradius -n 40 --no-pager >&2 || true
+    if run_root test -f /var/log/freeradius/radius.log; then
+      warn "30 baris terakhir /var/log/freeradius/radius.log:"
+      run_root tail -n 30 /var/log/freeradius/radius.log >&2 || true
+    fi
+    die "Gagal mengaktifkan FreeRADIUS."
+  fi
+  ok "FreeRADIUS aktif."
+}
+
 if [[ ! -f "$APP_DIR/server.js" || ! -f "$APP_DIR/frontend/package.json" ]]; then
   die "Jalankan script di folder clone billing (ada server.js dan frontend/package.json)."
 fi
@@ -500,28 +641,6 @@ dedupe_clients_conf() {
   rm -f "$nas_list" "$dedup_tmp"
 }
 
-# Validasi konfigurasi FreeRADIUS sebelum service dijalankan. Dua pemeriksaan:
-#   1. freeradius -XC sebagai root (sesuai permintaan).
-#   2. freeradius -Cx sebagai user freerad, persis seperti ExecStartPre di unit systemd.
-#      Config yang hanya terbaca root lolos tahap 1 tetapi membuat service gagal start.
-validate_freeradius_config() {
-  local log_root="/tmp/freeradius-install-${STAMP}.log"
-  local log_freerad="/tmp/freeradius-install-freerad-${STAMP}.log"
-  info "=== Validasi konfigurasi FreeRADIUS (freeradius -XC) ==="
-  if ! (cd / && run_root freeradius -XC) >"$log_root" 2>&1; then
-    warn "freeradius -XC GAGAL. 50 baris terakhir output:"
-    tail -n 50 "$log_root" >&2
-    die "Perbaiki konfigurasi FreeRADIUS di atas. Log lengkap: $log_root"
-  fi
-  # Tanpa -g: flag -g menghapus grup tambahan, sedangkan systemd (User=freerad) tetap memakainya.
-  if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout) >"$log_freerad" 2>&1; then
-    warn "freeradius -Cx sebagai user freerad GAGAL (sama seperti ExecStartPre). 50 baris terakhir:"
-    tail -n 50 "$log_freerad" >&2
-    die "Cek izin baca file config untuk user freerad. Log lengkap: $log_freerad"
-  fi
-  ok "freeradius -XC dan -Cx (user freerad) lulus."
-}
-
 info "=== FreeRADIUS + freeradius-postgresql ==="
 apt_get install -y freeradius freeradius-postgresql
 if dpkg -s freeradius-mysql >/dev/null 2>&1; then
@@ -575,65 +694,18 @@ END\$\$;
 SQL
 
 SQL_MOD="${RADDB}/mods-available/sql"
-STAMP=$(date +%Y%m%d-%H%M%S)
-run_root cp -a "$SQL_MOD" "${SQL_MOD}.bak.${STAMP}"
-
-info "=== mods-enabled/sql → PostgreSQL ==="
-run_root sed -i \
-  -e 's/^[[:space:]]*dialect[[:space:]]*=.*/\tdialect = "postgresql"/' \
-  -e 's/^[[:space:]]*driver[[:space:]]*=.*/\tdriver = "rlm_sql_postgresql"/' \
-  "$SQL_MOD"
-
-RAD_ESC_PASS=$(freeradius_escape "$DB_PASSWORD")
-run_root sed -i \
-  -e 's/^[[:space:]]*server[[:space:]]*=.*/\tserver = "localhost"/' \
-  -e 's/^[[:space:]]*port[[:space:]]*=.*/\tport = 5432/' \
-  -e "s/^[[:space:]]*login[[:space:]]*=.*/\tlogin = \"${DB_USER}\"/" \
-  -e "s/^[[:space:]]*password[[:space:]]*=.*/\tpassword = \"${RAD_ESC_PASS}\"/" \
-  -e "s/^[[:space:]]*radius_db[[:space:]]*=.*/\tradius_db = \"${DB_NAME}\"/" \
-  "$SQL_MOD"
-
-run_root ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
-
-HOTSPOT_MOD="$APP_DIR/deploy/freeradius/mods-available/hotspot_time"
-if [[ -f "$HOTSPOT_MOD" ]]; then
-  run_root install -o freerad -g freerad -m 640 "$HOTSPOT_MOD" "${RADDB}/mods-available/hotspot_time"
-  run_root ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
-fi
+CLIENTS_CONF="${RADDB}/clients.conf"
 
 info "=== clients.conf (MikroTik / NAS) ==="
 # Tidak ada client catch-all (0.0.0.0/0). Setiap router ditambahkan lewat menu Router di web,
 # lalu disinkronkan otomatis ke tabel nas (lihat docs/MULTI_NAS.md). Hapus sisa blok
 # install lama bila ada, supaya NAS yang tidak terdaftar ditolak.
-CLIENTS_CONF="${RADDB}/clients.conf"
 if run_root grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
   run_root sed -i "/# --- ${CLIENTS_MARKER} ---/,/# --- ${CLIENTS_MARKER}-END ---/d" "$CLIENTS_CONF"
   info "Blok catch-all lama (${CLIENTS_MARKER}) dihapus dari clients.conf."
 fi
 
-dedupe_clients_conf
-
-# Daemon freerad (User=freerad di unit systemd) harus bisa membaca kedua file ini.
-# Berisi password DB (mods-available/sql) dan secret NAS (clients.conf), jadi bukan world-readable.
-run_root chown root:freerad "$SQL_MOD" "$CLIENTS_CONF"
-run_root chmod 640 "$SQL_MOD" "$CLIENTS_CONF"
-
-# Modul eap (TLS) membaca /etc/ssl/private/ssl-cert-snakeoil.key (root:ssl-cert 640). Tanpa keanggotaan
-# grup ssl-cert, freerad gagal inisialisasi eap dan service tidak bisa start (terlihat di freeradius -Cx).
-if getent group ssl-cert >/dev/null; then
-  case " $(id -nG freerad) " in
-    *" ssl-cert "*) ;;
-    *)
-      run_root usermod -aG ssl-cert freerad
-      info "User freerad ditambahkan ke grup ssl-cert (akses baca sertifikat TLS snakeoil)."
-      ;;
-  esac
-fi
-
-# Daemon freerad (User=freerad) menulis log di /var/log/freeradius. Bila dimiliki root, start gagal.
-if [[ -d /var/log/freeradius ]]; then
-  run_root chown -R freerad:freerad /var/log/freeradius
-fi
+# mods-available/sql ditulis dari .env di freeradius_finalize_and_start (setelah .env & migrasi).
 
 # =============================================================================
 # 5. Node.js 22, npm, backend, frontend build, migrasi & seeder
@@ -840,13 +912,7 @@ fi
 run_root ufw --force enable || true
 run_root ufw reload || true
 
-validate_freeradius_config
-run_root systemctl enable freeradius
-if ! run_root systemctl restart freeradius; then
-  warn "freeradius gagal dijalankan. 40 baris terakhir journalctl:"
-  run_root journalctl -u freeradius -n 40 --no-pager >&2 || true
-  die "Gagal mengaktifkan FreeRADIUS."
-fi
+freeradius_finalize_and_start
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
 # Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)

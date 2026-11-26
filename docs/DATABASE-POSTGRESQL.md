@@ -4,7 +4,7 @@ Web billing memakai **PostgreSQL** lewat driver `pg` dengan lapisan kompatibilit
 
 ## Instalasi baru
 
-Jalankan `./install.sh` di server Ubuntu/Debian. Installer:
+Jalankan `./install.sh` di server Ubuntu/Debian (root atau user + `sudo` — lihat [`INSTALL.md`](./INSTALL.md)). Installer:
 
 1. Memasang PostgreSQL (paket distro) — **bukan** MariaDB/MySQL
 2. Memasang FreeRADIUS dengan `freeradius-postgresql` (SQL → database billing)

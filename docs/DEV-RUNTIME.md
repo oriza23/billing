@@ -2,6 +2,8 @@
 
 Dokumen ini untuk **developer** dan **agen AI** yang menyentuh server billing. Baca sebelum menyarankan `node server.js`, `npm run dev`, atau `systemctl restart billing`.
 
+**Instalasi pertama kali di VPS (Debian/Ubuntu, root atau non-root):** panduan lengkap di [`INSTALL.md`](./INSTALL.md), bukan di file ini.
+
 ## Ringkasan
 
 | Mode | Port | Cara jalan | Start / stop / restart |
@@ -52,7 +54,7 @@ sudo systemctl restart billing
 3. **Jangan** `systemctl restart billing` saat user sengaja menjalankan manual di terminal tanpa install dev — cek `ss -tlnp sport = :5000` / proses di terminal dulu.
 4. Setelah mengubah kode **backend** saja: `sudo systemctl restart billing` cukup; setelah mengubah kode frontend Vite, restart yang sama memuat ulang dev server.
 5. Setelah `npm run build` dan ingin uji satu port: hentikan dev, jalankan `npm start` (hanya 5000 + `dist`) — itu **bukan** systemd dev.
-6. **Produksi nanti:** `sudo USE_PM2=1 ./install.sh` atau `sudo deploy/install-service.sh`; pulihkan unit dari `/etc/systemd/system/billing.service.production.bak` bila perlu. Jangan pasang `install-dev-service.sh` di produksi.
+6. **Produksi nanti:** ikuti [`INSTALL.md`](./INSTALL.md) (`USE_PM2=1 ./install.sh` atau `deploy/install-service.sh`); pulihkan unit dari `/etc/systemd/system/billing.service.production.bak` bila perlu. Jangan pasang `install-dev-service.sh` di produksi.
 
 ## Satu port vs dua port
 

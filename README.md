@@ -37,8 +37,7 @@ Saat development, backend dapat dijalankan langsung dengan Node.js di port **500
 - [Struktur proyek](#struktur-proyek)
 - [Pengembangan lokal](#pengembangan-lokal-nodejs-langsung)
 - [Diagram alur installer](#diagram-alur-installer-installsh)
-- [Deployment server](#deployment-server)
-- [Input install.sh](#input-yang-diminta-installsh)
+- [Deployment server](#deployment-server) · panduan lengkap [`docs/INSTALL.md`](docs/INSTALL.md)
 - [Kebutuhan sistem & pasca-instalasi](#kebutuhan-sistem--pasca-instalasi)
 - [Panduan MikroTik NAS via VPN CHR](#panduan-konfigurasi-mikrotik-nas-router-klien)
 - [Dokumentasi lanjutan](#dokumentasi-lanjutan)
@@ -177,75 +176,27 @@ Mode langsung ini cocok untuk development. Node melayani HTTP pada port `5000`; 
 
 ---
 
-## Diagram alur installer (`install.sh`)
-
-```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'background': '#ffffff', 'lineColor': '#374151'}}}%%
-graph TD
-  A([Clone repo]) --> B["Input kredensial\nDB · Web · RADIUS"]
-  B --> C["Setup OS\nNginx opsional"]
-  C --> D["PostgreSQL\nrole + database"]
-  D --> E["FreeRADIUS\nimpor skema SQL"]
-  E --> F["Konfigurasi SQL + clients.conf"]
-  F --> G["Node.js 22 + npm\nbackend + migrasi"]
-  G --> H["Build React frontend"]
-  H --> V["Paket VPN client + helper + sudoers\nWireGuard · OpenVPN · SSTP · L2TP"]
-  V --> I["Jalankan Node langsung\nPM2/Nginx opsional"]
-  I --> J([Selesai])
-
-  classDef raniahApp fill:#1e3a8a,stroke:#172554,color:#ffffff,stroke-width:2px
-  classDef raniahExt fill:#f3f4f6,stroke:#374151,color:#111827,stroke-width:2px
-
-  class B,C,D,E,F,G,H,V,I raniahApp
-  class A,J raniahExt
-```
+Diagram alur `install.sh` (clone → DB → RADIUS → build → VPN helper → PM2 opsional): lihat [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ---
 
 ## Deployment server
 
-### Prasyarat
+Panduan instalasi lengkap (Debian/Ubuntu, user **root** dan **non-root**): **[`docs/INSTALL.md`](docs/INSTALL.md)**.
 
-- **OS:** Debian 11 atau Ubuntu 22.04 LTS ke atas.
-- **Node.js:** 22.x.
-- PostgreSQL dan akses root/sudo untuk installer.
-- Koneksi internet dan port layanan yang dibutuhkan tidak bentrok.
-
-### Perintah (repositori resmi)
-
-Clone dari **[github.com/oriza23/billing](https://github.com/oriza23/billing)**:
+Ringkas — clone & jalankan (user non-root, disarankan):
 
 ```bash
-sudo mkdir -p /var/www
-cd /var/www
+sudo mkdir -p /var/www && cd /var/www
 sudo git clone https://github.com/oriza23/billing.git billing
 cd billing
-chmod +x install.sh scripts/setup-admin.js
+sudo chmod +x install.sh scripts/setup-admin.js
+./install.sh
 ```
 
-> `git clone` memakai URL `.../billing.git` (format standar Git). Halaman repo di browser: **https://github.com/oriza23/billing**
+Login `root` atau ingin `chown` setelah clone: lihat [`docs/INSTALL.md`](docs/INSTALL.md). Produksi PM2: `USE_PM2=1 ./install.sh` (detail di dokumen yang sama).
 
-### Instalasi server (default Node langsung)
-
-Secara default installer menyiapkan PostgreSQL, FreeRADIUS, Node.js 22.x, npm 12.x, dependensi backend/frontend, build React, serta paket VPN client untuk menu Koneksi VPN (`wireguard-tools`, `openvpn`, `sstp-client`, `xl2tpd`, `ppp`, dan `strongswan-swanctl` + `charon-systemd` untuk L2TP/IPsec) beserta helper root dan sudoers-nya. PM2 dan Nginx tidak dipasang; setelah instalasi selesai, jalankan backend secara manual:
-
-```bash
-sudo ./install.sh
-cd /var/www/billing
-npm start
-```
-
-### Deployment produksi dengan PM2 dan Nginx
-
-Aktifkan kedua komponen secara eksplisit:
-
-```bash
-sudo USE_PM2=1 USE_NGINX=1 ./install.sh
-```
-
-Nginx menjadi reverse proxy pada port 80 dan PM2 menjaga proses backend tetap berjalan. Installer belum mengatur sertifikat TLS; HTTPS memerlukan konfigurasi sertifikat terpisah.
-
-Untuk memakai PM2 tanpa Nginx, jalankan `sudo USE_PM2=1 ./install.sh`. Untuk Node langsung tanpa kedua komponen, gunakan default atau tetapkan `USE_PM2=0 USE_NGINX=0`. Akses langsung menggunakan `http://IP-SERVER:5000`.
+Input interaktif, variabel lingkungan, verifikasi, dan helper VPN: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### Hardening: service systemd tanpa root
 
@@ -267,35 +218,6 @@ Catatan keamanan tambahan:
 - `/api/system/health` berada di belakang `requireAuth`, sehingga monitoring eksternal perlu token JWT.
 - Untuk monitoring tanpa JWT tersedia `GET /healthz`: publik, hanya membalas `{ status: "ok" }` (200) atau `{ status: "degraded" }` (503) tanpa detail internal. Set `HEALTH_TOKEN` dan kirim header `X-Health-Token` bila ingin detail database/RADIUS (latensi, state layanan).
 
-
-### Verifikasi
-
-```bash
-sudo systemctl status postgresql freeradius --no-pager
-# Jika USE_NGINX=1:
-sudo systemctl status nginx --no-pager
-# Jika USE_PM2=1:
-pm2 ls
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
-```
-
----
-
-## Input yang diminta `install.sh`
-
-| Prompt | Variabel | Default | Catatan |
-|--------|----------|---------|---------|
-| Nama Database | `DB_NAME` | `orizabil` | PostgreSQL billing + RADIUS |
-| Username DB | `DB_USER` | `oriza` | Role PostgreSQL |
-| Password DB | `DB_PASS` | acak | Enter = otomatis |
-| Username Web Admin | `WEB_ADMIN` | `admin` | Login panel |
-| Password Web Admin | `WEB_PASS` | — | **Wajib**, min. 8 karakter |
-| RADIUS Secret | `RADIUS_SECRET` | acak | Secret MikroTik ↔ FreeRADIUS |
-| Nama lengkap admin | — | = WEB_ADMIN | Profil superadmin |
-| Domain/IP reverse proxy | `server_name` | `_` | Hanya jika `USE_NGINX=1` |
-| Lanjut? | — | `N` | Ketik `y` untuk melanjutkan |
-
-Variabel lingkungan opsional (tanpa prompt): `APP_PORT`, `USE_NGINX`, `USE_PM2`, `GENIEACS_UI_PORT`, `GENIEACS_CWMP_PORT`, `GENIEACS_FS_PORT`, `GENIEACS_OPEN_NBI`, dan `VPN_SUBNET` (subnet tunnel VPN untuk aturan UFW, default `10.210.0.0/24`, kosongkan untuk melewati; harus CIDR IPv4 prefix `/16`–`/32`), mis. `sudo VPN_SUBNET=10.99.0.0/24 ./install.sh`.
 
 ---
 
@@ -568,6 +490,8 @@ Untuk topologi VPN hub-and-spoke, ikuti [Panduan Konfigurasi MikroTik NAS (Route
 
 | Dokumen | Isi |
 |---------|-----|
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Instalasi server (`install.sh`), Debian/Ubuntu, root & non-root |
+| [`docs/DEV-RUNTIME.md`](docs/DEV-RUNTIME.md) | Mode dev (systemd + Vite) vs produksi |
 | [`docs/DATABASE-POSTGRESQL.md`](docs/DATABASE-POSTGRESQL.md) | PostgreSQL & variabel lingkungan |
 | [`docs/MIGRASI-MARIADB-KE-POSTGRESQL.md`](docs/MIGRASI-MARIADB-KE-POSTGRESQL.md) | Migrasi legacy |
 | [`deploy/freeradius/README.md`](deploy/freeradius/README.md) | Modul FreeRADIUS |

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — RANIAH.NET ISP Billing System (Utama)
-# Setup server: Debian 11 / Ubuntu 22.04+ (termasuk Ubuntu 24.04)
+# Setup server: Ubuntu 22.04 / 24.04 dan Debian 12 / 13 (atau turunan Debian lain yang ID_LIKE=debian).
+# Dijalankan sebagai root (LXC/VPS) ATAU user biasa bersudo (ubuntu, debian, dst.). Aman diulang (idempoten).
 #
 # Stack: PostgreSQL · FreeRADIUS (PostgreSQL) · Node.js 22 · React/Vite
 # Repo: https://github.com/oriza23/billing
@@ -10,16 +11,22 @@
 # Frontend: frontend/ (React + Vite build → frontend/dist, dilayani Express).
 # Default: proses dijalankan PM2 dengan nama "billing" (port 5000). Nginx hanya bila USE_NGINX=1.
 #
+# Kredensial DB: .env (/var/www/billing/.env) adalah sumber kebenaran tunggal untuk PostgreSQL,
+# FreeRADIUS, dan backend. Dokumentasi: docs/INSTALL.md
 # MariaDB: tidak dipasang. Proyek acs-standalone (jika ada) memakai installer sendiri.
 # =============================================================================
 set -euo pipefail
 
-# APT non-interaktif: tanpa dialog debconf, tanpa prompt needrestart / "Pending kernel upgrade".
+# Debian sering tidak menyertakan /usr/sbin di PATH user non-root (runuser, visudo, ufw, sysctl,
+# freeradius tidak ditemukan). APT non-interaktif: tanpa dialog debconf dan prompt needrestart.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Port eksplisit dari environment menang atas PORT di .env lama; bila tidak diset, .env dipertahankan.
+APP_PORT_FROM_ENV="${APP_PORT:-}"
 APP_PORT="${APP_PORT:-5000}"
 USE_NGINX="${USE_NGINX:-0}"
 USE_PM2="${USE_PM2:-1}"
@@ -38,6 +45,9 @@ VPN_SUBNET="${VPN_SUBNET-10.210.0.0/24}"
 RADDB="${RADDB:-/etc/freeradius/3.0}"
 RADIUS_SCHEMA="${RADIUS_SCHEMA:-${RADDB}/mods-config/sql/main/postgresql/schema.sql}"
 CLIENTS_MARKER="BEGIN-ORIZABIL-BILLING-INSTALL"
+SQL_MOD="${RADDB}/mods-available/sql"
+CLIENTS_CONF="${RADDB}/clients.conf"
+NPM_REGISTRY="https://registry.npmjs.org/"
 
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
@@ -45,29 +55,50 @@ CYAN='\033[1;36m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-# Dua mode: root langsung, atau user biasa (mis. ubuntu) yang punya akses sudo.
-RUN_USER=$(id -un)
-RUN_GROUP=$(id -gn)
-if [[ "$(id -u)" -eq 0 ]]; then
-  IS_ROOT=1
-  APP_USER="${SUDO_USER:-root}"
-else
-  IS_ROOT=0
-  APP_USER="$RUN_USER"
-fi
-APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6)
-
-# Pemilik proyek (node_modules, .env, frontend/dist) dan user PM2. Dengan sudo, SUDO_USER adalah user
-# asli (mis. ubuntu), bukan root. Di login root langsung, targetnya root.
-TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
-TARGET_GROUP=$(id -gn "$TARGET_USER")
-TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
-[[ -n "$TARGET_HOME" ]] || { echo "User target ${TARGET_USER} tidak ditemukan." >&2; exit 1; }
-
 die() { echo -e "${RED}$*${NC}" >&2; exit 1; }
 info() { echo -e "${YELLOW}$*${NC}"; }
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${RED}$*${NC}"; }
+
+# -----------------------------------------------------------------------------
+# OS: Debian/Ubuntu dan turunannya (ID=ubuntu|debian atau ID_LIKE memuat "debian").
+# Tidak ada hardcode Ubuntu; semua perintah memakai apt-get + systemd.
+# -----------------------------------------------------------------------------
+detect_os() {
+  [[ -r /etc/os-release ]] || die "/etc/os-release tidak ada: OS tidak dikenali. Installer mendukung Debian/Ubuntu."
+  local id id_like version_id pretty
+  id=$(. /etc/os-release && printf '%s' "${ID:-}")
+  id_like=$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")
+  version_id=$(. /etc/os-release && printf '%s' "${VERSION_ID:-?}")
+  pretty=$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-$id}")
+  case " ${id} ${id_like} " in
+    *" ubuntu "*|*" debian "*) ;;
+    *) die "OS tidak didukung: ${pretty}. Installer mendukung Ubuntu 22.04/24.04, Debian 12/13 (atau ID_LIKE=debian)." ;;
+  esac
+  OS_ID="$id"
+  OS_VERSION_ID="$version_id"
+  OS_PRETTY="$pretty"
+  command -v apt-get >/dev/null 2>&1 || die "apt-get tidak ditemukan padahal OS ${pretty} dikenali sebagai Debian/Ubuntu."
+  command -v systemctl >/dev/null 2>&1 || die "systemctl tidak ditemukan. Installer membutuhkan systemd."
+}
+
+# -----------------------------------------------------------------------------
+# Dua mode eksekusi: root langsung (LXC/VPS), atau user biasa bersudo (ubuntu, debian, ...).
+#   IS_ROOT      : id -u == 0
+#   TARGET_USER  : pemilik proyek + user PM2. Lewat sudo = $SUDO_USER, selain itu $(id -un).
+# -----------------------------------------------------------------------------
+RUN_USER=$(id -un)
+if [[ "$(id -u)" -eq 0 ]]; then IS_ROOT=1; else IS_ROOT=0; fi
+
+TARGET_USER="${SUDO_USER:-$RUN_USER}"
+getent passwd "$TARGET_USER" >/dev/null 2>&1 || TARGET_USER="$RUN_USER"
+TARGET_GROUP=$(id -gn "$TARGET_USER")
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+[[ -n "$TARGET_HOME" ]] || die "Home user target ${TARGET_USER} tidak ditemukan."
+# User untuk sudoers layanan (restart postgresql/freeradius dan unit VPN) = user aplikasi yang sama.
+APP_USER="$TARGET_USER"
+
+detect_os
 
 # Non-root: pastikan sudo ada dan minta password SEKARANG, bukan gagal di tengah instalasi.
 # Timestamp sudo diperbarui di latar belakang karena apt upgrade bisa lebih lama dari 15 menit.
@@ -81,10 +112,10 @@ if [[ "$IS_ROOT" -eq 0 ]]; then
   trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
 fi
 
-# Jalankan perintah sebagai root: langsung bila sudah root, lewat sudo bila bukan.
+# Jalankan perintah sebagai root: langsung bila sudah root (tanpa sudo), lewat sudo bila bukan.
 # Dipakai untuk semua perintah sistem (apt-get, systemctl, ufw, menulis ke /etc, chown, visudo, ...).
 run_root() {
-  if [[ "$IS_ROOT" -eq 1 ]]; then
+  if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
   else
     sudo "$@"
@@ -97,19 +128,21 @@ apt_get() {
     apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
 }
 
-# Perintah PostgreSQL (psql, createuser, createdb, ...) selalu sebagai user postgres.
+# Perintah PostgreSQL (psql, createuser, ...) selalu sebagai user postgres lewat runuser (bukan sudo -u).
 # cd / agar tidak ada peringatan "could not change directory" dari folder milik user lain.
+# PGPORT dikirim eksplisit (sudo membuang environment) supaya cluster di port non-default tetap benar.
 run_postgres() {
-  (cd / && run_root runuser -u postgres -- "$@")
+  (cd / && run_root env PGPORT="${DB_PORT:-5432}" runuser -u postgres -- "$@")
 }
 
 # Perintah yang harus berjalan sebagai user target (npm install, build, migrasi, PM2), bukan root.
-# Dengan sudo, runuser menjaga PATH dan HOME tetap milik user target (npm config, ~/.pm2).
+# Sudah sebagai TARGET_USER: jalankan langsung. Berbeda (mis. skrip berjalan sebagai root via sudo):
+# turun ke TARGET_USER lewat runuser dengan HOME dan PATH milik target (npm config, ~/.pm2).
 run_as_target() {
-  if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
-    runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" PATH="$PATH" "$@"
-  else
+  if [[ "$(id -un)" == "$TARGET_USER" ]]; then
     env HOME="$TARGET_HOME" "$@"
+  else
+    run_root runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" PATH="$PATH" "$@"
   fi
 }
 
@@ -117,6 +150,10 @@ run_as_target() {
 own_app_dir() {
   run_root chown -R "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR"
 }
+
+# Paket prasyarat dasar. Debian minimal/netinst sering tidak menyertakannya, dan tahap berikutnya
+# (curl NodeSource, runuser/visudo, pkill, ss/ip, lsb_release) bergantung padanya.
+BASE_PACKAGES=(ca-certificates curl gnupg sudo procps psmisc iproute2 lsb-release)
 
 # Node.js minimal v22 (LTS) dan npm wajib ada sebelum tahap npm install / npm run build.
 NODE_MIN_MAJOR=22
@@ -158,13 +195,6 @@ sql_escape_pg() {
   printf '%s' "$value"
 }
 
-freeradius_escape() {
-  local value=$1
-  value=${value//\\/\\\\}
-  value=${value//\"/\\\"}
-  printf '%s' "$value"
-}
-
 # Nilai .env yang aman untuk karakter khusus (# spasi $ dan sejenisnya).
 dotenv_quote() {
   local v=$1
@@ -174,53 +204,28 @@ dotenv_quote() {
 }
 
 generate_db_password() {
-  # 32 karakter hex (128 bit), memenuhi syarat minimal 20 karakter.
+  # 32 karakter hex (128 bit), alfanumerik sehingga aman di .env, FreeRADIUS, dan URL.
   openssl rand -hex 16
 }
 
+# Karakter yang diizinkan untuk DB_PASSWORD (harus sama dengan PASSWORD_RE di deploy/freeradius/write-sql-mod.js).
+# "$ \ " ' ` # % spasi" sengaja dilarang: "$"/"%" memicu ekspansi di config FreeRADIUS, sisanya perlu escape
+# yang berbeda-beda di .env, FreeRADIUS, dan DATABASE_URL, dan itulah sumber password tidak sinkron.
+DB_PASSWORD_RE='^[A-Za-z0-9._@+=:,!~^*/-]{8,}$'
+
 assert_db_password_ready() {
-  [[ -n "${DB_PASSWORD:-}" ]] || die "DB_PASSWORD kosong. Ulangi input password database atau biarkan kosong agar dibuat otomatis."
-  [[ "$DB_PASSWORD" != *$'\n'* ]] || die "DB_PASSWORD tidak boleh mengandung baris baru."
-  (( ${#DB_PASSWORD} >= 8 )) || die "Password database minimal 8 karakter."
+  [[ -n "${DB_PASSWORD:-}" ]] || die "DB_PASSWORD kosong. Biarkan kosong saat diminta agar dibuat otomatis (openssl rand -hex 16)."
+  [[ "$DB_PASSWORD" =~ $DB_PASSWORD_RE ]] \
+    || die "DB_PASSWORD tidak valid: minimal 8 karakter dari A-Z a-z 0-9 . _ @ + = : , ! ~ ^ * / - (tanpa spasi, \$ \\ \" ' # %). Buat otomatis: openssl rand -hex 16"
 }
 
-# URL postgres:// untuk alat eksternal (psql, backup). User, password, dan nama DB di-encode.
+# URL postgres:// untuk alat eksternal (psql, backup). User, password, dan nama DB di-encode (tanpa python).
 build_database_url() {
-  DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" DB_NAME="$DB_NAME" DB_PORT="5432" python3 - <<'PY'
-import os, urllib.parse
-user = urllib.parse.quote(os.environ["DB_USER"], safe="")
-password = urllib.parse.quote(os.environ["DB_PASSWORD"], safe="")
-name = urllib.parse.quote(os.environ["DB_NAME"], safe="")
-port = os.environ.get("DB_PORT", "5432")
-host = os.environ.get("DB_HOST", "localhost")
-print(f"postgresql://{user}:{password}@{host}:{port}/{name}")
-PY
-}
-
-# Wajib sebelum node server.js / migrasi: file .env ada dan DB_PASSWORD tidak kosong (bukan string kosong di Node).
-validate_dotenv_db() {
-  local env_file="$APP_DIR/.env"
-  [[ -f "$env_file" ]] || die "File .env tidak ada di ${APP_DIR}. Tahap penulisan .env gagal atau dilewati."
-  local line val
-  line=$(grep -E '^DB_PASSWORD=' "$env_file" | tail -1) || true
-  [[ -n "$line" ]] || die "Baris DB_PASSWORD tidak ditemukan di .env."
-  val="${line#DB_PASSWORD=}"
-  val="${val%\"}"
-  val="${val#\"}"
-  val="${val%\'}"
-  val="${val#\'}"
-  [[ -n "$val" ]] || die "DB_PASSWORD di .env kosong. Periksa tahap PostgreSQL (role/password) dan penulisan .env."
-  ( cd "$APP_DIR" && node -e "
-const path=require('path');
-require('./backend/load_env')(path.join(process.cwd(),'.env'));
-const p=process.env.DB_PASSWORD;
-if(typeof p!=='string'||p.length===0){process.exit(2);}
-" ) || die "Node tidak bisa membaca DB_PASSWORD dari .env (harus string tidak kosong). Periksa isi ${env_file}."
-}
-
-test_db_login() {
-  PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'SELECT 1 AS ok;' \
-    || die "Login PostgreSQL gagal untuk ${DB_USER}@${DB_NAME}. Password role tidak cocok dengan DB_PASSWORD."
+  DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" DB_NAME="$DB_NAME" DB_PORT="$DB_PORT" node -e '
+const e = process.env;
+const q = (v) => encodeURIComponent(v).replace(/[!\x27()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+process.stdout.write(`postgresql://${q(e.DB_USER)}:${q(e.DB_PASSWORD)}@localhost:${e.DB_PORT}/${q(e.DB_NAME)}`);
+'
 }
 
 # Baca satu nilai dari .env billing (sumber kebenaran kredensial DB / FreeRADIUS).
@@ -237,53 +242,142 @@ dotenv_get() {
   printf '%s' "$val"
 }
 
-# Muat DB_* dari .env ke variabel FR_DB_* (sinkron dengan backend Node).
-load_freeradius_db_from_dotenv() {
+# Wajib sebelum node server.js / migrasi: file .env ada dan DB_PASSWORD tidak kosong (bukan string kosong di Node).
+validate_dotenv_db() {
   local env_file="$APP_DIR/.env"
-  validate_dotenv_db
-  FR_DB_USER=$(dotenv_get DB_USER "$env_file") || die "DB_USER tidak ditemukan di .env"
-  FR_DB_PASSWORD=$(dotenv_get DB_PASSWORD "$env_file") || die "DB_PASSWORD tidak ditemukan di .env"
-  FR_DB_NAME=$(dotenv_get DB_NAME "$env_file") || die "DB_NAME tidak ditemukan di .env"
-  FR_DB_PORT=$(dotenv_get DB_PORT "$env_file")
-  FR_DB_PORT=${FR_DB_PORT:-5432}
-  [[ -n "$FR_DB_USER" && -n "$FR_DB_PASSWORD" && -n "$FR_DB_NAME" ]] \
-    || die "Kredensial database di .env tidak lengkap untuk FreeRADIUS."
+  [[ -f "$env_file" ]] || die "File .env tidak ada di ${APP_DIR}. Tahap penulisan .env gagal atau dilewati."
+  local val
+  val=$(dotenv_get DB_PASSWORD "$env_file" || true)
+  [[ -n "$val" ]] || die "DB_PASSWORD di .env kosong atau tidak ada. Periksa tahap PostgreSQL (role/password) dan penulisan .env."
+  ( cd "$APP_DIR" && node -e "
+const path=require('path');
+require('./backend/load_env')(path.join(process.cwd(),'.env'));
+const p=process.env.DB_PASSWORD;
+if(typeof p!=='string'||p.length===0){process.exit(2);}
+" ) || die "Node tidak bisa membaca DB_PASSWORD dari .env (harus string tidak kosong). Periksa isi ${env_file}."
 }
 
-test_freeradius_db_tcp() {
-  PGPASSWORD="$FR_DB_PASSWORD" psql -h 127.0.0.1 -p "$FR_DB_PORT" -U "$FR_DB_USER" -d "$FR_DB_NAME" \
-    -v ON_ERROR_STOP=1 -c 'SELECT 1;' \
-    || die "Koneksi PostgreSQL gagal untuk FreeRADIUS (${FR_DB_USER}@${FR_DB_NAME} @ 127.0.0.1:${FR_DB_PORT}). Periksa .env dan role PostgreSQL."
+# Muat DB_USER/DB_PASSWORD/DB_NAME/DB_PORT dari .env. Dipanggil setiap kali nilai itu dipakai
+# (PostgreSQL, FreeRADIUS, uji koneksi) supaya tidak pernah ada salinan kedua yang menyimpang.
+load_db_from_dotenv() {
+  local env_file="$APP_DIR/.env"
+  [[ -f "$env_file" ]] || die "File .env tidak ada di ${APP_DIR}."
+  DB_USER=$(dotenv_get DB_USER "$env_file" || true)
+  DB_PASSWORD=$(dotenv_get DB_PASSWORD "$env_file" || true)
+  DB_NAME=$(dotenv_get DB_NAME "$env_file" || true)
+  DB_PORT=$(dotenv_get DB_PORT "$env_file" || true)
+  DB_PORT=${DB_PORT:-5432}
+  [[ "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || die "DB_USER di .env kosong/tidak valid."
+  [[ "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || die "DB_NAME di .env kosong/tidak valid."
+  [[ "$DB_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$DB_PORT >= 1 && 10#$DB_PORT <= 65535 )) || die "DB_PORT di .env tidak valid."
+  assert_db_password_ready
 }
 
-# Tulis mods-available/sql dari sql.orig + kredensial .env (tanpa sed pada baris terkomentar).
-freeradius_write_sql_from_dotenv() {
-  SQL_MOD="${RADDB}/mods-available/sql"
-  load_freeradius_db_from_dotenv
-  run_root test -f "$SQL_MOD" || die "Berkas mods-available/sql tidak ada. Pasang paket freeradius."
-  if [[ ! -f "${SQL_MOD}.orig" ]]; then
-    run_root cp -a "$SQL_MOD" "${SQL_MOD}.orig"
-    ok "Backup bawaan disimpan sekali: ${SQL_MOD}.orig"
+# Tulis/gabung .env. Dijalankan ulang tidak merusak: JWT_SECRET dipertahankan (sesi login tidak
+# putus), kredensial admin lama dipertahankan apa adanya, dan baris lain milik pengguna dibiarkan.
+write_dotenv() {
+  local env_file="$APP_DIR/.env" tmp jwt="" jwt_exp="" extra="" admin_lines="" db_url
+  local managed='PORT|DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME|DB_SERVICE|DATABASE_URL|JWT_SECRET|JWT_EXPIRES_IN|BOOTSTRAP_ADMIN_USERNAME|BOOTSTRAP_ADMIN_PASSWORD|SETUP_ADMIN_NAMA_LENGKAP|TRUST_PROXY'
+  if [[ -f "$env_file" ]]; then
+    jwt=$(dotenv_get JWT_SECRET "$env_file" || true)
+    jwt_exp=$(dotenv_get JWT_EXPIRES_IN "$env_file" || true)
+    extra=$(grep -Ev "^(${managed})=" "$env_file" || true)
+    if [[ "$EXISTING_ENV" -eq 1 && "$ENV_HAS_ADMIN" -eq 1 ]]; then
+      admin_lines=$(grep -E '^(BOOTSTRAP_ADMIN_USERNAME|BOOTSTRAP_ADMIN_PASSWORD|SETUP_ADMIN_NAMA_LENGKAP)=' "$env_file" || true)
+    fi
   fi
-  local py="$APP_DIR/deploy/freeradius/patch-sql-mod.py"
-  [[ -f "$py" ]] || die "Tidak menemukan ${py}"
-  run_root env RADDB="$RADDB" \
-    DB_USER="$FR_DB_USER" \
-    DB_PASSWORD="$FR_DB_PASSWORD" \
-    DB_NAME="$FR_DB_NAME" \
-    DB_PORT="$FR_DB_PORT" \
-    python3 "$py" || die "Gagal menulis ${SQL_MOD} dari .env"
-  run_root ln -sf ../mods-available/sql "${RADDB}/mods-enabled/sql"
+  [[ -n "$jwt" ]] || jwt=$(openssl rand -hex 48)
+  jwt_exp=${jwt_exp:-12h}
+  if [[ -z "$admin_lines" ]]; then
+    admin_lines="BOOTSTRAP_ADMIN_USERNAME=${WEB_ADMIN}
+BOOTSTRAP_ADMIN_PASSWORD=$(dotenv_quote "$WEB_PASS")
+SETUP_ADMIN_NAMA_LENGKAP=${WEB_ADMIN_NAMA}"
+  fi
+  db_url=$(build_database_url)
+  tmp=$(mktemp)
+  {
+    echo "PORT=${APP_PORT}"
+    echo "DB_HOST=localhost"
+    echo "DB_PORT=${DB_PORT}"
+    echo "DB_USER=${DB_USER}"
+    echo "DB_PASSWORD=$(dotenv_quote "$DB_PASSWORD")"
+    echo "DB_NAME=${DB_NAME}"
+    echo "DB_SERVICE=postgresql"
+    echo "DATABASE_URL=$(dotenv_quote "$db_url")"
+    echo "JWT_SECRET=${jwt}"
+    echo "JWT_EXPIRES_IN=${jwt_exp}"
+    printf '%s\n' "$admin_lines"
+    [[ "$USE_NGINX" != "1" ]] || echo "TRUST_PROXY=1"
+    [[ -z "$extra" ]] || printf '%s\n' "$extra"
+  } > "$tmp"
+  run_root install -m 0600 -o "$TARGET_USER" -g "$TARGET_GROUP" "$tmp" "$env_file"
+  rm -f "$tmp"
+  tmp=$(mktemp)
+  printf 'VITE_API_URL=\n' > "$tmp"
+  run_root install -m 0644 -o "$TARGET_USER" -g "$TARGET_GROUP" "$tmp" "$APP_DIR/frontend/.env.production"
+  rm -f "$tmp"
+}
+
+# Tunggu PostgreSQL menerima koneksi TCP di DB_PORT (cluster di port non-default tidak boleh diam-diam salah).
+wait_postgres_ready() {
+  local i
+  for i in $(seq 1 30); do
+    if pg_isready -q -h 127.0.0.1 -p "$DB_PORT" 2>/dev/null; then return 0; fi
+    sleep 1
+  done
+  die "PostgreSQL tidak menerima koneksi di 127.0.0.1:${DB_PORT}. Cek: pg_lsclusters · ss -tlnp | grep postgres. Samakan DB_PORT di .env dengan port cluster."
+}
+
+test_db_login() {
+  PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'SELECT 1 AS ok;' \
+    || die "Login PostgreSQL gagal untuk ${DB_USER}@${DB_NAME}. Password role tidak cocok dengan DB_PASSWORD."
+}
+
+# Uji TCP live dengan kredensial dari .env, sebelum FreeRADIUS disentuh. Tabel nas dibaca sebagai
+# DB_USER, persis seperti yang dilakukan FreeRADIUS (read_clients = yes) saat start.
+test_db_tcp_nas() {
+  load_db_from_dotenv
+  info "=== Uji koneksi TCP PostgreSQL: ${DB_USER}@127.0.0.1:${DB_PORT}/${DB_NAME} ==="
+  PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    -c "SELECT count(*) FROM nas;" \
+    || die "Koneksi TCP PostgreSQL gagal (${DB_USER}@127.0.0.1:${DB_PORT}/${DB_NAME}, SELECT count(*) FROM nas). FreeRADIUS tidak akan bisa start; periksa .env, role, dan kepemilikan tabel nas."
+  ok "PostgreSQL TCP OK: role, password .env, dan tabel nas konsisten."
+}
+
+# Sembunyikan password DB dari output diagnostik (stdin → stdout).
+mask_secret() {
+  local line
+  while IFS= read -r line; do
+    printf '%s\n' "${line//"$DB_PASSWORD"/***}"
+  done
+}
+
+# Tulis mods-available/sql dari .env memakai Node (bukan sed): blok koneksi aktif tanpa komentar,
+# tanpa duplikat, dengan backup bawaan sekali ke sql.orig.
+freeradius_write_sql_from_dotenv() {
+  load_db_from_dotenv
+  validate_dotenv_db
+  local writer="$APP_DIR/deploy/freeradius/write-sql-mod.js"
+  [[ -f "$writer" ]] || die "Tidak menemukan ${writer}"
+  run_root test -f "$SQL_MOD" || die "Berkas ${SQL_MOD} tidak ada. Pasang paket freeradius-postgresql."
+  run_root node "$writer" --env "$APP_DIR/.env" --raddb "$RADDB" || die "Gagal menulis ${SQL_MOD} dari .env"
+  # Modul sql harus aktif (symlink relatif, seperti bawaan paket).
+  run_root ln -sfn ../mods-available/sql "${RADDB}/mods-enabled/sql"
+  [[ "$(run_root readlink "${RADDB}/mods-enabled/sql")" == "../mods-available/sql" ]] \
+    || die "Symlink ${RADDB}/mods-enabled/sql -> ../mods-available/sql tidak terpasang."
+
+  # Verifikasi tegas: nilai aktif (bukan komentar) harus sesuai .env sebelum lanjut.
   run_root grep -Eq '^[[:space:]]*server[[:space:]]*=[[:space:]]*"127\.0\.0\.1"' "$SQL_MOD" \
-    || die "${SQL_MOD}: server 127.0.0.1 tidak terpasang."
-  run_root grep -Fq "login = \"${FR_DB_USER}\"" "$SQL_MOD" \
-    || die "${SQL_MOD}: login tidak cocok dengan DB_USER di .env."
+    || die "${SQL_MOD}: server = \"127.0.0.1\" tidak aktif."
+  run_root grep -Eq "^[[:space:]]*login[[:space:]]*=[[:space:]]*\"${DB_USER}\"" "$SQL_MOD" \
+    || die "${SQL_MOD}: login = \"${DB_USER}\" tidak aktif (tidak cocok dengan DB_USER di .env)."
+  run_root grep -Eq "^[[:space:]]*port[[:space:]]*=[[:space:]]*${DB_PORT}[[:space:]]*\$" "$SQL_MOD" \
+    || die "${SQL_MOD}: port = ${DB_PORT} tidak aktif."
   run_root grep -Eq '^[[:space:]]*driver[[:space:]]*=[[:space:]]*"rlm_sql_postgresql"' "$SQL_MOD" \
-    || die "${SQL_MOD}: driver rlm_sql_postgresql tidak terpasang."
+    || die "${SQL_MOD}: driver rlm_sql_postgresql tidak aktif."
   run_root grep -Eq '^[[:space:]]*read_clients[[:space:]]*=[[:space:]]*yes' "$SQL_MOD" \
     || die "${SQL_MOD}: read_clients = yes tidak aktif."
-  test_freeradius_db_tcp
-  ok "mods-available/sql selaras dengan ${APP_DIR}/.env (${FR_DB_USER}@${FR_DB_NAME})."
+  ok "mods-available/sql selaras dengan ${APP_DIR}/.env (${DB_USER}@${DB_NAME}:${DB_PORT}); mods-enabled/sql aktif."
 }
 
 freeradius_ensure_ssl_cert_group() {
@@ -298,70 +392,92 @@ freeradius_ensure_ssl_cert_group() {
   fi
 }
 
-# Setelah freeradius -XC sebagai root: kembalikan izin agar daemon freerad bisa start.
-freeradius_apply_runtime_permissions() {
-  SQL_MOD="${RADDB}/mods-available/sql"
-  CLIENTS_CONF="${RADDB}/clients.conf"
-  run_root chown root:freerad "$SQL_MOD" "$CLIENTS_CONF"
-  run_root chmod 640 "$SQL_MOD" "$CLIENTS_CONF"
-  if [[ -d /var/log/freeradius ]]; then
-    run_root chown -R freerad:freerad /var/log/freeradius
-  fi
-  if [[ -d /run/freeradius ]]; then
-    run_root chown -R freerad:freerad /run/freeradius
-  fi
-}
-
 freeradius_install_hotspot_mod() {
   local hotspot_mod="$APP_DIR/deploy/freeradius/mods-available/hotspot_time"
   if [[ -f "$hotspot_mod" ]]; then
     run_root install -o freerad -g freerad -m 640 "$hotspot_mod" "${RADDB}/mods-available/hotspot_time"
-    run_root ln -sf ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
+    run_root ln -sfn ../mods-available/hotspot_time "${RADDB}/mods-enabled/hotspot_time" 2>/dev/null || true
   fi
 }
 
-# Validasi → izin runtime → start service (urutan wajib agar tidak gagal diam-diam di Ubuntu 24.04).
-freeradius_finalize_and_start() {
-  local stamp log_root log_freerad
-  stamp=$(date +%Y%m%d-%H%M%S)
-  log_root="/tmp/freeradius-install-${stamp}.log"
-  log_freerad="/tmp/freeradius-install-freerad-${stamp}.log"
+# URUTAN WAJIB: izin dulu, baru validasi. Daemon berjalan sebagai User=freerad; berkas config yang
+# tidak terbaca freerad, atau log/run yang dimiliki root, membuat start gagal (status=1/FAILURE)
+# padahal pemeriksaan sebagai root lulus.
+freeradius_apply_runtime_permissions() {
+  run_root chown root:freerad "$SQL_MOD" "$CLIENTS_CONF"
+  run_root chmod 640 "$SQL_MOD" "$CLIENTS_CONF"
+  run_root mkdir -p /var/log/freeradius /run/freeradius
+  run_root chown -R freerad:freerad /var/log/freeradius /run/freeradius
+}
 
-  info "=== FreeRADIUS: konfigurasi dari .env, validasi, enable service ==="
+# Validasi HANYA sebagai freerad (sama dengan ExecStartPre systemd). Karena read_clients = yes, -Cx
+# juga membuka koneksi ke PostgreSQL dan membaca tabel nas, jadi ini tes start yang setara.
+# JANGAN pernah freeradius -X/-XC sebagai root di sini: itu membuat radius.log berpemilik root.
+freeradius_validate_as_freerad() {
+  local log
+  log=$(mktemp)
+  info "=== freeradius -Cx sebagai user freerad ==="
+  if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout -d "$RADDB") >"$log" 2>&1; then
+    warn "freeradius -Cx (user freerad) GAGAL. 40 baris terakhir:"
+    mask_secret < "$log" | tail -n 40 >&2
+    rm -f "$log"
+    die "Konfigurasi FreeRADIUS tidak valid untuk user freerad. Perbaiki lalu jalankan ulang install.sh."
+  fi
+  rm -f "$log"
+  ok "freeradius -Cx lulus sebagai freerad."
+}
+
+freeradius_diagnose() {
+  warn "=== DIAGNOSTIK FreeRADIUS gagal start ==="
+  echo "--- (a) 40 baris terakhir /var/log/freeradius/radius.log ---" >&2
+  if run_root test -f /var/log/freeradius/radius.log; then
+    run_root tail -n 40 /var/log/freeradius/radius.log 2>&1 | mask_secret >&2 || true
+  else
+    echo "(radius.log belum ada)" >&2
+  fi
+  echo "--- (b) baris aktif ${SQL_MOD} (password disembunyikan) ---" >&2
+  run_root grep -E '^[[:space:]]*(driver|dialect|server|port|login|radius_db|read_clients|client_table)[[:space:]]*=' "$SQL_MOD" >&2 || true
+  echo '	password = "***"' >&2
+  echo "--- (c) freeradius -f -l stdout -xx selama 3 detik sebagai freerad (40 baris terakhir) ---" >&2
+  run_root systemctl stop freeradius >/dev/null 2>&1 || true
+  run_root pkill -9 freeradius 2>/dev/null || true
+  (cd / && run_root timeout 3 runuser -u freerad -- freeradius -f -l stdout -xx -d "$RADDB" 2>&1 | mask_secret | tail -n 40) >&2 || true
+  run_root pkill -9 freeradius 2>/dev/null || true
+  # Menjalankan daemon manual bisa membuat berkas log baru; kembalikan kepemilikannya.
+  run_root chown -R freerad:freerad /var/log/freeradius /run/freeradius 2>/dev/null || true
+  echo "--- journalctl -u freeradius (20 baris) ---" >&2
+  run_root journalctl -u freeradius -n 20 --no-pager 2>&1 | mask_secret >&2 || true
+}
+
+freeradius_restart() {
+  run_root pkill -9 freeradius 2>/dev/null || true
+  run_root systemctl reset-failed freeradius >/dev/null 2>&1 || true
+  run_root systemctl enable freeradius
+  if ! run_root systemctl restart freeradius; then
+    freeradius_diagnose
+    die "Gagal mengaktifkan FreeRADIUS (systemctl restart freeradius)."
+  fi
+  # Type=notify sudah menunggu siap; jeda singkat menangkap crash tepat setelah start.
+  sleep 2
+  if ! run_root systemctl is-active --quiet freeradius; then
+    freeradius_diagnose
+    die "FreeRADIUS tidak active setelah restart."
+  fi
+  ok "FreeRADIUS aktif — uji akhir dengan Hotspot/PPP di MikroTik (secret = RADIUS_SECRET di .env / menu Router)."
+  echo -e "${CYAN}  Cek cepat:${NC} sudo systemctl status freeradius · sudo tail -f /var/log/freeradius/radius.log"
+  echo -e "${CYAN}  Panduan:${NC} docs/RADIUS-TEST-MIKROTIK.md"
+}
+
+# Tulis sql dari .env → client ganda → izin → validasi sebagai freerad → bersihkan sisa proses → restart.
+freeradius_configure_and_start() {
+  info "=== FreeRADIUS: konfigurasi dari .env, validasi, start ==="
   freeradius_write_sql_from_dotenv
   freeradius_install_hotspot_mod
   dedupe_clients_conf
-
-  info "=== Validasi konfigurasi FreeRADIUS (freeradius -XC, sebagai root) ==="
-  if ! (cd / && run_root freeradius -XC) >"$log_root" 2>&1; then
-    warn "freeradius -XC GAGAL. 50 baris terakhir output:"
-    tail -n 50 "$log_root" >&2
-    die "Perbaiki konfigurasi FreeRADIUS. Log lengkap: $log_root"
-  fi
-
   freeradius_ensure_ssl_cert_group
   freeradius_apply_runtime_permissions
-
-  info "=== Validasi ExecStartPre (freeradius -Cx, user freerad) ==="
-  if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout) >"$log_freerad" 2>&1; then
-    warn "freeradius -Cx sebagai user freerad GAGAL. 50 baris terakhir:"
-    tail -n 50 "$log_freerad" >&2
-    die "Cek izin baca file config untuk user freerad. Log: $log_freerad"
-  fi
-  ok "freeradius -XC dan -Cx (user freerad) lulus."
-
-  run_root pkill -9 freeradius 2>/dev/null || true
-  run_root systemctl enable freeradius
-  if ! run_root systemctl restart freeradius; then
-    warn "freeradius gagal dijalankan. 40 baris terakhir journalctl:"
-    run_root journalctl -u freeradius -n 40 --no-pager >&2 || true
-    if run_root test -f /var/log/freeradius/radius.log; then
-      warn "30 baris terakhir /var/log/freeradius/radius.log:"
-      run_root tail -n 30 /var/log/freeradius/radius.log >&2 || true
-    fi
-    die "Gagal mengaktifkan FreeRADIUS."
-  fi
-  ok "FreeRADIUS aktif."
+  freeradius_validate_as_freerad
+  freeradius_restart
 }
 
 if [[ ! -f "$APP_DIR/server.js" || ! -f "$APP_DIR/frontend/package.json" ]]; then
@@ -375,35 +491,66 @@ echo -e "${CYAN}=== RANIAH.NET — Installer Billing (PostgreSQL + FreeRADIUS + 
 echo
 
 # =============================================================================
-# 1. INPUT INTERAKTIF
+# 1. INPUT INTERAKTIF (atau pakai .env yang sudah ada)
 # =============================================================================
-read -r -p "Nama Database (DB_NAME) [orizabil]: " DB_NAME
-DB_NAME=${DB_NAME:-orizabil}
+# .env adalah sumber kebenaran tunggal DB_USER/DB_PASSWORD/DB_NAME/DB_PORT. Bila .env sudah ada
+# (jalankan ulang), nilai dibaca dari sana dan TIDAK ditanyakan lagi; password role PostgreSQL lalu
+# disinkronkan ke nilai itu (ALTER ROLE), sehingga DB, .env, dan FreeRADIUS tidak pernah berbeda.
+EXISTING_ENV=0
+ENV_HAS_ADMIN=0
+DB_PORT=5432
+WEB_ADMIN=""; WEB_PASS=""; WEB_ADMIN_NAMA=""
+own_app_dir   # .env lama (bila ada) harus terbaca oleh TARGET_USER
 
-read -r -p "Username DB (DB_USER) [oriza]: " DB_USER
-DB_USER=${DB_USER:-oriza}
+if [[ -f "$APP_DIR/.env" && -n "$(dotenv_get DB_PASSWORD "$APP_DIR/.env" || true)" ]]; then
+  EXISTING_ENV=1
+  load_db_from_dotenv
+  info ".env ditemukan di ${APP_DIR}: kredensial database dibaca dari .env (${DB_USER}@${DB_NAME}:${DB_PORT}), tidak ditanyakan lagi."
+  if [[ -z "$APP_PORT_FROM_ENV" ]]; then
+    ENV_PORT=$(dotenv_get PORT "$APP_DIR/.env" || true)
+    if [[ "$ENV_PORT" =~ ^[0-9]{2,5}$ ]]; then APP_PORT="$ENV_PORT"; fi
+  fi
+  ENV_ADMIN_USER=$(dotenv_get BOOTSTRAP_ADMIN_USERNAME "$APP_DIR/.env" || true)
+  ENV_ADMIN_PASS=$(dotenv_get BOOTSTRAP_ADMIN_PASSWORD "$APP_DIR/.env" || true)
+  if [[ -n "$ENV_ADMIN_USER" && -n "$ENV_ADMIN_PASS" ]]; then
+    ENV_HAS_ADMIN=1
+    WEB_ADMIN="$ENV_ADMIN_USER"
+    WEB_ADMIN_NAMA=$(dotenv_get SETUP_ADMIN_NAMA_LENGKAP "$APP_DIR/.env" || true)
+    WEB_ADMIN_NAMA=${WEB_ADMIN_NAMA:-$WEB_ADMIN}
+    info "Superadmin web (${WEB_ADMIN}) dipakai dari .env."
+  fi
+else
+  read -r -p "Nama Database (DB_NAME) [orizabil]: " DB_NAME
+  DB_NAME=${DB_NAME:-orizabil}
 
-read -r -s -p "Password DB (DB_PASSWORD) [Enter = otomatis]: " DB_PASSWORD
-echo
-if [[ -z "$DB_PASSWORD" ]]; then
-  DB_PASSWORD=$(generate_db_password)
-  ok "Password DB dibuat otomatis (${#DB_PASSWORD} karakter)."
+  read -r -p "Username DB (DB_USER) [oriza]: " DB_USER
+  DB_USER=${DB_USER:-oriza}
+
+  read -r -s -p "Password DB (DB_PASSWORD) [Enter = otomatis]: " DB_PASSWORD
+  echo
+  if [[ -z "$DB_PASSWORD" ]]; then
+    DB_PASSWORD=$(generate_db_password)
+    ok "Password DB dibuat otomatis (${#DB_PASSWORD} karakter)."
+  fi
+  assert_db_password_ready
 fi
-assert_db_password_ready
 
-echo
-read -r -p "Username Superadmin Web (WEB_ADMIN) [admin]: " WEB_ADMIN
-WEB_ADMIN=${WEB_ADMIN:-admin}
+if [[ "$ENV_HAS_ADMIN" -eq 0 ]]; then
+  echo
+  read -r -p "Username Superadmin Web (WEB_ADMIN) [admin]: " WEB_ADMIN
+  WEB_ADMIN=${WEB_ADMIN:-admin}
 
-read -r -s -p "Password Superadmin Web (WEB_PASS): " WEB_PASS
-echo
-if [[ -z "$WEB_PASS" ]]; then
-  die "WEB_PASS wajib diisi (minimal 8 karakter)."
+  read -r -s -p "Password Superadmin Web (WEB_PASS): " WEB_PASS
+  echo
+  if [[ -z "$WEB_PASS" ]]; then
+    die "WEB_PASS wajib diisi (minimal 8 karakter)."
+  fi
+
+  read -r -p "Nama lengkap Superadmin [${WEB_ADMIN}]: " WEB_ADMIN_NAMA
+  WEB_ADMIN_NAMA=${WEB_ADMIN_NAMA:-$WEB_ADMIN}
+  [[ "$WEB_ADMIN" =~ ^[A-Za-z0-9._-]{1,50}$ ]] || die "WEB_ADMIN tidak valid."
+  [[ ${#WEB_PASS} -ge 8 ]] || die "WEB_PASS minimal 8 karakter."
 fi
-
-
-read -r -p "Nama lengkap Superadmin [${WEB_ADMIN}]: " WEB_ADMIN_NAMA
-WEB_ADMIN_NAMA=${WEB_ADMIN_NAMA:-$WEB_ADMIN}
 
 if [[ "$USE_NGINX" == "1" ]]; then
   read -r -p "Domain / IP Nginx (server_name) [_]: " SERVER_NAME
@@ -412,18 +559,13 @@ else
   SERVER_NAME="_"
 fi
 
-if [[ ! "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
-  die "DB_NAME tidak valid."
-fi
-if [[ ! "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
-  die "DB_USER tidak valid."
-fi
-[[ "$WEB_ADMIN" =~ ^[A-Za-z0-9._-]{1,50}$ ]] || die "WEB_ADMIN tidak valid."
-[[ ${#WEB_PASS} -ge 8 ]] || die "WEB_PASS minimal 8 karakter."
+[[ "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || die "DB_NAME tidak valid."
+[[ "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || die "DB_USER tidak valid."
 
 echo
 info "Ringkasan:"
-echo "  DB         : PostgreSQL ${DB_NAME} (${DB_USER}@localhost:5432)"
+echo "  OS         : ${OS_PRETTY} · dijalankan sebagai ${RUN_USER} · user aplikasi/PM2: ${TARGET_USER}"
+echo "  DB         : PostgreSQL ${DB_NAME} (${DB_USER}@127.0.0.1:${DB_PORT})$([[ "$EXISTING_ENV" -eq 1 ]] && echo ' · dari .env')"
 echo "  Web admin  : ${WEB_ADMIN}"
 echo "  RADIUS     : NAS dari menu Router (sinkron ke tabel nas)"
 if [[ "$USE_NGINX" == "1" ]]; then
@@ -440,24 +582,23 @@ read -r -p "Lanjut instalasi? [y/N]: " CONFIRM
 CONFIRM=${CONFIRM:-N}
 [[ "$CONFIRM" =~ ^[yY] ]] || die "Instalasi dibatalkan."
 
-SUPERADMIN_USER="$WEB_ADMIN"
-SUPERADMIN_PASS="$WEB_PASS"
-SUPERADMIN_NAMA="$WEB_ADMIN_NAMA"
-
 # =============================================================================
 # 2. OS & dependensi
 # =============================================================================
-info "=== apt update & upgrade ==="
+info "=== apt update ==="
 apt_get update
+
+info "=== Paket prasyarat dasar: ${BASE_PACKAGES[*]} ==="
+apt_get install -y "${BASE_PACKAGES[@]}"
+hash -r
+
+info "=== apt upgrade ==="
 apt_get upgrade -y
 
-info "=== Paket dasar: curl, wget, git, PostgreSQL ==="
-apt_get install -y \
-  ca-certificates curl wget git openssl ufw \
-  postgresql postgresql-contrib \
-  build-essential
+info "=== Paket dasar: wget, git, openssl, ufw, PostgreSQL, build-essential ==="
+apt_get install -y wget git openssl ufw postgresql postgresql-contrib build-essential
 
-info "=== Node.js & npm (wajib sebelum build) ==="
+info "=== Node.js & npm (wajib sebelum .env dan build) ==="
 ensure_node
 
 # Paket VPN client untuk menu Sistem > Koneksi VPN (WireGuard / OpenVPN / SSTP / L2TP ke MikroTik CHR).
@@ -542,6 +683,7 @@ fi
 # =============================================================================
 info "=== PostgreSQL: role, database, hak akses ==="
 run_root systemctl enable --now postgresql
+wait_postgres_ready
 
 DB_USER_SQL=$(sql_escape_pg "$DB_USER")
 DB_PASSWORD_SQL=$(sql_escape_pg "$DB_PASSWORD")
@@ -566,6 +708,16 @@ SQL
 
 test_db_login
 ok "PostgreSQL: role ${DB_USER} dan database ${DB_NAME} siap (password terverifikasi)."
+
+# .env ditulis SEKARANG (sebelum FreeRADIUS) karena mods-available/sql dibangun dari .env. Sesudahnya
+# DB_* dibaca ulang dari .env: tidak ada salinan kedua yang bisa menyimpang.
+info "=== .env (backend + sumber kredensial FreeRADIUS) ==="
+own_app_dir
+write_dotenv
+load_db_from_dotenv
+validate_dotenv_db
+test_db_login
+ok ".env siap: ${APP_DIR}/.env (0600, ${TARGET_USER})."
 
 # =============================================================================
 # 4. FreeRADIUS + PostgreSQL
@@ -693,9 +845,6 @@ BEGIN
 END\$\$;
 SQL
 
-SQL_MOD="${RADDB}/mods-available/sql"
-CLIENTS_CONF="${RADDB}/clients.conf"
-
 info "=== clients.conf (MikroTik / NAS) ==="
 # Tidak ada client catch-all (0.0.0.0/0). Setiap router ditambahkan lewat menu Router di web,
 # lalu disinkronkan otomatis ke tabel nas (lihat docs/MULTI_NAS.md). Hapus sisa blok
@@ -705,7 +854,10 @@ if run_root grep -q "$CLIENTS_MARKER" "$CLIENTS_CONF" 2>/dev/null; then
   info "Blok catch-all lama (${CLIENTS_MARKER}) dihapus dari clients.conf."
 fi
 
-# mods-available/sql ditulis dari .env di freeradius_finalize_and_start (setelah .env & migrasi).
+# Uji TCP live (SELECT count(*) FROM nas) dengan kredensial dari .env, lalu baru FreeRADIUS disentuh:
+# sql dari .env → client ganda → izin → freeradius -Cx sebagai freerad → pkill sisa → enable + restart.
+test_db_tcp_nas
+freeradius_configure_and_start
 
 # =============================================================================
 # 5. Node.js 22, npm, backend, frontend build, migrasi & seeder
@@ -714,10 +866,10 @@ info "=== Verifikasi Node.js & npm ==="
 ensure_node
 
 # Registry npm wajib HTTPS. VPS dengan mirror HTTP bawaan gagal dengan EALLOWREMOTE. Diset untuk user
-# target (~/.npmrc) dan root (konfigurasi global), sebelum npm install apa pun.
-info "=== npm registry → https://registry.npmjs.org/ ==="
-NPM_REGISTRY="https://registry.npmjs.org/"
+# target (~/.npmrc), root (~root/.npmrc), dan global (/etc/npmrc), sebelum npm install apa pun.
+info "=== npm registry → ${NPM_REGISTRY} ==="
 run_as_target npm config set registry "$NPM_REGISTRY"
+run_root env HOME=/root npm config set registry "$NPM_REGISTRY"
 run_root npm config set --global registry "$NPM_REGISTRY"
 
 # Upgrade npm bersifat opsional: npm bawaan Node 22 sudah cukup untuk build.
@@ -727,40 +879,10 @@ hash -r
 node -v && npm -v
 
 # npm install / build dijalankan sebagai TARGET_USER, jadi folder proyek harus miliknya sebelum build.
+# .env sudah ditulis di bagian 3 (sebelum FreeRADIUS) dan tidak ditulis ulang di sini.
 info "=== Kepemilikan folder aplikasi → ${TARGET_USER}:${TARGET_GROUP} ==="
 own_app_dir
-
-JWT_SECRET=$(openssl rand -hex 48)
-DATABASE_URL=$(build_database_url)
-
-info "=== .env (backend / server.js) ==="
-assert_db_password_ready
-umask 077
-{
-  echo "PORT=${APP_PORT}"
-  echo "DB_HOST=localhost"
-  echo "DB_PORT=5432"
-  echo "DB_USER=${DB_USER}"
-  echo "DB_PASSWORD=$(dotenv_quote "$DB_PASSWORD")"
-  echo "DB_NAME=${DB_NAME}"
-  echo "DB_SERVICE=postgresql"
-  echo "DATABASE_URL=$(dotenv_quote "$DATABASE_URL")"
-  echo "JWT_SECRET=${JWT_SECRET}"
-  echo "JWT_EXPIRES_IN=12h"
-  echo "BOOTSTRAP_ADMIN_USERNAME=${WEB_ADMIN}"
-  echo "BOOTSTRAP_ADMIN_PASSWORD=$(dotenv_quote "$WEB_PASS")"
-  echo "SETUP_ADMIN_NAMA_LENGKAP=${WEB_ADMIN_NAMA}"
-  if [[ "$USE_NGINX" == "1" ]]; then
-    echo "TRUST_PROXY=1"
-  fi
-} > "$APP_DIR/.env"
-chmod 600 "$APP_DIR/.env"
-echo "VITE_API_URL=" > "$APP_DIR/frontend/.env.production"
-umask 022
-# .env ditulis oleh installer (root bila sudo): kembalikan kepemilikannya ke user target agar PM2 bisa membacanya.
-run_root chown "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR/.env" "$APP_DIR/frontend/.env.production"
 validate_dotenv_db
-test_db_login
 
 info "=== npm install backend (akar proyek, modul express dll.) ==="
 (cd "$APP_DIR" && run_as_target npm install --no-audit --registry="$NPM_REGISTRY")
@@ -837,6 +959,22 @@ if [[ "$USE_PM2" == "1" ]]; then
     run_root env PATH="$PATH" pm2 startup systemd -u "$TARGET_USER" --hp "$TARGET_HOME" \
       || warn "pm2 startup gagal. Jalankan manual: sudo env PATH=\$PATH pm2 startup systemd -u ${TARGET_USER} --hp ${TARGET_HOME}"
     run_as_target pm2 save
+    if run_root systemctl is-enabled --quiet "pm2-${TARGET_USER}.service" 2>/dev/null; then
+      ok "PM2 auto-start aktif: pm2-${TARGET_USER}.service (enabled)."
+    else
+      warn "pm2-${TARGET_USER}.service belum enabled; billing tidak otomatis hidup setelah reboot. Jalankan: sudo env PATH=\$PATH pm2 startup systemd -u ${TARGET_USER} --hp ${TARGET_HOME} && pm2 save"
+    fi
+    # Pastikan proses benar-benar melayani HTTP (bukan sekadar terdaftar di PM2).
+    PM2_HTTP_OK=0
+    for _ in $(seq 1 20); do
+      if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${APP_PORT}/"; then PM2_HTTP_OK=1; break; fi
+      sleep 1
+    done
+    if [[ "$PM2_HTTP_OK" -eq 1 ]]; then
+      ok "Billing menjawab di http://127.0.0.1:${APP_PORT}/ (PM2 online)."
+    else
+      warn "Billing belum menjawab di port ${APP_PORT}. Cek: pm2 logs billing --lines 50 (sebagai ${TARGET_USER})"
+    fi
   fi
 else
   info "PM2 dilewati. Jalankan backend dengan: cd \"$APP_DIR\" && npm start"
@@ -878,13 +1016,22 @@ fi
 # 7. UFW & restart layanan
 # =============================================================================
 info "=== UFW ==="
-# Hanya port yang dibutuhkan billing, FreeRADIUS, dan GenieACS. Server ini adalah VPN CLIENT,
-# jadi tidak ada port inbound VPN (1194, 1701, 500/4500, 51820, 9921, dst. tidak dibuka).
+# Port yang dibuka: SSH (semua port sshd aktif), web billing, FreeRADIUS, GenieACS, dan port VPN Server
+# (WireGuard 51820/udp, OpenVPN 1194/udp, L2TP 1701/udp) agar router MikroTik bisa terhubung ke server ini.
 # Aturan yang sudah ada tidak dihapus oleh installer; hapus sisa uji coba dengan: ufw delete allow <port>/<proto>.
 run_root ufw default deny incoming
 run_root ufw default allow outgoing
-# SSH dibuka lebih dulu, sebelum ufw enable, supaya sesi tidak terputus.
-run_root ufw allow OpenSSH
+# SSH dibuka lebih dulu, sebelum ufw enable, supaya sesi tidak terputus. Profil "OpenSSH" hanya ada di
+# Ubuntu (Debian tidak punya), jadi port dibaca dari sshd sendiri; cadangan: port sesi SSH aktif, lalu 22.
+SSH_PORTS=$(run_root sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un || true)
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+  SSH_PORTS="${SSH_PORTS}"$'\n'"$(awk '{print $4}' <<<"$SSH_CONNECTION")"
+fi
+[[ -n "${SSH_PORTS//[[:space:]]/}" ]] || SSH_PORTS=22
+for SSH_PORT in $(printf '%s\n' "$SSH_PORTS" | sort -un); do
+  [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] || continue
+  run_root ufw allow "${SSH_PORT}/tcp" comment 'SSH'
+done
 run_root ufw allow "${APP_PORT}/tcp" comment 'Billing web' 2>/dev/null || true
 if [[ "$USE_NGINX" == "1" ]]; then
   run_root ufw allow 80/tcp comment 'Web HTTP (Nginx/reverse proxy)' 2>/dev/null || true
@@ -892,6 +1039,9 @@ if [[ "$USE_NGINX" == "1" ]]; then
 fi
 run_root ufw allow 1812/udp comment 'FreeRADIUS auth' 2>/dev/null || true
 run_root ufw allow 1813/udp comment 'FreeRADIUS acct' 2>/dev/null || true
+run_root ufw allow 51820/udp comment 'VPN WireGuard' 2>/dev/null || true
+run_root ufw allow 1194/udp comment 'VPN OpenVPN' 2>/dev/null || true
+run_root ufw allow 1701/udp comment 'VPN L2TP' 2>/dev/null || true
 run_root ufw allow "${GENIEACS_CWMP_PORT}/tcp" comment 'GenieACS CWMP (TR-069)' 2>/dev/null || true
 run_root ufw allow "${GENIEACS_FS_PORT}/tcp" comment 'GenieACS File Server' 2>/dev/null || true
 run_root ufw allow "${GENIEACS_UI_PORT}/tcp" comment 'GenieACS UI' 2>/dev/null || true
@@ -911,8 +1061,6 @@ if [[ -n "$VPN_SUBNET" ]]; then
 fi
 run_root ufw --force enable || true
 run_root ufw reload || true
-
-freeradius_finalize_and_start
 
 # User aplikasi: $SUDO_USER bila installer dijalankan lewat sudo, selain itu user aktif.
 # Root tidak perlu sudoers. User lain hanya boleh: restart postgresql/freeradius (menu Pengaturan)

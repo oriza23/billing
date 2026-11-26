@@ -1,6 +1,6 @@
 # Instalasi server — `install.sh`
 
-Panduan ini adalah **sumber utama** untuk memasang RANIAH Billing di VPS/server **Debian 11+** atau **Ubuntu 22.04 LTS+** (termasuk Proxmox LXC). Ringkasan di [README.md](../README.md#deployment-server) mengacu ke dokumen ini.
+Panduan ini adalah **sumber utama** untuk memasang RANIAH Billing di VPS/server **Ubuntu 22.04 / 24.04** atau **Debian 12 / 13** (atau turunan Debian: `ID_LIKE=debian`; termasuk Proxmox LXC). Ringkasan di [README.md](../README.md#deployment-server) mengacu ke dokumen ini.
 
 Repositori: **[github.com/oriza23/billing](https://github.com/oriza23/billing)** · `git clone https://github.com/oriza23/billing.git`
 
@@ -33,7 +33,7 @@ graph TD
 
 ## Prasyarat
 
-- **OS:** Debian 11+ atau Ubuntu 22.04+.
+- **OS:** Ubuntu 22.04 / 24.04, Debian 12 / 13 (terdeteksi dari `/etc/os-release`: `ID=ubuntu|debian` atau `ID_LIKE` memuat `debian`).
 - **Node.js:** 22.x (dipasang otomatis jika belum ada).
 - **`install.sh` mendukung dua mode login:**
 
@@ -90,23 +90,23 @@ chmod +x install.sh scripts/setup-admin.js
 
 ## Menjalankan installer
 
-### Default (Node langsung, tanpa PM2/Nginx)
+### Default (PM2 aktif, tanpa Nginx)
 
-`USE_PM2=0` dan `USE_NGINX=0` (default).
+`USE_PM2=1` (default) dan `USE_NGINX=0` (default). Backend dijalankan PM2 dengan nama `billing` sebagai **TARGET_USER**, lengkap dengan auto-start systemd (`pm2-<user>.service`).
 
-| Login | Perintah | Backend setelah selesai |
-|-------|----------|-------------------------|
-| User + sudo | `cd /var/www/billing && ./install.sh` | `npm start` (user yang sama) |
-| User + sudo | `cd /var/www/billing && sudo ./install.sh` | `npm start` (sebagai `SUDO_USER`) |
-| root | `cd /var/www/billing && ./install.sh` | `npm start` |
-
-Contoh:
+| Login | Perintah | TARGET_USER (pemilik proyek + PM2) |
+|-------|----------|-------------------------------------|
+| User + sudo | `cd /var/www/billing && ./install.sh` | user yang menjalankan |
+| User + sudo | `cd /var/www/billing && sudo ./install.sh` | `SUDO_USER` |
+| root | `cd /var/www/billing && ./install.sh` | `root` |
 
 ```bash
 cd /var/www/billing
 ./install.sh
-npm start
+pm2 ls
 ```
+
+Installer **idempoten**: aman dijalankan ulang. Bila `.env` sudah ada, `DB_USER`/`DB_PASSWORD`/`DB_NAME`/`DB_PORT` dan superadmin dibaca dari `.env` (tidak ditanya lagi), password role PostgreSQL disinkronkan ke nilai itu, `JWT_SECRET` dipertahankan, dan baris `.env` lain milik Anda tidak dihapus.
 
 Installer menyiapkan antara lain: PostgreSQL, FreeRADIUS, migrasi SQL, build frontend, paket VPN client, UFW, helper VPN, dan sudoers layanan.
 
@@ -123,7 +123,7 @@ USE_PM2=1 USE_NGINX=1 ./install.sh
 ```
 
 - **PM2 saja:** `USE_PM2=1 ./install.sh`
-- **Tanpa keduanya:** default atau `USE_PM2=0 USE_NGINX=0 ./install.sh`
+- **Tanpa PM2 dan Nginx:** `USE_PM2=0 USE_NGINX=0 ./install.sh`, lalu `npm start`
 - **Akses langsung:** `http://IP-SERVER:5000` (port default `APP_PORT=5000`)
 - TLS/HTTPS belum disetel installer; Nginx hanya reverse proxy port 80 bila `USE_NGINX=1`.
 
@@ -143,7 +143,7 @@ Unit `billing.service` menjalankan proses sebagai user sistem `billing` + sudoer
 |--------|----------|---------|---------|
 | Nama Database | `DB_NAME` | `orizabil` | PostgreSQL billing + RADIUS |
 | Username DB | `DB_USER` | `oriza` | Role PostgreSQL |
-| Password DB | `DB_PASS` | acak | Enter = otomatis |
+| Password DB | `DB_PASSWORD` | acak (`openssl rand -hex 16`) | Enter = otomatis. Bila diisi manual: min. 8 karakter dari `A-Z a-z 0-9 . _ @ + = : , ! ~ ^ * / -` |
 | Username Web Admin | `WEB_ADMIN` | `admin` | Login panel |
 | Password Web Admin | `WEB_PASS` | — | **Wajib**, min. 8 karakter |
 | RADIUS Secret | `RADIUS_SECRET` | acak | Secret MikroTik ↔ FreeRADIUS |
@@ -156,7 +156,7 @@ Unit `billing.service` menjalankan proses sebagai user sistem `billing` + sudoer
 | Variabel | Arti |
 |----------|------|
 | `APP_PORT` | Port HTTP backend (default `5000`) |
-| `USE_PM2` | `1` = pasang/jalankan PM2 |
+| `USE_PM2` | `1` (default) = pasang/jalankan PM2 + auto-start; `0` = lewati |
 | `USE_NGINX` | `1` = pasang Nginx reverse proxy |
 | `GENIEACS_*` | Port GenieACS (UI/CWMP/FS/NBI) |
 | `VPN_SUBNET` | Subnet tunnel untuk UFW (default `10.210.0.0/24`; kosong = lewati; CIDR `/16`–`/32`) |
@@ -186,6 +186,8 @@ pm2 ls
 pm2 logs billing --lines 30
 curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:5000/
 ```
+
+**FreeRADIUS:** `mods-available/sql` ditulis deterministik oleh `deploy/freeradius/write-sql-mod.js` dari `.env` (bukan `sed`), lalu installer: mengatur izin (`root:freerad` 640; `/var/log/freeradius` dan `/run/freeradius` milik `freerad`), memvalidasi **hanya sebagai user `freerad`** (`runuser -u freerad -- freeradius -Cx`; karena `read_clients = yes`, ini juga menguji koneksi ke PostgreSQL dan tabel `nas`), mematikan proses sisa, lalu `enable` + `restart`. **Jangan** menjalankan `freeradius -X`/`-XC` sebagai root: itu membuat `radius.log` berpemilik root dan service gagal start (`status=1/FAILURE`). Bila restart gagal, installer mencetak otomatis 40 baris `radius.log`, baris aktif `mods-available/sql` (tanpa password), dan 3 detik `freeradius -f -l stdout -xx`. Uji fungsi: **MikroTik Hotspot/PPP** ke UDP 1812/1813 — panduan [`RADIUS-TEST-MIKROTIK.md`](./RADIUS-TEST-MIKROTIK.md).
 
 **Koneksi VPN (non-root / PM2):**
 
@@ -227,3 +229,4 @@ pm2 restart billing
 | [DEV-RUNTIME.md](./DEV-RUNTIME.md) | Mode dev (`billing.service` + Vite) vs produksi (PM2/systemd) |
 | [README.md](../README.md) | Kebutuhan sistem, firewall UFW, VPN client, dokumentasi fitur |
 | [DATABASE-POSTGRESQL.md](./DATABASE-POSTGRESQL.md) | PostgreSQL & RADIUS schema |
+| [RADIUS-TEST-MIKROTIK.md](./RADIUS-TEST-MIKROTIK.md) | Tes Hotspot/PPP MikroTik → VPS |

@@ -232,7 +232,7 @@ Catatan keamanan tambahan:
 | RAM | 2 GB | 4–8 GB |
 | Disk | 20 GB SSD | 40 GB+ SSD |
 
-**Dependensi (via installer):** PostgreSQL, FreeRADIUS + modul PostgreSQL, Node.js **22.x**, npm **12.x**, dan UFW. PM2/Nginx hanya dipasang jika `USE_PM2=1` / `USE_NGINX=1`.
+**Dependensi (via installer):** PostgreSQL, FreeRADIUS + modul PostgreSQL, Node.js **22.x**, npm **12.x**, dan UFW. PM2 dipasang secara default (`USE_PM2=1`, nonaktifkan dengan `USE_PM2=0`); Nginx hanya jika `USE_NGINX=1`.
 
 ### Port layanan
 
@@ -248,14 +248,15 @@ Catatan keamanan tambahan:
 
 ### Firewall (UFW)
 
-Server ini adalah VPN **client** ke MikroTik CHR, sehingga **tidak ada port inbound VPN** yang dibuka (1194, 1701, 500/4500, 51820, atau port server SSTP seperti 9921). Koneksi VPN keluar tidak butuh aturan karena kebijakan outgoing `allow`. `install.sh` menyetel UFW ke daftar berikut:
+Koneksi VPN keluar (server sebagai client ke CHR) tidak butuh aturan karena kebijakan outgoing `allow`. Port VPN Server (WireGuard, OpenVPN, L2TP) dibuka agar router MikroTik dapat terhubung ke server ini. `install.sh` menyetel UFW ke daftar berikut:
 
 | Aturan | Keterangan |
 |--------|------------|
-| `OpenSSH` (22/tcp) | Dibuka sebelum `ufw enable` agar sesi SSH tidak terputus |
+| SSH (port dari `sshd -T`, cadangan 22/tcp) | Dibuka sebelum `ufw enable` agar sesi SSH tidak terputus. Profil `OpenSSH` tidak dipakai karena tidak ada di Debian |
 | `5000/tcp` | Billing web (`APP_PORT`) |
 | `80/tcp`, `443/tcp` | Hanya bila `USE_NGINX=1` |
 | `1812/udp`, `1813/udp` | FreeRADIUS auth dan acct |
+| `51820/udp`, `1194/udp`, `1701/udp` | VPN Server: WireGuard, OpenVPN, L2TP |
 | `7547/tcp`, `7567/tcp`, `3000/tcp` | GenieACS CWMP, File Server, UI (persiapan; port NBI 7557 tertutup kecuali `GENIEACS_OPEN_NBI=1`) |
 | `from <VPN_SUBNET>` | Semua port dari subnet tunnel VPN (default `10.210.0.0/24`) |
 

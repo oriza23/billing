@@ -15,6 +15,7 @@ const {
   createVpnService, parseIpAddr, parseWgDump, hijacksDefaultRoute, publicProfiles,
   hostOf, isSafePingTarget, tunnelGateway, publicPingTarget, tunnelPingTarget, parsePingMs,
   vpnFailedProtocols, parseOvpnStatus, presentOvpnServer, parseL2tpServerPeers, presentL2tpServer,
+  probeHelperFile, helperCallError,
 } = require('../backend/vpn');
 
 const KEY_A = 'A'.repeat(43) + '=';
@@ -564,6 +565,8 @@ function serviceWith(system, extra = {}) {
     isRoot: true,
     run: system.run,
     existsSync: () => true,
+    // Berkas helper sungguhan tidak ada di lingkungan test; anggap sudah terpasang dan bisa dieksekusi.
+    probeHelper: () => ({ ok: true, code: null, message: null }),
     readText: (file) => (file === '/proc/uptime' ? '9000.5 100\n' : '1000'),
     sleep: async () => {},
     now: () => 1700000100 * 1000,
@@ -861,6 +864,61 @@ test('connect: sudoers belum dipasang -> pesan jelas, bukan hang', async () => {
     () => service.connect('wireguard', cfg.validateWireguard(wgInput())),
     (error) => error.status === 503 && /sudoers/.test(error.message),
   );
+});
+
+test('helper: berkas tidak ada -> ENOENT, bukan pesan izin sudo', () => {
+  const missing = path.join(os.tmpdir(), `raniah-helper-missing-${process.pid}-${Date.now()}`);
+  const result = probeHelperFile(missing);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'ENOENT');
+  assert.match(result.message, /belum terpasang/);
+  assert.match(result.message, /deploy\/install-vpn-helper\.sh/);
+});
+
+test('helper: berkas ada tapi tidak bisa dieksekusi -> EACCES dengan petunjuk mode 755', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'raniah-helper-'));
+  const file = path.join(dir, 'raniah-vpn-helper');
+  try {
+    fs.writeFileSync(file, '#!/bin/sh\n', { mode: 0o644 });
+    fs.chmodSync(file, 0o644);
+    const result = probeHelperFile(file);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'EACCES');
+    assert.match(result.message, /755/);
+    assert.doesNotMatch(result.message, /belum terpasang/);
+
+    fs.chmodSync(file, 0o755);
+    assert.deepEqual(probeHelperFile(file), { ok: true, code: null, message: null });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('helper: kegagalan sudo menampilkan stderr asli dan membedakan izin dari ENOENT', () => {
+  const helper = '/usr/local/sbin/raniah-vpn-helper';
+  const denied = helperCallError({ ok: false, code: 1, stdout: '', stderr: 'sudo: a password is required\n' }, helper, 'Gagal:');
+  assert.equal(denied.status, 503);
+  assert.match(denied.message, /sudoers/);
+  assert.match(denied.message, /sudo: a password is required/);
+
+  const notAllowed = helperCallError({
+    ok: false, code: 1, stdout: '', stderr: "Sorry, user ubuntu is not allowed to execute '/usr/local/sbin/raniah-vpn-helper apply' as root on host.",
+  }, helper, 'Gagal:');
+  assert.equal(notAllowed.status, 503);
+  assert.match(notAllowed.message, /not allowed to execute/);
+
+  const perm = helperCallError({ ok: false, code: 1, stdout: '', stderr: 'sudo: unable to execute /usr/local/sbin/raniah-vpn-helper: Permission denied' }, helper, 'Gagal:');
+  assert.equal(perm.status, 503);
+  assert.match(perm.message, /EACCES/);
+  assert.match(perm.message, /Permission denied/);
+
+  const enoent = helperCallError({ ok: false, code: 1, errorCode: 'ENOENT', stdout: '', stderr: '' }, helper, 'Gagal:');
+  assert.equal(enoent.status, 503);
+  assert.match(enoent.message, /sudo tidak ditemukan/);
+
+  const generic = helperCallError({ ok: false, code: 2, stdout: '', stderr: 'apply: protokol tidak dikenal' }, helper, 'Gagal menulis konfigurasi VPN:');
+  assert.equal(generic.status, 500);
+  assert.match(generic.message, /Gagal menulis konfigurasi VPN: apply: protokol tidak dikenal/);
 });
 
 test('connect: operasi bersamaan ditolak 409', async () => {

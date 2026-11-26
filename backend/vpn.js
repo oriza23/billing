@@ -12,6 +12,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { IS_ROOT } = require('./privileged');
@@ -24,6 +25,7 @@ const {
 
 const HELPER_PATH = '/usr/local/sbin/raniah-vpn-helper';
 const SUDOERS_HINT = 'Izin sudoers VPN belum terpasang untuk user server. Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.';
+const HELPER_INSTALL_HINT = 'Jalankan sebagai root: sudo bash deploy/install-vpn-helper.sh';
 const HANDSHAKE_FRESH_SECONDS = 180;
 const BIN_DIRS = ['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin'];
 const REQUIRED_TOOLS = {
@@ -92,12 +94,14 @@ function defaultRun(file, args = [], { input, timeout = 15000 } = {}) {
         resolve({
           ok: !error,
           code: error ? (typeof error.code === 'number' ? error.code : 1) : 0,
+          // Kode sistem (mis. ENOENT bila binary sudo tidak ada), dibedakan dari exit code.
+          errorCode: error && typeof error.code === 'string' ? error.code : null,
           stdout: String(stdout || ''),
           stderr: String(stderr || ''),
         });
       });
     } catch (error) {
-      resolve({ ok: false, code: 1, stdout: '', stderr: String(error.message || error) });
+      resolve({ ok: false, code: 1, errorCode: error.code || null, stdout: '', stderr: String(error.message || error) });
       return;
     }
     child.stdin.on('error', () => {});
@@ -111,6 +115,75 @@ function defaultRun(file, args = [], { input, timeout = 15000 } = {}) {
 
 function sudoDenied(output) {
   return /password is required|a terminal is required|not allowed to execute|is not in the sudoers/i.test(String(output || ''));
+}
+
+function currentUser() {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return String(typeof process.getuid === 'function' ? process.getuid() : 'unknown');
+  }
+}
+
+// Cek berkas helper dari proses Node (tanpa sudo). Dua kasus dibedakan:
+//  - ENOENT: berkas memang belum dipasang.
+//  - EACCES/EPERM: berkas tidak bisa diakses atau tidak bisa dieksekusi user ini (izin salah).
+function probeHelperFile(helperPath, existsSync = fs.existsSync) {
+  if (!existsSync(helperPath)) {
+    let code = 'ENOENT';
+    try {
+      fs.statSync(helperPath);
+    } catch (error) {
+      code = error.code || 'ENOENT';
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      return {
+        ok: false,
+        code,
+        message: `Helper VPN ${helperPath} tidak bisa diakses user ${currentUser()} (${code}). Periksa izin direktori induknya. ${HELPER_INSTALL_HINT}.`,
+      };
+    }
+    return {
+      ok: false,
+      code: 'ENOENT',
+      message: `Helper VPN belum terpasang: ${helperPath} tidak ada (ENOENT). ${HELPER_INSTALL_HINT}.`,
+    };
+  }
+  try {
+    fs.accessSync(helperPath, fs.constants.X_OK);
+  } catch (error) {
+    const code = error.code || 'EACCES';
+    return {
+      ok: false,
+      code,
+      message: `Helper VPN ${helperPath} tidak bisa dieksekusi user ${currentUser()} (${code}). Harus root:root 755. ${HELPER_INSTALL_HINT}.`,
+    };
+  }
+  return { ok: true, code: null, message: null };
+}
+
+// Terjemahkan kegagalan `sudo -n <helper> ...` menjadi pesan yang bisa didiagnosis.
+// stderr/stdout asli selalu ikut ditampilkan agar penyebabnya terlihat.
+function helperCallError(result, helperPath, fallback) {
+  const detail = String(result.stderr || result.stdout || '').trim();
+  const shown = detail ? ` Output: ${detail.slice(0, 400)}` : '';
+  const user = currentUser();
+  if (result.errorCode === 'ENOENT') {
+    return httpError(503, `Perintah sudo tidak ditemukan di server (ENOENT). Pasang sudo, lalu ${HELPER_INSTALL_HINT}.`);
+  }
+  if (sudoDenied(detail)) {
+    return httpError(
+      503,
+      `Izin sudo ke helper VPN ditolak untuk user ${user} (sudo -n). Pastikan /etc/sudoers.d/raniah-vpn-helper memuat "${user} ALL=(root) NOPASSWD: ${helperPath}" dengan mode 0440, lalu ${HELPER_INSTALL_HINT}.${shown}`,
+    );
+  }
+  if (/permission denied|EACCES|unable to execute/i.test(detail)) {
+    return httpError(503, `Helper VPN tidak bisa dieksekusi lewat sudo (EACCES). Harus root:root 755. ${HELPER_INSTALL_HINT}.${shown}`);
+  }
+  if (/no such file or directory|ENOENT|command not found/i.test(detail)) {
+    return httpError(503, `Helper VPN belum terpasang: ${helperPath} tidak ditemukan (ENOENT). ${HELPER_INSTALL_HINT}.${shown}`);
+  }
+  return httpError(500, detail ? `${fallback} ${detail.slice(0, 240)}` : fallback);
 }
 
 function parseIpAddr(output) {
@@ -429,12 +502,27 @@ function createVpnService(overrides = {}) {
   const now = overrides.now || (() => Date.now());
   const applyDisk = overrides.applyToDisk || vpnConfig.applyToDisk;
   const helperPath = overrides.helperPath || HELPER_PATH;
+  const probeHelper = overrides.probeHelper || ((file) => probeHelperFile(file, existsSync));
 
   let busy = false;
 
   // Root: langsung. Selain root: `sudo -n` (aturan: process.getuid() === 0 ? '' : 'sudo -n ').
   function runPriv(binary, args, options) {
     return isRoot ? run(binary, args, options) : run('sudo', ['-n', binary, ...args], options);
+  }
+
+  // Satu pintu ke helper root untuk proses non-root: cek berkas (ENOENT/EACCES) dulu, lalu
+  // `sudo -n <helper> ...`. Kegagalan sudo/helper diterjemahkan dengan stderr asli.
+  async function runHelper(args, options, fallback) {
+    const file = probeHelper(helperPath);
+    if (!file.ok) {
+      throw httpError(503, file.message);
+    }
+    const result = await run('sudo', ['-n', helperPath, ...args], options);
+    if (!result.ok) {
+      throw helperCallError(result, helperPath, fallback);
+    }
+    return result;
   }
 
   async function systemctlPriv(args) {
@@ -453,14 +541,7 @@ function createVpnService(overrides = {}) {
       await vpnConfig.cycleVpn(protocol, action, { exec: run, sleep, readText, writeText });
       return;
     }
-    const result = await run('sudo', ['-n', helperPath, 'cycle', protocol, action], { timeout: 60000 });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout || '').trim();
-      throw httpError(
-        sudoDenied(detail) ? 503 : 500,
-        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 800) || `Teardown ${LABELS[protocol] || protocol} gagal.`),
-      );
-    }
+    await runHelper(['cycle', protocol, action], { timeout: 60000 }, `Teardown ${LABELS[protocol] || protocol} gagal.`);
   }
 
   async function disableUnit(protocol) {
@@ -589,7 +670,8 @@ function createVpnService(overrides = {}) {
       failed: [],
       tools: toolsInfo(),
       is_root: isRoot,
-      helper_installed: isRoot || existsSync(helperPath),
+      helper_installed: isRoot || probeHelper(helperPath).ok,
+      helper_error: isRoot ? null : probeHelper(helperPath).message,
       checked_at: new Date(now()).toISOString(),
       server_active: false,
     };
@@ -684,17 +766,10 @@ function createVpnService(overrides = {}) {
       }
       return;
     }
-    if (!existsSync(helperPath)) {
-      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
-    }
-    const result = await run('sudo', ['-n', helperPath, 'apply'], {
+    await runHelper(['apply'], {
       input: JSON.stringify({ protocol, config: cfg }),
       timeout: 30000,
-    });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi VPN: ${detail.slice(0, 240)}`);
-    }
+    }, 'Gagal menulis konfigurasi VPN:');
   }
 
   function ensureTools(protocol, cfg = null) {
@@ -888,17 +963,10 @@ function createVpnService(overrides = {}) {
       }
       return;
     }
-    if (!existsSync(helperPath)) {
-      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
-    }
-    const result = await run('sudo', ['-n', helperPath, 'apply-server'], {
+    await runHelper(['apply-server'], {
       input: JSON.stringify({ server, peers }),
       timeout: 30000,
-    });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi VPN Server: ${detail.slice(0, 240)}`);
-    }
+    }, 'Gagal menulis konfigurasi VPN Server:');
   }
 
   async function getServerStatus() {
@@ -993,17 +1061,10 @@ function createVpnService(overrides = {}) {
       }
       return;
     }
-    if (!existsSync(helperPath)) {
-      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
-    }
-    const result = await run('sudo', ['-n', helperPath, 'apply-ovpn-server'], {
+    await runHelper(['apply-ovpn-server'], {
       input: JSON.stringify({ server, peers }),
       timeout: 120000,
-    });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi OpenVPN Server: ${detail.slice(0, 240)}`);
-    }
+    }, 'Gagal menulis konfigurasi OpenVPN Server:');
   }
 
   async function getOvpnServerStatus() {
@@ -1079,17 +1140,10 @@ function createVpnService(overrides = {}) {
       }
       return;
     }
-    if (!existsSync(helperPath)) {
-      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
-    }
-    const result = await run('sudo', ['-n', helperPath, 'apply-l2tp-server'], {
+    await runHelper(['apply-l2tp-server'], {
       input: JSON.stringify({ server, peers }),
       timeout: 60000,
-    });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw httpError(sudoDenied(detail) ? 503 : 500, sudoDenied(detail) ? SUDOERS_HINT : `Gagal menulis konfigurasi L2TP Server: ${detail.slice(0, 240)}`);
-    }
+    }, 'Gagal menulis konfigurasi L2TP Server:');
   }
 
   function l2tpConfIsServerMode() {
@@ -1185,17 +1239,7 @@ function createVpnService(overrides = {}) {
       }
       return;
     }
-    if (!existsSync(helperPath)) {
-      throw httpError(503, `Helper VPN belum terpasang (${helperPath}). Jalankan ulang install.sh atau deploy/install-vpn-helper.sh sebagai root.`);
-    }
-    const result = await run('sudo', ['-n', helperPath, 'stop-l2tp-server'], { timeout: 60000 });
-    if (!result.ok) {
-      const detail = (result.stderr || result.stdout || '').trim();
-      throw httpError(
-        sudoDenied(detail) ? 503 : 500,
-        sudoDenied(detail) ? SUDOERS_HINT : (detail.slice(0, 300) || 'Gagal mematikan L2TP Server.'),
-      );
-    }
+    await runHelper(['stop-l2tp-server'], { timeout: 60000 }, 'Gagal mematikan L2TP Server.');
   }
 
   async function readOvpnCa() {
@@ -2139,6 +2183,8 @@ const service = createVpnService();
 
 module.exports = {
   HELPER_PATH,
+  probeHelperFile,
+  helperCallError,
   LABELS,
   createVpnService,
   parseIpAddr,

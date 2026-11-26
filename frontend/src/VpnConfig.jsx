@@ -850,8 +850,11 @@ function VpnConfig() {
           <div className="mt-4 flex gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-200" role="alert">
             <AlertTriangle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
             <div>
-              Helper VPN belum terpasang, sehingga konfigurasi tidak bisa ditulis ke OS. Jalankan sebagai root:
+              Helper VPN belum bisa dipakai, sehingga konfigurasi tidak bisa ditulis ke OS. Jalankan sebagai root:
               <code className="mt-1 block rounded bg-amber-100 px-2 py-1 font-mono text-xs dark:bg-amber-900/40">sudo bash deploy/install-vpn-helper.sh</code>
+              {status.helper_error && (
+                <span className="mt-2 block break-words font-mono text-xs">Detail: {status.helper_error}</span>
+              )}
             </div>
           </div>
         )}

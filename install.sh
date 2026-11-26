@@ -706,6 +706,43 @@ info "=== npm install & build frontend ==="
 (cd "$APP_DIR/frontend" && run_as_target npm run build)
 
 # =============================================================================
+# 5b. Helper VPN root-owned + sudoers untuk TARGET_USER (WAJIB sebelum PM2)
+# =============================================================================
+# Backend VPN memanggil /usr/local/sbin/raniah-vpn-helper lewat `sudo -n` sebagai TARGET_USER (user PM2).
+# Tanpa berkas dan sudoers ini, Sistem > Koneksi VPN menampilkan "Helper VPN belum terpasang".
+# Langkah ini selalu dijalankan (apa pun user APP_USER) dan kegagalannya menghentikan installer.
+info "=== Helper VPN (root-owned, /usr/local/sbin/raniah-vpn-helper) ==="
+run_root bash "$APP_DIR/deploy/install-vpn-helper.sh" \
+  || die "Pemasangan helper VPN gagal. Perbaiki penyebab di atas, lalu jalankan ulang install.sh."
+
+if [[ "$TARGET_USER" == "root" ]]; then
+  info "Aplikasi berjalan sebagai root; sudoers helper VPN tidak diperlukan."
+else
+  [[ "$TARGET_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "User ${TARGET_USER} tidak valid untuk sudoers helper VPN."
+  info "=== sudoers helper VPN untuk ${TARGET_USER} (/etc/sudoers.d/raniah-vpn-helper, 0440) ==="
+  VPN_HELPER_SUDOERS=/etc/sudoers.d/raniah-vpn-helper
+  VPN_HELPER_SUDOERS_TMP=$(mktemp)
+  printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/raniah-vpn-helper\n' "$TARGET_USER" > "$VPN_HELPER_SUDOERS_TMP"
+  if ! run_root visudo -cf "$VPN_HELPER_SUDOERS_TMP" >/dev/null; then
+    rm -f "$VPN_HELPER_SUDOERS_TMP"
+    die "Isi sudoers helper VPN tidak valid. Berkas tidak dipasang."
+  fi
+  run_root install -m 0440 -o root -g root "$VPN_HELPER_SUDOERS_TMP" "$VPN_HELPER_SUDOERS"
+  rm -f "$VPN_HELPER_SUDOERS_TMP"
+  # Validasi seluruh konfigurasi sudo (termasuk berkas lain di sudoers.d). Gagal => berkas dihapus lagi.
+  if ! run_root visudo -c >/dev/null; then
+    run_root rm -f "$VPN_HELPER_SUDOERS"
+    die "visudo -c gagal setelah memasang ${VPN_HELPER_SUDOERS}. Berkas dihapus; periksa konfigurasi sudo."
+  fi
+  # Uji dari sisi user PM2 (bukan root): berkas bisa dieksekusi dan sudo -n mengizinkannya tanpa password.
+  run_as_target test -x /usr/local/sbin/raniah-vpn-helper \
+    || die "User ${TARGET_USER} tidak bisa mengeksekusi /usr/local/sbin/raniah-vpn-helper."
+  run_as_target sudo -n -l /usr/local/sbin/raniah-vpn-helper >/dev/null 2>&1 \
+    || die "User ${TARGET_USER} belum diizinkan menjalankan helper VPN tanpa password (sudo -n -l gagal). Periksa ${VPN_HELPER_SUDOERS}."
+  ok "Helper VPN siap: ${TARGET_USER} → /usr/local/sbin/raniah-vpn-helper (root:root 755, sudo NOPASSWD)."
+fi
+
+# =============================================================================
 # 6. Optional PM2 & Nginx
 # =============================================================================
 if [[ "$USE_PM2" == "1" ]]; then
@@ -819,30 +856,7 @@ if [[ "$APP_USER" == "root" ]]; then
 elif [[ ! "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
   warn "User ${APP_USER} tidak dipakai untuk sudoers restart."
 else
-  info "=== Helper VPN (root-owned) ==="
-  run_root bash "$APP_DIR/deploy/install-vpn-helper.sh" || warn "Helper VPN gagal dipasang; menu Koneksi VPN tidak bisa menulis konfigurasi."
-
-  # Izin user aplikasi (TARGET_USER) menjalankan helper root tanpa password. Aplikasi tetap berjalan
-  # sebagai user biasa; hanya helper ini yang naik ke root. Helper memvalidasi sendiri protokol, aksi,
-  # jumlah argumen, dan JSON stdin, jadi pemanggilan dengan argumen lain ditolak olehnya.
-  info "=== sudoers helper VPN untuk ${TARGET_USER} (/etc/sudoers.d/raniah-vpn-helper) ==="
-  [[ "$TARGET_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "User ${TARGET_USER} tidak valid untuk sudoers helper VPN."
-  VPN_HELPER_SUDOERS=/etc/sudoers.d/raniah-vpn-helper
-  VPN_HELPER_SUDOERS_TMP=$(mktemp)
-  printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/raniah-vpn-helper\n' "$TARGET_USER" > "$VPN_HELPER_SUDOERS_TMP"
-  if ! run_root visudo -cf "$VPN_HELPER_SUDOERS_TMP" >/dev/null; then
-    rm -f "$VPN_HELPER_SUDOERS_TMP"
-    die "Isi sudoers helper VPN tidak valid. Berkas tidak dipasang."
-  fi
-  run_root install -m 0440 -o root -g root "$VPN_HELPER_SUDOERS_TMP" "$VPN_HELPER_SUDOERS"
-  rm -f "$VPN_HELPER_SUDOERS_TMP"
-  # Validasi seluruh konfigurasi sudo (termasuk berkas lain di sudoers.d). Gagal => berkas dihapus lagi.
-  if ! run_root visudo -c >/dev/null; then
-    run_root rm -f "$VPN_HELPER_SUDOERS"
-    die "visudo -c gagal setelah memasang ${VPN_HELPER_SUDOERS}. Berkas dihapus; periksa konfigurasi sudo."
-  fi
-  ok "sudoers helper VPN terpasang: ${TARGET_USER} → /usr/local/sbin/raniah-vpn-helper (NOPASSWD, 0440)."
-
+  # Helper VPN dan sudoers-nya dipasang di bagian 5b (sebelum PM2), untuk TARGET_USER.
   info "=== sudoers layanan & VPN untuk ${APP_USER} ==="
   VPN_UNITS=(wg-quick@wg-billing openvpn-client@raniah-vpn raniah-sstp raniah-l2tp)
   SUDO_CMDS=()

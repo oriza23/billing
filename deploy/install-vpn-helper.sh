@@ -38,6 +38,7 @@ install -m 0644 -o root -g root "$APP_DIR/backend/vpn_config.js" "$LIB_DIR/vpn_c
 install -m 0644 -o root -g root "$APP_DIR/deploy/raniah-vpn-helper.js" "$LIB_DIR/helper.js"
 
 # Pembungkus dengan path node absolut: sudo memakai secure_path, bukan PATH user.
+# Mode 755 (bukan 700) wajib: proses Node non-root memeriksa berkas ini dengan fs.accessSync(..., X_OK).
 TMP="$(mktemp)"
 cat > "$TMP" <<EOF
 #!/bin/sh
@@ -46,4 +47,17 @@ EOF
 install -m 0755 -o root -g root "$TMP" "$BIN"
 rm -f "$TMP"
 
-echo "Helper VPN terpasang: $BIN"
+# Verifikasi hasil: pemilik, mode, dan dapat dieksekusi. Gagal di sini = instalasi dianggap gagal.
+expect_mode() {
+  local file="$1" want="$2" got
+  got="$(stat -c '%U:%G %a' "$file")"
+  if [[ "$got" != "$want" ]]; then
+    echo "Izin $file = '$got', seharusnya '$want'." >&2
+    exit 1
+  fi
+}
+expect_mode "$BIN" "root:root 755"
+expect_mode "$LIB_DIR" "root:root 755"
+[[ -x "$BIN" ]] || { echo "$BIN tidak bisa dieksekusi." >&2; exit 1; }
+
+echo "Helper VPN terpasang: $BIN (root:root 755)"

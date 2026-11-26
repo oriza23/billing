@@ -341,6 +341,7 @@ test_db_tcp_nas() {
   PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
     -c "SELECT count(*) FROM nas;" \
     || die "Koneksi TCP PostgreSQL gagal (${DB_USER}@127.0.0.1:${DB_PORT}/${DB_NAME}, SELECT count(*) FROM nas). FreeRADIUS tidak akan bisa start; periksa .env, role, dan kepemilikan tabel nas."
+  test_db_login
   ok "PostgreSQL TCP OK: role, password .env, dan tabel nas konsisten."
 }
 
@@ -413,9 +414,43 @@ freeradius_apply_runtime_permissions() {
 # Validasi HANYA sebagai freerad (sama dengan ExecStartPre systemd). Karena read_clients = yes, -Cx
 # juga membuka koneksi ke PostgreSQL dan membaca tabel nas, jadi ini tes start yang setara.
 # JANGAN pernah freeradius -X/-XC sebagai root di sini: itu membuat radius.log berpemilik root.
+#
+# Selain lulus/gagal, hasil PARSE asli FreeRADIUS (blok `sql {` pada output -XC sebagai freerad) harus
+# berisi nilai dari .env. Kasus lama: server = "", login = "", port = 0 (baris terkomentar tidak aktif),
+# yang membuat rlm_sql_postgresql memakai unix socket sebagai role freerad lalu crash saat start.
+freeradius_assert_sql_parsed() {
+  local dump="$1" block
+  block=$(awk '
+    !inblk && match($0, /^[ ]*sql \{[ ]*$/) { indent = $0; sub(/sql \{[ ]*$/, "", indent); inblk = 1; next }
+    inblk && $0 == indent "}" { exit }
+    inblk { print }
+  ' "$dump")
+  [[ -n "$block" ]] || die "Output freeradius -XC tidak memuat blok sql { ... }: modul sql tidak termuat. Periksa ${RADDB}/mods-enabled/sql."
+  if grep -Eq '^[[:space:]]*(server|login)[[:space:]]*=[[:space:]]*""[[:space:]]*$|^[[:space:]]*port[[:space:]]*=[[:space:]]*0[[:space:]]*$' <<<"$block"; then
+    warn "Blok sql hasil parse FreeRADIUS (password disembunyikan):"
+    grep -E '^[[:space:]]*(driver|dialect|server|port|login|radius_db|read_clients)[[:space:]]*=' <<<"$block" >&2 || true
+    die "FreeRADIUS mem-parse sql dengan server = \"\" / login = \"\" / port = 0. Ini penyebab status=1/FAILURE. Pastikan ${RADDB}/mods-enabled/sql -> ../mods-available/sql, lalu jalankan ulang install.sh."
+  fi
+  local want
+  for want in "server = \"127.0.0.1\"" "port = ${DB_PORT}" "login = \"${DB_USER}\"" "radius_db = \"${DB_NAME}\"" "read_clients = yes" "driver = \"rlm_sql_postgresql\""; do
+    grep -Eq "^[[:space:]]*${want//\./\\.}[[:space:]]*\$" <<<"$block" \
+      || die "Hasil parse FreeRADIUS tidak memuat '${want}' pada blok sql. Konfigurasi yang dibaca FreeRADIUS bukan dari .env."
+  done
+  ok "Parse FreeRADIUS (-XC sebagai freerad): sql = ${DB_USER}@127.0.0.1:${DB_PORT}/${DB_NAME}, read_clients = yes."
+}
+
 freeradius_validate_as_freerad() {
   local log
   log=$(mktemp)
+  info "=== freeradius -XC (parse, sebagai user freerad; stdout, tidak menyentuh radius.log) ==="
+  if ! (cd / && run_root runuser -u freerad -- freeradius -XC -d "$RADDB") >"$log" 2>&1; then
+    warn "freeradius -XC (user freerad) GAGAL. 40 baris terakhir:"
+    mask_secret < "$log" | tail -n 40 >&2
+    rm -f "$log"
+    die "Konfigurasi FreeRADIUS tidak valid untuk user freerad. Perbaiki lalu jalankan ulang install.sh."
+  fi
+  freeradius_assert_sql_parsed "$log"
+  : > "$log"
   info "=== freeradius -Cx sebagai user freerad ==="
   if ! (cd / && run_root runuser -u freerad -- freeradius -Cx -lstdout -d "$RADDB") >"$log" 2>&1; then
     warn "freeradius -Cx (user freerad) GAGAL. 40 baris terakhir:"
@@ -429,9 +464,9 @@ freeradius_validate_as_freerad() {
 
 freeradius_diagnose() {
   warn "=== DIAGNOSTIK FreeRADIUS gagal start ==="
-  echo "--- (a) 40 baris terakhir /var/log/freeradius/radius.log ---" >&2
+  echo "--- (a) 30 baris terakhir /var/log/freeradius/radius.log ---" >&2
   if run_root test -f /var/log/freeradius/radius.log; then
-    run_root tail -n 40 /var/log/freeradius/radius.log 2>&1 | mask_secret >&2 || true
+    run_root tail -n 30 /var/log/freeradius/radius.log 2>&1 | mask_secret >&2 || true
   else
     echo "(radius.log belum ada)" >&2
   fi

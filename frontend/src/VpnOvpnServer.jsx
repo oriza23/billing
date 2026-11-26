@@ -175,7 +175,7 @@ function VpnOvpnServer() {
       const { data: body } = await api.get(`${API}/peers/${row.id}/script`)
       const shown = await showVpnScriptModal({
         title: `Script MikroTik · ${row.name}`,
-        subtitle: 'OpenVPN untuk RouterOS v6 dan v7. Baris RADIUS dan route ke subnet VPN sudah aktif, dan secret-nya sudah tersinkron dengan FreeRADIUS billing.',
+        subtitle: 'Pilih tab RouterOS v6 atau v7. v6 tanpa parameter protocol dan memakai cipher=aes256. v7 memakai protocol=tcp dan cipher=aes256-cbc. Baris RADIUS dan route ke subnet VPN sudah aktif.',
         body,
       })
       if (!shown) throw new Error('Server tidak mengirim isi script.')

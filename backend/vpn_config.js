@@ -1169,11 +1169,13 @@ function wireguardScriptBundle(server, peer) {
 }
 
 function openvpnScriptBundle(server, peer) {
-  const text = renderOvpnMikrotikScript(server, peer);
   return scriptResponse({
-    v6: text,
-    v7: text,
-    notes: ['Skrip OpenVPN sama untuk RouterOS v6 dan v7.'],
+    v6: renderOvpnMikrotikScript(server, peer, 'v6'),
+    v7: renderOvpnMikrotikScript(server, peer, 'v7'),
+    notes: [
+      'RouterOS v6: tanpa parameter protocol (klien OVPN v6 selalu TCP), cipher=aes256 auth=sha1.',
+      'RouterOS v7: protocol=tcp, cipher=aes256-cbc auth=sha1.',
+    ],
   });
 }
 
@@ -1952,9 +1954,10 @@ function renderRadiusClientLines(serverIp, peerIp, peer) {
   ];
 }
 
-// OpenVPN client untuk RouterOS v6 dan v7. Server memakai proto tcp-server, cipher AES-256-CBC, auth SHA1,
-// dan autentikasi user/password (verify-client-cert none), jadi klien cukup user + password.
-function renderOvpnMikrotikScript(server, peer) {
+// OpenVPN client. Server memakai proto tcp-server, cipher AES-256-CBC, auth SHA1.
+// RouterOS v6 tidak punya parameter protocol (klien selalu TCP) dan nama cipher-nya aes256.
+// RouterOS v7 wajib protocol=tcp (default v7 adalah UDP) dan nama cipher-nya aes256-cbc.
+function renderOvpnMikrotikScript(server, peer, rosVersion = 'v7') {
   const cfg = validateOvpnServer(server);
   if (!cfg.public_endpoint) {
     fail('Isi endpoint publik sebelum menyalin script.', 'public_endpoint');
@@ -1962,9 +1965,13 @@ function renderOvpnMikrotikScript(server, peer) {
   const checked = validateOvpnPeer(peer, peer);
   const iface = 'ovpn-raniah';
   const peerIp = String(peer.address || '').split('/')[0];
+  const version = rosVersion === 'v6' ? 'v6' : 'v7';
+  const client = version === 'v6'
+    ? `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip user=${checked.username} password=${checked.password} cipher=aes256 auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`
+    : `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip protocol=tcp user=${checked.username} password=${checked.password} cipher=aes256-cbc auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`;
   return [
-    `# RANIAH OpenVPN client untuk ${checked.name} (RouterOS v6 dan v7)`,
-    `/interface ovpn-client add name=${iface} connect-to=${cfg.public_endpoint} port=${cfg.listen_port} mode=ip protocol=tcp user=${checked.username} password=${checked.password} cipher=aes256 auth=sha1 add-default-route=no disabled=no certificate=none comment="Auto by Billing"`,
+    `# RANIAH OpenVPN client untuk ${checked.name} (RouterOS ${version})`,
+    client,
     `/ip route add dst-address=${cfg.network} gateway=${iface} comment="Auto by Billing: subnet VPN/RADIUS"`,
     ...renderRadiusClientLines(cfg.server_ip, peerIp, peer),
     '# Opsional - verifikasi sertifikat server: unduh CA dari menu OpenVPN Server (Unduh CA), lalu',

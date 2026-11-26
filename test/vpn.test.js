@@ -64,9 +64,13 @@ test('script bundle: WireGuard hanya v7, OpenVPN/L2TP/CHR punya v6 dan v7 dengan
   const ovpnServer = { public_endpoint: 'vpn.contoh.net', listen_port: 1194, network: '10.221.0.0/24' };
   const ovpnPeer = { name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123', address: '10.221.0.2', radius_secret: 'Abcd1234SecretValue1234' };
   const ovpn = cfg.openvpnScriptBundle(ovpnServer, ovpnPeer);
-  assert.equal(ovpn.script_v6, ovpn.script_v7);
-  assert.notEqual(ovpn.script_v6, null);
-  assert.match(ovpn.script, /protocol=tcp/);
+  assert.notEqual(ovpn.script_v6, ovpn.script_v7);
+  assert.equal(ovpn.script, ovpn.script_v7);
+  assert.doesNotMatch(ovpn.script_v6, /protocol=/);
+  assert.match(ovpn.script_v6, /cipher=aes256 auth=sha1/);
+  assert.doesNotMatch(ovpn.script_v6, /cipher=aes256-cbc/);
+  assert.match(ovpn.script_v7, /protocol=tcp/);
+  assert.match(ovpn.script_v7, /cipher=aes256-cbc auth=sha1/);
 
   const chr = cfg.chrScriptBundle({ name: 'CHR A', radiusAddress: '10.210.0.2', secret: 'Abcd1234SecretValue1234', nasIp: '10.210.0.5' });
   assert.equal(chr.script_v6, chr.script_v7);
@@ -1784,8 +1788,13 @@ test('openvpn server: conf ROS v6, IP statis, script, dan rahasia tidak masuk da
   assert.equal(first, '10.221.0.2');
   assert.equal(second, '10.221.0.3');
   const peer = cfg.validateOvpnPeer({ name: 'NAS Kantor', username: 'nas-kantor', password: 'Rahasia123' });
-  const script = cfg.renderOvpnMikrotikScript(server, { ...peer, address: first, radius_secret: 'Abcd1234SecretValue1234' });
-  assert.match(script, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip protocol=tcp user=nas-kantor password=Rahasia123 cipher=aes256 auth=sha1 add-default-route=no/);
+  const peerRow = { ...peer, address: first, radius_secret: 'Abcd1234SecretValue1234' };
+  const scriptV6 = cfg.renderOvpnMikrotikScript(server, peerRow, 'v6');
+  const scriptV7 = cfg.renderOvpnMikrotikScript(server, peerRow, 'v7');
+  assert.match(scriptV6, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip user=nas-kantor password=Rahasia123 cipher=aes256 auth=sha1 add-default-route=no/);
+  assert.doesNotMatch(scriptV6, /protocol=/);
+  assert.match(scriptV7, /\/interface ovpn-client add name=ovpn-raniah connect-to=vpn\.contoh\.net port=1194 mode=ip protocol=tcp user=nas-kantor password=Rahasia123 cipher=aes256-cbc auth=sha1 add-default-route=no/);
+  const script = scriptV7;
   assert.match(script, /\/ip route add dst-address=10\.221\.0\.0\/24 gateway=ovpn-raniah/);
   assert.match(script, /comment="Auto by Billing"/);
   assert.match(script, /\/radius add service=ppp,hotspot address=10\.221\.0\.1 secret="Abcd1234SecretValue1234" timeout=3000ms src-address=10\.221\.0\.2 comment="Auto by Billing"/);

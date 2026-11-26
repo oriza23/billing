@@ -100,6 +100,24 @@ test('write-sql-mod: idempoten, juga saat .orig hilang, dan mengikuti perubahan 
   }
 });
 
+test('write-sql-mod: DATABASE_URL dipakai bila DB_* tidak ada', () => {
+  const ctx = setup(UBUNTU_DEFAULT, 'DATABASE_URL="postgresql://oriza:Pass.w0rd!x@127.0.0.1:5433/orizabil"\n');
+  try {
+    const result = run(ctx);
+    assert.equal(result.status, 0, result.stderr);
+    const out = fs.readFileSync(ctx.sqlFile, 'utf8');
+    assert.match(out, /^\tserver = "127\.0\.0\.1"$/m);
+    assert.match(out, /^\tport = 5433$/m);
+    assert.match(out, /^\tlogin = "oriza"$/m);
+    assert.match(out, /^\tpassword = "Pass\.w0rd!x"$/m);
+    assert.match(out, /^\tradius_db = "orizabil"$/m);
+    assert.match(out, /^\tdialect = "postgresql"$/m);
+    assert.match(out, /^\tdriver = "rlm_sql_postgresql"$/m);
+  } finally {
+    fs.rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
 test('write-sql-mod: menolak password tidak aman dan .env tanpa kredensial (tidak menulis apa pun)', () => {
   for (const env of [
     'DB_USER=oriza\nDB_PASSWORD="ab$cdefgh"\nDB_NAME=orizabil\n',

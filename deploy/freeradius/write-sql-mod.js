@@ -212,14 +212,30 @@ function verify(lines, conf) {
   if (depth !== 0) fail(4, 'verifikasi: kurung kurawal tidak seimbang');
 }
 
+// Cadangan bila DB_* tidak diisi: postgresql://USER:PASSWORD@HOST:PORT/DB
+function fromDatabaseUrl(raw) {
+  if (!raw) return null;
+  let parsed;
+  try { parsed = new URL(raw); } catch { return null; }
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') return null;
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//, '').split('/')[0]);
+  return {
+    user: decodeURIComponent(parsed.username || ''),
+    password: decodeURIComponent(parsed.password || ''),
+    database,
+    port: parsed.port ? Number.parseInt(parsed.port, 10) : 5432,
+  };
+}
+
 function main() {
   if (!fs.existsSync(ENV_FILE)) fail(2, `.env tidak ditemukan: ${ENV_FILE}`);
   const env = parseEnv(ENV_FILE);
+  const fromUrl = fromDatabaseUrl(env.DATABASE_URL || '');
   const conf = {
-    user: env.DB_USER || '',
-    password: env.DB_PASSWORD || '',
-    database: env.DB_NAME || '',
-    port: Number.parseInt(env.DB_PORT || '5432', 10),
+    user: env.DB_USER || (fromUrl && fromUrl.user) || '',
+    password: env.DB_PASSWORD || (fromUrl && fromUrl.password) || '',
+    database: env.DB_NAME || (fromUrl && fromUrl.database) || '',
+    port: Number.parseInt(env.DB_PORT || (fromUrl ? String(fromUrl.port) : '5432'), 10),
   };
   if (!IDENT_RE.test(conf.user)) fail(2, 'DB_USER di .env kosong/tidak valid');
   if (!IDENT_RE.test(conf.database)) fail(2, 'DB_NAME di .env kosong/tidak valid');
